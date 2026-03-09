@@ -4,12 +4,14 @@
 //! RustClaw uses engramai as a direct Rust dependency — zero IPC overhead.
 
 use engramai::{Memory, MemoryConfig, MemoryType};
+use std::sync::Mutex;
 
 use crate::config::Config;
 
 /// Memory manager wrapping Engram with RustClaw-specific logic.
+/// Uses Mutex instead of async RwLock because rusqlite isn't Send+Sync.
 pub struct MemoryManager {
-    engram: Memory,
+    engram: Mutex<Memory>,
     auto_recall: bool,
     auto_store: bool,
     recall_limit: usize,
@@ -29,7 +31,7 @@ impl MemoryManager {
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         Ok(Self {
-            engram,
+            engram: Mutex::new(engram),
             auto_recall: config.memory.auto_recall,
             auto_store: config.memory.auto_store,
             recall_limit: config.memory.recall_limit,
@@ -38,13 +40,13 @@ impl MemoryManager {
 
     /// Recall relevant memories for a user message.
     /// Called by BeforeInbound hook.
-    pub fn recall(&mut self, query: &str) -> anyhow::Result<Vec<RecalledMemory>> {
+    pub fn recall(&self, query: &str) -> anyhow::Result<Vec<RecalledMemory>> {
         if !self.auto_recall {
             return Ok(Vec::new());
         }
 
-        let results = self
-            .engram
+        let mut engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let results = engram
             .recall(query, self.recall_limit, None, None)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -62,7 +64,7 @@ impl MemoryManager {
     /// Store important information from a conversation turn.
     /// Called by BeforeOutbound hook.
     pub fn store(
-        &mut self,
+        &self,
         content: &str,
         memory_type: MemoryType,
         importance: f64,
@@ -72,15 +74,17 @@ impl MemoryManager {
             return Ok(());
         }
 
-        self.engram
+        let mut engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        engram
             .add(content, memory_type, Some(importance), source, None)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         Ok(())
     }
 
     /// Run memory consolidation (during heartbeats).
-    pub fn consolidate(&mut self) -> anyhow::Result<()> {
-        self.engram
+    pub fn consolidate(&self) -> anyhow::Result<()> {
+        let mut engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        engram
             .consolidate(7.0)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         Ok(())
@@ -88,8 +92,8 @@ impl MemoryManager {
 
     /// Get memory stats.
     pub fn stats(&self) -> anyhow::Result<serde_json::Value> {
-        let stats = self
-            .engram
+        let engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let stats = engram
             .stats()
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         Ok(serde_json::to_value(stats)?)

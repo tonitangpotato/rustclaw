@@ -24,7 +24,7 @@ use crate::workspace::Workspace;
 pub struct AgentRunner {
     config: Config,
     workspace: Workspace,
-    memory: Arc<RwLock<MemoryManager>>,
+    memory: MemoryManager,
     sessions: SessionManager,
     hooks: Arc<RwLock<HookRegistry>>,
     tools: ToolRegistry,
@@ -45,7 +45,7 @@ impl AgentRunner {
         Self {
             config,
             workspace,
-            memory: Arc::new(RwLock::new(memory)),
+            memory,
             sessions,
             hooks: Arc::new(RwLock::new(hooks)),
             tools,
@@ -90,15 +90,14 @@ impl AgentRunner {
 
         // 3. Recall relevant memories
         let memory_context = {
-            let mut mem = self.memory.write().await;
-            match mem.recall(user_message) {
+            match self.memory.recall(user_message) {
                 Ok(memories) if !memories.is_empty() => {
                     tracing::info!("Recalled {} memories", memories.len());
                     MemoryManager::format_for_prompt(&memories)
                 }
                 _ => String::new(),
             }
-        };
+        }; // memory recall
 
         // 4. Build system prompt
         let mut system_prompt = self.workspace.build_system_prompt();

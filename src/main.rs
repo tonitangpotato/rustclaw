@@ -1,6 +1,7 @@
 mod agent;
 mod channels;
 mod config;
+mod heartbeat;
 mod hooks;
 mod llm;
 mod memory;
@@ -85,6 +86,17 @@ async fn main() -> anyhow::Result<()> {
 
             // Build agent runner
             let runner = agent::AgentRunner::new(cfg.clone(), ws, mem, sessions, hook_registry, tools);
+
+            // Start channels (wraps runner in Arc)
+            let runner = std::sync::Arc::new(runner);
+
+            // Start heartbeat
+            heartbeat::start_heartbeat(
+                runner.clone(),
+                cfg.heartbeat_interval,
+                "heartbeat:main",
+            )
+            .await?;
 
             // Start channels
             channels::start_gateway(cfg, runner).await?;

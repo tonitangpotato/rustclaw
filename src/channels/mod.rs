@@ -6,8 +6,7 @@ use crate::agent::AgentRunner;
 use crate::config::Config;
 
 /// Start the messaging gateway with all configured channels.
-pub async fn start_gateway(config: Config, runner: AgentRunner) -> anyhow::Result<()> {
-    let runner = std::sync::Arc::new(runner);
+pub async fn start_gateway(config: Config, runner: std::sync::Arc<AgentRunner>) -> anyhow::Result<()> {
 
     // Start Telegram if configured
     if let Some(tg_config) = &config.channels.telegram {
