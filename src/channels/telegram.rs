@@ -32,20 +32,35 @@ impl TelegramBot {
         format!("{}/bot{}/{}", TELEGRAM_API, self.token, method)
     }
 
-    /// Send a text message.
+    /// Send a text message with MarkdownV2 formatting, falling back to plain text.
     async fn send_message(&self, chat_id: i64, text: &str) -> anyhow::Result<()> {
         // Split long messages (Telegram limit: 4096 chars)
         let chunks = split_message(text, 4096);
         for chunk in chunks {
-            self.client
+            // Try MarkdownV2 first
+            let escaped = escape_markdown_v2(chunk);
+            let response = self.client
                 .post(self.api_url("sendMessage"))
                 .json(&serde_json::json!({
                     "chat_id": chat_id,
-                    "text": chunk,
-                    "parse_mode": "Markdown",
+                    "text": escaped,
+                    "parse_mode": "MarkdownV2",
                 }))
                 .send()
                 .await?;
+
+            // If MarkdownV2 fails (400 error), retry without parse_mode
+            if response.status().as_u16() == 400 {
+                tracing::debug!("MarkdownV2 failed, retrying without parse_mode");
+                self.client
+                    .post(self.api_url("sendMessage"))
+                    .json(&serde_json::json!({
+                        "chat_id": chat_id,
+                        "text": chunk,
+                    }))
+                    .send()
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -223,6 +238,22 @@ impl TelegramBot {
             }
         }
     }
+}
+
+/// Escape special characters for Telegram MarkdownV2.
+/// Characters that need escaping: _ * [ ] ( ) ~ ` > # + - = | { } . !
+fn escape_markdown_v2(text: &str) -> String {
+    let special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!'];
+    let mut result = String::with_capacity(text.len() * 2);
+    
+    for c in text.chars() {
+        if special_chars.contains(&c) {
+            result.push('\\');
+        }
+        result.push(c);
+    }
+    
+    result
 }
 
 /// Split a message into chunks respecting Telegram's character limit.
