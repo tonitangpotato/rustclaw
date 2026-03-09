@@ -9,6 +9,7 @@ mod llm;
 mod memory;
 mod session;
 mod tools;
+mod tts;
 mod workspace;
 
 use clap::Parser;

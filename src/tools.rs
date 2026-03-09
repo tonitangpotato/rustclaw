@@ -48,6 +48,8 @@ impl ToolRegistry {
         registry.register(Box::new(WriteFileTool::new(workspace_root)));
         registry.register(Box::new(ListDirTool::new(workspace_root)));
         registry.register(Box::new(WebFetchTool));
+        registry.register(Box::new(EditFileTool::new(workspace_root)));
+        registry.register(Box::new(SearchFilesTool::new(workspace_root)));
         registry
     }
 
@@ -508,4 +510,209 @@ fn strip_html_basic(html: &str) -> String {
     }
 
     result.trim().to_string()
+}
+
+// ─── Edit File Tool ──────────────────────────────────────────
+
+/// Surgical file editing — find and replace exact text.
+pub struct EditFileTool {
+    workspace_root: String,
+}
+
+impl EditFileTool {
+    pub fn new(workspace_root: &str) -> Self {
+        Self {
+            workspace_root: workspace_root.to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for EditFileTool {
+    fn name(&self) -> &str {
+        "edit_file"
+    }
+
+    fn description(&self) -> &str {
+        "Edit a file by replacing exact text. The old_string must match exactly (including whitespace)."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to edit"
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": "Exact text to find and replace"
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "New text to replace with"
+                }
+            },
+            "required": ["path", "old_string", "new_string"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let path_str = input["path"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
+        let old_string = input["old_string"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing 'old_string'"))?;
+        let new_string = input["new_string"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing 'new_string'"))?;
+
+        let path = if std::path::Path::new(path_str).is_absolute() {
+            std::path::PathBuf::from(path_str)
+        } else {
+            std::path::PathBuf::from(&self.workspace_root).join(path_str)
+        };
+
+        if !path.exists() {
+            return Ok(ToolResult {
+                output: format!("File not found: {}", path.display()),
+                is_error: true,
+            });
+        }
+
+        let content = tokio::fs::read_to_string(&path).await?;
+
+        let count = content.matches(old_string).count();
+        if count == 0 {
+            return Ok(ToolResult {
+                output: "old_string not found in file. Make sure it matches exactly (including whitespace).".to_string(),
+                is_error: true,
+            });
+        }
+        if count > 1 {
+            return Ok(ToolResult {
+                output: format!("old_string found {} times. It must be unique. Add more context to disambiguate.", count),
+                is_error: true,
+            });
+        }
+
+        let new_content = content.replacen(old_string, new_string, 1);
+        tokio::fs::write(&path, &new_content).await?;
+
+        Ok(ToolResult {
+            output: format!("Edited {}", path.display()),
+            is_error: false,
+        })
+    }
+}
+
+// ─── Search Files Tool ───────────────────────────────────────
+
+/// Search for text patterns across files (like grep).
+pub struct SearchFilesTool {
+    workspace_root: String,
+}
+
+impl SearchFilesTool {
+    pub fn new(workspace_root: &str) -> Self {
+        Self {
+            workspace_root: workspace_root.to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for SearchFilesTool {
+    fn name(&self) -> &str {
+        "search_files"
+    }
+
+    fn description(&self) -> &str {
+        "Search for a text pattern in files (recursive grep). Returns matching lines with file paths."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Text pattern to search for"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Directory to search in (default: workspace root)"
+                },
+                "file_pattern": {
+                    "type": "string",
+                    "description": "File name pattern to match (e.g. '*.rs', '*.md')"
+                }
+            },
+            "required": ["pattern"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let pattern = input["pattern"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing 'pattern'"))?;
+        let search_path = input["path"].as_str().unwrap_or(".");
+        let file_pattern = input["file_pattern"].as_str();
+
+        let path = if std::path::Path::new(search_path).is_absolute() {
+            std::path::PathBuf::from(search_path)
+        } else {
+            std::path::PathBuf::from(&self.workspace_root).join(search_path)
+        };
+
+        // Use grep for efficiency
+        let mut cmd_str = format!(
+            "grep -rn --include='*.rs' --include='*.md' --include='*.toml' --include='*.yaml' --include='*.yml' --include='*.json' --include='*.txt' --include='*.py' --include='*.ts' --include='*.js' {} {}",
+            shell_escape(pattern),
+            shell_escape(path.to_str().unwrap_or("."))
+        );
+
+        if let Some(fp) = file_pattern {
+            cmd_str = format!(
+                "grep -rn --include='{}' {} {}",
+                fp,
+                shell_escape(pattern),
+                shell_escape(path.to_str().unwrap_or("."))
+            );
+        }
+
+        let output = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(&cmd_str)
+            .output()
+            .await?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        if stdout.is_empty() {
+            return Ok(ToolResult {
+                output: format!("No matches found for '{}'", pattern),
+                is_error: false,
+            });
+        }
+
+        // Limit output
+        let result = if stdout.len() > 30_000 {
+            format!("{}\n... (truncated, too many matches)", &stdout[..30_000])
+        } else {
+            stdout.to_string()
+        };
+
+        Ok(ToolResult {
+            output: result,
+            is_error: false,
+        })
+    }
+}
+
+/// Simple shell escaping for command arguments.
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
