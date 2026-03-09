@@ -8,6 +8,7 @@ mod heartbeat;
 mod hooks;
 mod llm;
 mod memory;
+mod safety;
 mod session;
 mod tools;
 mod tts;
@@ -76,8 +77,10 @@ async fn main() -> anyhow::Result<()> {
             let mem = memory::MemoryManager::new(&cfg, &workspace_dir).await?;
             tracing::info!("Memory initialized");
 
-            // Initialize hooks
-            let hook_registry = hooks::HookRegistry::new();
+            // Initialize hooks with safety checks
+            let mut hook_registry = hooks::HookRegistry::new();
+            hook_registry.register(Box::new(safety::PromptInjectionHook));
+            hook_registry.register(Box::new(safety::SensitiveLeakHook));
             tracing::info!("Hook system ready ({} hooks)", hook_registry.count());
 
             // Initialize session manager
