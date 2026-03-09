@@ -169,7 +169,10 @@ impl AnthropicClient {
             .unwrap_or_else(|| "https://api.anthropic.com".to_string());
 
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()?,
             auth,
             model: config.model.clone(),
             max_tokens: config.max_tokens,
@@ -229,6 +232,12 @@ impl LlmClient for AnthropicClient {
 
         loop {
             attempt += 1;
+
+            tracing::info!(
+                "LLM request attempt {}/{} → model={} url={}/v1/messages auth={}",
+                attempt, MAX_RETRIES, self.model, self.base_url,
+                match &self.auth { AuthMode::OAuthToken(_) => "oauth", AuthMode::ApiKey(_) => "api_key" }
+            );
 
             let mut req = self
                 .client

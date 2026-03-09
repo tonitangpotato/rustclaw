@@ -201,6 +201,15 @@ impl AgentRunner {
             session.total_tokens +=
                 (response.usage.input_tokens + response.usage.output_tokens) as u64;
 
+            tracing::info!(
+                "LLM response: tokens={}/{} stop={:?} tool_calls={} text_len={}",
+                response.usage.input_tokens,
+                response.usage.output_tokens,
+                response.stop_reason,
+                response.tool_calls.len(),
+                response.text.as_ref().map(|t| t.len()).unwrap_or(0)
+            );
+
             if let Some(text) = &response.text {
                 response_text = text.clone();
             }
@@ -208,6 +217,8 @@ impl AgentRunner {
             if response.tool_calls.is_empty() {
                 // No tool calls — add final assistant message and break
                 if !response_text.is_empty() {
+                    tracing::info!("Final response ({} chars): {}...", response_text.len(),
+                        &response_text[..response_text.len().min(100)]);
                     session
                         .messages
                         .push(Message::text("assistant", &response_text));
