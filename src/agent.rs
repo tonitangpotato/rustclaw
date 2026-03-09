@@ -1,11 +1,11 @@
 //! Core agent runner — the brain of RustClaw.
 //!
-//! Implements the agent loop:
+//! Implements the agentic loop:
 //! 1. Receive message
 //! 2. Run BeforeInbound hooks (Engram recall)
 //! 3. Build system prompt from workspace
-//! 4. Call LLM
-//! 5. If tool calls → execute tools → loop back to LLM
+//! 4. Call LLM with tools
+//! 5. If tool calls → execute tools → feed results back → loop
 //! 6. Run BeforeOutbound hooks (Engram store)
 //! 7. Return response
 
@@ -108,12 +108,12 @@ impl AgentRunner {
         }
 
         // 5. Add user message to session
-        session.add_message("user", user_message);
+        session.messages.push(Message::text("user", user_message));
 
         // 6. Get tool definitions
         let tool_defs = self.tools.definitions();
 
-        // 7. Agent loop (LLM call + tool execution)
+        // 7. Agentic loop
         let max_turns = 30;
         let mut response_text = String::new();
 
@@ -126,39 +126,28 @@ impl AgentRunner {
             session.total_tokens +=
                 (response.usage.input_tokens + response.usage.output_tokens) as u64;
 
-            // Collect text content
-            if let Some(text) = &response.content {
+            if let Some(text) = &response.text {
                 response_text = text.clone();
             }
 
             if response.tool_calls.is_empty() {
-                // No tool calls — we're done
+                // No tool calls — add final assistant message and break
+                if !response_text.is_empty() {
+                    session
+                        .messages
+                        .push(Message::text("assistant", &response_text));
+                }
                 break;
             }
 
-            // Execute tool calls
+            // Add assistant message with tool calls
             tracing::info!("Turn {}: {} tool call(s)", turn, response.tool_calls.len());
+            session.messages.push(Message::assistant_with_tools(
+                response.text.as_deref(),
+                response.tool_calls.clone(),
+            ));
 
-            // Add assistant message with tool calls to session
-            let tool_call_json: Vec<serde_json::Value> = response
-                .tool_calls
-                .iter()
-                .map(|tc| {
-                    serde_json::json!({
-                        "type": "tool_use",
-                        "id": tc.id,
-                        "name": tc.name,
-                        "input": tc.input,
-                    })
-                })
-                .collect();
-
-            session.add_message(
-                "assistant",
-                &serde_json::to_string(&tool_call_json)?,
-            );
-
-            // Execute each tool and build results
+            // Execute each tool
             let mut tool_results = Vec::new();
             for tc in &response.tool_calls {
                 // Run BeforeToolCall hook
@@ -175,12 +164,11 @@ impl AgentRunner {
                     if let HookOutcome::Reject(reason) =
                         hooks.run(HookPoint::BeforeToolCall, &mut tc_ctx).await?
                     {
-                        tool_results.push(serde_json::json!({
-                            "type": "tool_result",
-                            "tool_use_id": tc.id,
-                            "content": format!("Tool call rejected: {}", reason),
-                            "is_error": true,
-                        }));
+                        tool_results.push((
+                            tc.id.clone(),
+                            format!("Tool call rejected: {}", reason),
+                            true,
+                        ));
                         continue;
                     }
                 }
@@ -193,24 +181,14 @@ impl AgentRunner {
                     result.is_error
                 );
 
-                tool_results.push(serde_json::json!({
-                    "type": "tool_result",
-                    "tool_use_id": tc.id,
-                    "content": result.output,
-                    "is_error": result.is_error,
-                }));
+                tool_results.push((tc.id.clone(), result.output, result.is_error));
             }
 
             // Add tool results as user message
-            session.add_message("user", &serde_json::to_string(&tool_results)?);
+            session.messages.push(Message::tool_results(tool_results));
         }
 
-        // 8. Add final response to session
-        if !response_text.is_empty() {
-            session.add_message("assistant", &response_text);
-        }
-
-        // 9. Run BeforeOutbound hooks
+        // 8. Run BeforeOutbound hooks
         {
             let mut out_ctx = HookContext {
                 session_key: session_key.to_string(),
@@ -225,7 +203,7 @@ impl AgentRunner {
             hooks.run(HookPoint::BeforeOutbound, &mut out_ctx).await?;
         }
 
-        // 10. Update session
+        // 9. Update session
         self.sessions.update(session).await;
 
         Ok(response_text)

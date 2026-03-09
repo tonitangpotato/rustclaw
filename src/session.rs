@@ -1,4 +1,4 @@
-//! Session management with SQLite persistence.
+//! Session management with in-memory storage (SQLite persistence TODO).
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,7 @@ use crate::config::Config;
 use crate::llm::Message;
 
 /// A conversation session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Session {
     pub key: String,
     pub messages: Vec<Message>,
@@ -34,20 +34,11 @@ impl Session {
             user_id: None,
         }
     }
-
-    pub fn add_message(&mut self, role: &str, content: &str) {
-        self.messages.push(Message {
-            role: role.to_string(),
-            content: content.to_string(),
-        });
-        self.updated_at = Utc::now().to_rfc3339();
-    }
 }
 
 /// Manages all active sessions.
 pub struct SessionManager {
     sessions: Arc<RwLock<HashMap<String, Session>>>,
-    // TODO: SQLite persistence
 }
 
 impl SessionManager {
@@ -70,11 +61,5 @@ impl SessionManager {
     pub async fn update(&self, session: Session) {
         let mut sessions = self.sessions.write().await;
         sessions.insert(session.key.clone(), session);
-    }
-
-    /// List all active sessions.
-    pub async fn list(&self) -> Vec<Session> {
-        let sessions = self.sessions.read().await;
-        sessions.values().cloned().collect()
     }
 }

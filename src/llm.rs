@@ -1,16 +1,86 @@
 //! LLM provider abstraction.
 //!
 //! Supports Anthropic (Claude) natively, with extensibility for OpenAI and others.
+//! Uses proper Anthropic Messages API content blocks for tool_use/tool_result.
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::{self, LlmConfig};
 
-/// A message in the conversation.
+/// A content block in a message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        is_error: bool,
+    },
+}
+
+/// A message in the conversation (with proper content blocks).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
-    pub content: String,
+    pub content: Vec<ContentBlock>,
+}
+
+impl Message {
+    /// Create a simple text message.
+    pub fn text(role: &str, text: &str) -> Self {
+        Self {
+            role: role.to_string(),
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+            }],
+        }
+    }
+
+    /// Create an assistant message with tool use blocks.
+    pub fn assistant_with_tools(text: Option<&str>, tool_calls: Vec<ToolCall>) -> Self {
+        let mut content = Vec::new();
+        if let Some(t) = text {
+            content.push(ContentBlock::Text {
+                text: t.to_string(),
+            });
+        }
+        for tc in tool_calls {
+            content.push(ContentBlock::ToolUse {
+                id: tc.id,
+                name: tc.name,
+                input: tc.input,
+            });
+        }
+        Self {
+            role: "assistant".to_string(),
+            content,
+        }
+    }
+
+    /// Create a user message with tool results.
+    pub fn tool_results(results: Vec<(String, String, bool)>) -> Self {
+        Self {
+            role: "user".to_string(),
+            content: results
+                .into_iter()
+                .map(|(id, output, is_error)| ContentBlock::ToolResult {
+                    tool_use_id: id,
+                    content: output,
+                    is_error,
+                })
+                .collect(),
+        }
+    }
 }
 
 /// A tool definition for the LLM.
@@ -32,7 +102,7 @@ pub struct ToolCall {
 /// LLM response.
 #[derive(Debug, Clone)]
 pub struct LlmResponse {
-    pub content: Option<String>,
+    pub text: Option<String>,
     pub tool_calls: Vec<ToolCall>,
     pub stop_reason: String,
     pub usage: Usage,
@@ -97,22 +167,20 @@ impl LlmClient for AnthropicClient {
             "model": self.model,
             "max_tokens": self.max_tokens,
             "system": system,
-            "messages": messages.iter().map(|m| {
-                serde_json::json!({
-                    "role": m.role,
-                    "content": m.content,
-                })
-            }).collect::<Vec<_>>(),
+            "messages": serde_json::to_value(messages)?,
         });
 
         if !tools.is_empty() {
-            body["tools"] = serde_json::json!(tools.iter().map(|t| {
-                serde_json::json!({
-                    "name": t.name,
-                    "description": t.description,
-                    "input_schema": t.input_schema,
+            body["tools"] = serde_json::json!(tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": t.input_schema,
+                    })
                 })
-            }).collect::<Vec<_>>());
+                .collect::<Vec<_>>());
         }
 
         let resp = self
@@ -135,15 +203,18 @@ impl LlmClient for AnthropicClient {
             anyhow::bail!("Anthropic API error ({}): {}", status, error_msg);
         }
 
-        // Parse response
-        let mut content = None;
+        // Parse response content blocks
+        let mut text = None;
         let mut tool_calls = Vec::new();
 
         if let Some(content_blocks) = resp_body["content"].as_array() {
+            let mut text_parts = Vec::new();
             for block in content_blocks {
                 match block["type"].as_str() {
                     Some("text") => {
-                        content = block["text"].as_str().map(String::from);
+                        if let Some(t) = block["text"].as_str() {
+                            text_parts.push(t.to_string());
+                        }
                     }
                     Some("tool_use") => {
                         tool_calls.push(ToolCall {
@@ -155,21 +226,24 @@ impl LlmClient for AnthropicClient {
                     _ => {}
                 }
             }
+            if !text_parts.is_empty() {
+                text = Some(text_parts.join("\n"));
+            }
         }
 
         let usage = Usage {
             input_tokens: resp_body["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32,
             output_tokens: resp_body["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32,
-            cache_read: resp_body["usage"]["cache_creation_input_tokens"]
+            cache_read: resp_body["usage"]["cache_read_input_tokens"]
                 .as_u64()
                 .unwrap_or(0) as u32,
-            cache_write: resp_body["usage"]["cache_read_input_tokens"]
+            cache_write: resp_body["usage"]["cache_creation_input_tokens"]
                 .as_u64()
                 .unwrap_or(0) as u32,
         };
 
         Ok(LlmResponse {
-            content,
+            text,
             tool_calls,
             stop_reason: resp_body["stop_reason"]
                 .as_str()
