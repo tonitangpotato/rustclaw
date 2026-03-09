@@ -61,6 +61,18 @@ impl AgentRunner {
         user_id: Option<&str>,
         channel: Option<&str>,
     ) -> anyhow::Result<String> {
+        self.process_message_with_options(session_key, user_message, user_id, channel, false).await
+    }
+
+    /// Process an incoming message with additional options.
+    pub async fn process_message_with_options(
+        &self,
+        session_key: &str,
+        user_message: &str,
+        user_id: Option<&str>,
+        channel: Option<&str>,
+        is_heartbeat: bool,
+    ) -> anyhow::Result<String> {
         tracing::info!(
             "Processing message for session={} user={:?}",
             session_key,
@@ -99,10 +111,10 @@ impl AgentRunner {
             }
         }; // memory recall
 
-        // 4. Build system prompt
-        let mut system_prompt = self.workspace.build_system_prompt();
+        // 4. Build system prompt (include HEARTBEAT.md if this is a heartbeat poll)
+        let mut system_prompt = self.workspace.build_system_prompt_with_options(is_heartbeat);
         if !memory_context.is_empty() {
-            system_prompt.push_str("\n\n");
+            system_prompt.push_str("\n\n## Relevant Memories\n");
             system_prompt.push_str(&memory_context);
         }
 

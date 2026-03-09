@@ -10,6 +10,7 @@
 //! - IDENTITY.md — agent identity
 //! - BOOTSTRAP.md — first-run setup
 
+use chrono::Local;
 use std::path::{Path, PathBuf};
 
 /// Workspace context loaded from markdown files.
@@ -57,28 +58,60 @@ impl Workspace {
 
     /// Build the system prompt from workspace files.
     pub fn build_system_prompt(&self) -> String {
-        let mut parts = Vec::new();
+        self.build_system_prompt_with_options(false)
+    }
+
+    /// Build the system prompt with optional heartbeat context.
+    pub fn build_system_prompt_with_options(&self, is_heartbeat: bool) -> String {
+        let current_time = Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
+        let workspace_path = self.root.display().to_string();
+
+        let mut output = format!(
+            "You are an AI assistant running on RustClaw.\n\
+             Current time: {}\n\
+             Workspace: {}\n\n\
+             ## Your Context Files\n",
+            current_time, workspace_path
+        );
 
         if let Some(soul) = &self.soul {
-            parts.push(format!("## SOUL.md\n{soul}"));
+            output.push_str("\n### SOUL.md\n");
+            output.push_str(soul);
+            output.push_str("\n");
         }
         if let Some(agents) = &self.agents {
-            parts.push(format!("## AGENTS.md\n{agents}"));
+            output.push_str("\n### AGENTS.md\n");
+            output.push_str(agents);
+            output.push_str("\n");
         }
         if let Some(user) = &self.user {
-            parts.push(format!("## USER.md\n{user}"));
+            output.push_str("\n### USER.md\n");
+            output.push_str(user);
+            output.push_str("\n");
         }
         if let Some(tools) = &self.tools {
-            parts.push(format!("## TOOLS.md\n{tools}"));
+            output.push_str("\n### TOOLS.md\n");
+            output.push_str(tools);
+            output.push_str("\n");
         }
         if let Some(identity) = &self.identity {
-            parts.push(format!("## IDENTITY.md\n{identity}"));
+            output.push_str("\n### IDENTITY.md\n");
+            output.push_str(identity);
+            output.push_str("\n");
         }
 
-        // MEMORY.md only in main session (security)
-        // HEARTBEAT.md injected separately during heartbeat polls
+        // Include HEARTBEAT.md content during heartbeat polls
+        if is_heartbeat {
+            if let Some(heartbeat) = &self.heartbeat {
+                output.push_str("\n### HEARTBEAT.md\n");
+                output.push_str(heartbeat);
+                output.push_str("\n");
+            }
+        }
 
-        parts.join("\n\n---\n\n")
+        // MEMORY.md only in main session (security) - handled separately
+
+        output
     }
 
     /// Read a file if it exists, return None otherwise.

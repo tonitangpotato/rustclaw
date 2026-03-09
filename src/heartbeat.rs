@@ -36,7 +36,7 @@ pub async fn start_heartbeat(
                 If nothing needs attention, reply HEARTBEAT_OK.";
 
             match runner
-                .process_message(&session_key, prompt, None, None)
+                .process_message_with_options(&session_key, prompt, None, None, true)
                 .await
             {
                 Ok(response) => {
