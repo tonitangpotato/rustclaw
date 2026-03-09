@@ -6,9 +6,14 @@
 //! - Agent definitions (for multi-agent)
 //! - Memory settings
 //! - Hook configuration
+//! - Sandbox settings
+//! - Dashboard settings
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+
+use crate::dashboard::DashboardConfig;
+use crate::sandbox::SandboxConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -45,6 +50,18 @@ pub struct Config {
     /// Cron jobs
     #[serde(default)]
     pub cron: Vec<CronJobConfig>,
+
+    /// Orchestrator (CEO multi-agent) configuration.
+    #[serde(default)]
+    pub orchestrator: OrchestratorConfig,
+
+    /// Sandbox configuration for tool execution.
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
+
+    /// Web dashboard configuration.
+    #[serde(default)]
+    pub dashboard: DashboardConfig,
 }
 
 fn default_max_session_messages() -> usize {
@@ -239,6 +256,56 @@ pub struct CronJobConfig {
 
     /// Whether the job is enabled (default: true).
     pub enabled: Option<bool>,
+}
+
+/// Orchestrator (CEO multi-agent) configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OrchestratorConfig {
+    /// Whether the orchestrator is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Tick interval in seconds (how often to check for tasks).
+    #[serde(default = "default_tick_interval")]
+    pub tick_interval: u64,
+
+    /// Maximum concurrent tasks across all agents.
+    #[serde(default = "default_max_concurrent")]
+    pub max_concurrent: u32,
+
+    /// Specialist agent definitions.
+    #[serde(default)]
+    pub specialists: Vec<SpecialistConfig>,
+}
+
+fn default_tick_interval() -> u64 {
+    60
+}
+
+fn default_max_concurrent() -> u32 {
+    3
+}
+
+/// Specialist agent configuration (for orchestrator).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpecialistConfig {
+    /// Unique agent ID.
+    pub id: String,
+
+    /// Display name.
+    pub name: Option<String>,
+
+    /// Role for task matching (e.g., "builder", "visibility", "trading").
+    pub role: String,
+
+    /// Workspace directory (git worktree path).
+    pub workspace: Option<String>,
+
+    /// Model override.
+    pub model: Option<String>,
+
+    /// Token budget for this agent (None = unlimited).
+    pub budget_tokens: Option<u64>,
 }
 
 /// Load config from a YAML file.

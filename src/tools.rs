@@ -11,6 +11,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::memory::MemoryManager;
+use crate::orchestrator::{SharedOrchestrator, Task};
 
 /// Result of a tool execution.
 #[derive(Debug, Clone, Serialize)]
@@ -63,6 +64,17 @@ impl ToolRegistry {
         let mut registry = Self::with_defaults(workspace_root);
         registry.register(Box::new(EngramRecallTool::new(memory.clone())));
         registry.register(Box::new(EngramStoreTool::new(memory)));
+        registry
+    }
+
+    /// Register all default tools including memory and orchestrator tools.
+    pub fn with_defaults_and_orchestrator(
+        workspace_root: &str,
+        memory: Arc<MemoryManager>,
+        orchestrator: SharedOrchestrator,
+    ) -> Self {
+        let mut registry = Self::with_defaults_and_memory(workspace_root, memory);
+        registry.register(Box::new(DelegateTaskTool::new(orchestrator)));
         registry
     }
 
@@ -901,5 +913,107 @@ impl Tool for EngramStoreTool {
                 is_error: true,
             }),
         }
+    }
+}
+
+// ─── Delegate Task Tool ──────────────────────────────────────
+
+/// Delegate a task to a specialist agent via the orchestrator.
+pub struct DelegateTaskTool {
+    orchestrator: SharedOrchestrator,
+}
+
+impl DelegateTaskTool {
+    pub fn new(orchestrator: SharedOrchestrator) -> Self {
+        Self { orchestrator }
+    }
+}
+
+#[async_trait]
+impl Tool for DelegateTaskTool {
+    fn name(&self) -> &str {
+        "delegate_task"
+    }
+
+    fn description(&self) -> &str {
+        "Delegate a task to a specialist agent. The task will be queued and assigned to an appropriate agent based on role matching. Use this for complex or time-consuming tasks that can be handled by specialist agents (e.g., builder, visibility, trading)."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "Detailed description of the task for the specialist agent"
+                },
+                "roles": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Roles that can handle this task (e.g., ['builder'], ['visibility']). Leave empty to allow any specialist."
+                },
+                "priority": {
+                    "type": "integer",
+                    "description": "Priority (0=highest, 255=lowest). Default: 100"
+                },
+                "budget_tokens": {
+                    "type": "integer",
+                    "description": "Maximum tokens this task can use (optional)"
+                }
+            },
+            "required": ["description"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let description = input["description"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing 'description' parameter"))?;
+
+        let roles: Vec<String> = input["roles"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let priority = input["priority"].as_u64().unwrap_or(100) as u8;
+
+        let budget_tokens = input["budget_tokens"].as_u64();
+
+        // Generate task ID
+        let task_id = format!("task_{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
+
+        // Create the task
+        let mut task = Task::new(&task_id, description)
+            .with_priority(priority)
+            .with_roles(roles.clone());
+
+        if let Some(budget) = budget_tokens {
+            task = task.with_budget(budget);
+        }
+
+        // Submit to orchestrator
+        {
+            let mut orch = self.orchestrator.write().await;
+            orch.submit_task(task);
+        }
+
+        Ok(ToolResult {
+            output: format!(
+                "Task '{}' submitted to orchestrator.\n- Description: {}\n- Roles: {:?}\n- Priority: {}\nThe task will be assigned to an appropriate specialist agent.",
+                task_id,
+                if description.len() > 100 {
+                    format!("{}...", &description[..100])
+                } else {
+                    description.to_string()
+                },
+                if roles.is_empty() { vec!["any".to_string()] } else { roles },
+                priority
+            ),
+            is_error: false,
+        })
     }
 }

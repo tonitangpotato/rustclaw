@@ -4,11 +4,15 @@ mod agent;
 mod channels;
 mod config;
 mod cron;
+mod dashboard;
 mod heartbeat;
 mod hooks;
 mod llm;
 mod memory;
+mod orchestrator;
+mod plugins;
 mod reload;
+mod sandbox;
 mod safety;
 mod session;
 mod stt;
@@ -89,9 +93,47 @@ async fn main() -> anyhow::Result<()> {
             let sessions = session::SessionManager::new(&cfg).await?;
             tracing::info!("Session manager ready");
 
-            // Initialize tools with memory access for engram_recall/engram_store
-            let tools = tools::ToolRegistry::with_defaults_and_memory(&workspace_dir, mem.clone());
+            // Initialize orchestrator (if enabled)
+            let orch = if cfg.orchestrator.enabled {
+                tracing::info!(
+                    "Orchestrator enabled: {} specialist(s), tick interval {}s",
+                    cfg.orchestrator.specialists.len(),
+                    cfg.orchestrator.tick_interval
+                );
+                Some(orchestrator::create_orchestrator(cfg.orchestrator.clone()))
+            } else {
+                tracing::info!("Orchestrator disabled");
+                None
+            };
+
+            // Initialize tools with memory and orchestrator access
+            let tools = if let Some(ref orch_ref) = orch {
+                tools::ToolRegistry::with_defaults_and_orchestrator(
+                    &workspace_dir,
+                    mem.clone(),
+                    orch_ref.clone(),
+                )
+            } else {
+                tools::ToolRegistry::with_defaults_and_memory(&workspace_dir, mem.clone())
+            };
             tracing::info!("Tools registered: {}", tools.definitions().len());
+
+            // Initialize plugin registry
+            let mut plugin_registry = plugins::PluginRegistry::new();
+            // Register built-in plugins here if needed
+            // plugin_registry.register(Box::new(plugins::ExamplePlugin));
+
+            // Load plugins
+            let plugin_ctx = plugins::PluginContext::new(
+                &workspace_dir,
+                std::sync::Arc::new(cfg.clone()),
+                mem.clone(),
+            );
+            if let Err(e) = plugin_registry.load_all(&plugin_ctx).await {
+                tracing::error!("Failed to load plugins: {}", e);
+            } else {
+                tracing::info!("Plugin system ready ({} plugins)", plugin_registry.count());
+            }
 
             // Build agent runner
             let runner = agent::AgentRunner::new(cfg.clone(), ws, mem, sessions, hook_registry, tools);
@@ -118,6 +160,19 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!("Starting {} cron job(s)...", cron_jobs.len());
                 cron::start_cron(cron_jobs, runner.clone()).await?;
             }
+
+            // Start orchestrator tick loop (if enabled)
+            if let Some(ref orch_ref) = orch {
+                let tick_interval = cfg.orchestrator.tick_interval;
+                let orch_clone = orch_ref.clone();
+                let runner_clone = runner.clone();
+                tokio::spawn(async move {
+                    orchestrator::start_orchestrator_loop(orch_clone, runner_clone, tick_interval).await;
+                });
+            }
+
+            // Start web dashboard (if enabled)
+            dashboard::start_dashboard(cfg.dashboard.clone(), cfg.clone(), runner.clone()).await?;
 
             // Start channels
             channels::start_gateway(cfg, runner).await?;

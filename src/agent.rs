@@ -18,6 +18,7 @@ use crate::config::{AgentConfig, Config};
 use crate::hooks::{HookContext, HookOutcome, HookPoint, HookRegistry};
 use crate::llm::{self, LlmClient, Message, StreamChunk};
 use crate::memory::MemoryManager;
+use crate::sandbox::WasmSandbox;
 use crate::session::{summarize_old_messages, SessionManager};
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
@@ -42,6 +43,8 @@ pub struct AgentRunner {
     llm_client: Box<dyn LlmClient>,
     /// Optional LLM client for summarization (uses cheaper model)
     summary_llm: Option<Box<dyn LlmClient>>,
+    /// Sandbox for tool execution
+    sandbox: WasmSandbox,
 }
 
 impl AgentRunner {
@@ -68,6 +71,13 @@ impl AgentRunner {
                 config.summary_model.as_ref().unwrap());
         }
 
+        // Initialize sandbox
+        let sandbox = WasmSandbox::new(&config.sandbox);
+        if sandbox.is_enabled() {
+            tracing::info!("Tool sandbox enabled with {} tool configurations", 
+                config.sandbox.tools.len());
+        }
+
         Self {
             config,
             workspace,
@@ -77,6 +87,7 @@ impl AgentRunner {
             tools,
             llm_client,
             summary_llm,
+            sandbox,
         }
     }
 
@@ -237,15 +248,23 @@ impl AgentRunner {
                     }
                 }
 
-                let result = self.tools.execute(&tc.name, tc.input.clone()).await?;
-                tracing::info!(
-                    "Tool {} → {} chars, error={}",
-                    tc.name,
-                    result.output.len(),
-                    result.is_error
-                );
-
-                tool_results.push((tc.id.clone(), result.output, result.is_error));
+                // Execute tool with sandbox enforcement
+                let result = self.execute_tool_sandboxed(&tc.name, tc.input.clone()).await;
+                match result {
+                    Ok(tool_result) => {
+                        tracing::info!(
+                            "Tool {} → {} chars, error={}",
+                            tc.name,
+                            tool_result.output.len(),
+                            tool_result.is_error
+                        );
+                        tool_results.push((tc.id.clone(), tool_result.output, tool_result.is_error));
+                    }
+                    Err(e) => {
+                        tracing::warn!("Tool {} sandbox error: {}", tc.name, e);
+                        tool_results.push((tc.id.clone(), format!("Sandbox error: {}", e), true));
+                    }
+                }
             }
 
             // Add tool results as user message
@@ -271,6 +290,37 @@ impl AgentRunner {
         self.sessions.update(session).await;
 
         Ok(response_text)
+    }
+
+    /// Execute a tool with sandbox enforcement.
+    /// Checks capabilities, enforces timeouts, and validates path access.
+    async fn execute_tool_sandboxed(
+        &self,
+        tool_name: &str,
+        input: serde_json::Value,
+    ) -> Result<crate::tools::ToolResult, crate::sandbox::SandboxError> {
+        use std::time::Duration;
+        use crate::sandbox::SandboxError;
+
+        // If sandbox is disabled, execute directly
+        if !self.sandbox.is_enabled() {
+            return self.tools.execute(tool_name, input)
+                .await
+                .map_err(SandboxError::ExecutionError);
+        }
+
+        // Check capabilities before execution
+        self.sandbox.check_tool_capabilities(tool_name, &input)?;
+
+        // Get timeout for this tool
+        let timeout_ms = self.sandbox.get_timeout_ms(tool_name);
+        let timeout = Duration::from_millis(timeout_ms);
+
+        // Execute with timeout
+        match tokio::time::timeout(timeout, self.tools.execute(tool_name, input)).await {
+            Ok(result) => result.map_err(SandboxError::ExecutionError),
+            Err(_) => Err(SandboxError::Timeout(tool_name.to_string(), timeout_ms)),
+        }
     }
 
     /// Spawn a sub-agent with a different workspace and optional model override.
@@ -521,15 +571,23 @@ impl AgentRunner {
                     }
                 }
 
-                let result = self.tools.execute(&tc.name, tc.input.clone()).await?;
-                tracing::info!(
-                    "Tool {} → {} chars, error={}",
-                    tc.name,
-                    result.output.len(),
-                    result.is_error
-                );
-
-                tool_results.push((tc.id.clone(), result.output, result.is_error));
+                // Execute tool with sandbox enforcement
+                let result = self.execute_tool_sandboxed(&tc.name, tc.input.clone()).await;
+                match result {
+                    Ok(tool_result) => {
+                        tracing::info!(
+                            "Tool {} → {} chars, error={}",
+                            tc.name,
+                            tool_result.output.len(),
+                            tool_result.is_error
+                        );
+                        tool_results.push((tc.id.clone(), tool_result.output, tool_result.is_error));
+                    }
+                    Err(e) => {
+                        tracing::warn!("Tool {} sandbox error: {}", tc.name, e);
+                        tool_results.push((tc.id.clone(), format!("Sandbox error: {}", e), true));
+                    }
+                }
             }
 
             // Add tool results as user message
