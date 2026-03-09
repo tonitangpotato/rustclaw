@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::agent::AgentRunner;
 use crate::config::TelegramConfig;
+use crate::stt;
 use crate::tts::{synthesize, TtsConfig};
 
 const TELEGRAM_API: &str = "https://api.telegram.org";
@@ -96,10 +97,15 @@ impl TelegramBot {
         let user_id = message["from"]["id"].as_i64().unwrap_or(0);
         let text = message["text"].as_str().unwrap_or("");
 
+        // Handle voice messages
+        if let Some(voice) = message.get("voice") {
+            return self.handle_voice_message(chat_id, user_id, voice).await;
+        }
+
         if text.is_empty() {
-            // Check for voice message
-            if message.get("voice").is_some() || message.get("audio").is_some() {
-                self.send_message(chat_id, "🎤 Voice messages not yet supported. Please type your message.").await?;
+            // Check for audio (not voice note)
+            if message.get("audio").is_some() {
+                self.send_message(chat_id, "🎵 Audio files not yet supported. Please send a voice message.").await?;
                 return Ok(());
             }
             return Ok(());
@@ -198,6 +204,143 @@ impl TelegramBot {
             return Some(rest.trim().to_string());
         }
         None
+    }
+
+    /// Handle a voice message by downloading, transcribing, and processing.
+    async fn handle_voice_message(
+        &self,
+        chat_id: i64,
+        user_id: i64,
+        voice: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        // Check access first
+        if !self.config.allowed_users.is_empty()
+            && !self.config.allowed_users.contains(&user_id)
+        {
+            tracing::warn!("Unauthorized user for voice: {}", user_id);
+            return Ok(());
+        }
+
+        let file_id = match voice["file_id"].as_str() {
+            Some(id) => id,
+            None => {
+                self.send_message(chat_id, "⚠️ Could not get voice file ID").await?;
+                return Ok(());
+            }
+        };
+
+        tracing::info!("Voice message from user {} in chat {}", user_id, chat_id);
+
+        // Send "typing" indicator
+        let _ = self
+            .client
+            .post(self.api_url("sendChatAction"))
+            .json(&serde_json::json!({
+                "chat_id": chat_id,
+                "action": "typing",
+            }))
+            .send()
+            .await;
+
+        // Step 1: Get file path via getFile API
+        let file_info = self
+            .client
+            .post(self.api_url("getFile"))
+            .json(&serde_json::json!({ "file_id": file_id }))
+            .send()
+            .await?
+            .json::<serde_json::Value>()
+            .await?;
+
+        let file_path = match file_info["result"]["file_path"].as_str() {
+            Some(path) => path,
+            None => {
+                self.send_message(chat_id, "⚠️ Could not get file path from Telegram").await?;
+                return Ok(());
+            }
+        };
+
+        // Step 2: Download the file
+        let download_url = format!(
+            "{}/file/bot{}/{}",
+            TELEGRAM_API, self.token, file_path
+        );
+        
+        let file_bytes = self
+            .client
+            .get(&download_url)
+            .send()
+            .await?
+            .bytes()
+            .await?;
+
+        // Save to temp file
+        let ogg_path = "/tmp/rustclaw_voice_in.ogg";
+        tokio::fs::write(ogg_path, &file_bytes).await?;
+        tracing::debug!("Downloaded voice to {}", ogg_path);
+
+        // Step 3: Transcribe using STT
+        let transcription = stt::transcribe(ogg_path).await?;
+        tracing::info!("Transcribed: {}", &transcription[..transcription.len().min(50)]);
+
+        // Clean up the input file
+        let _ = tokio::fs::remove_file(ogg_path).await;
+
+        // Step 4: Process through agent with [Voice message] prefix
+        let user_message = format!("[Voice message] {}", transcription);
+        let session_key = format!("telegram:{}", chat_id);
+        let user_id_str = user_id.to_string();
+
+        match self
+            .runner
+            .process_message(&session_key, &user_message, Some(&user_id_str), Some("telegram"))
+            .await
+        {
+            Ok(response) => {
+                let trimmed = response.trim();
+                if !trimmed.is_empty()
+                    && trimmed != "NO_REPLY"
+                    && trimmed != "HEARTBEAT_OK"
+                {
+                    // Check if response should be sent as voice
+                    if let Some(voice_text) = Self::extract_voice_text(trimmed) {
+                        // Send "recording voice" indicator
+                        let _ = self
+                            .client
+                            .post(self.api_url("sendChatAction"))
+                            .json(&serde_json::json!({
+                                "chat_id": chat_id,
+                                "action": "record_voice",
+                            }))
+                            .send()
+                            .await;
+
+                        // Synthesize TTS
+                        let tts_config = TtsConfig::default();
+                        match synthesize(&voice_text, &tts_config).await {
+                            Ok(ogg_path) => {
+                                if let Err(e) = self.send_voice(chat_id, &ogg_path).await {
+                                    tracing::error!("Failed to send voice: {}", e);
+                                    self.send_message(chat_id, trimmed).await?;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("TTS synthesis failed: {}", e);
+                                self.send_message(chat_id, trimmed).await?;
+                            }
+                        }
+                    } else {
+                        self.send_message(chat_id, trimmed).await?;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Agent error: {}", e);
+                self.send_message(chat_id, &format!("⚠️ Error: {}", e)).await?;
+            }
+        }
+
+        Ok(())
     }
 
     /// Run the long-polling loop.

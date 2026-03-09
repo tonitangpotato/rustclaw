@@ -10,6 +10,7 @@ mod llm;
 mod memory;
 mod safety;
 mod session;
+mod stt;
 mod tools;
 mod tts;
 mod workspace;
