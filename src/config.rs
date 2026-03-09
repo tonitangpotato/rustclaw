@@ -34,9 +34,17 @@ pub struct Config {
     #[serde(default = "default_heartbeat_interval")]
     pub heartbeat_interval: u64,
 
+    /// Maximum messages to keep in session history (default: 40)
+    #[serde(default = "default_max_session_messages")]
+    pub max_session_messages: usize,
+
     /// Cron jobs
     #[serde(default)]
     pub cron: Vec<CronJobConfig>,
+}
+
+fn default_max_session_messages() -> usize {
+    40
 }
 
 fn default_heartbeat_interval() -> u64 {

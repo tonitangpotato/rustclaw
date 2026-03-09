@@ -121,10 +121,13 @@ impl AgentRunner {
         // 5. Add user message to session
         session.messages.push(Message::text("user", user_message));
 
-        // 6. Get tool definitions
+        // 6. Trim messages to stay within context window
+        session.trim_messages(self.config.max_session_messages);
+
+        // 7. Get tool definitions
         let tool_defs = self.tools.definitions();
 
-        // 7. Agentic loop
+        // 8. Agentic loop
         let max_turns = 30;
         let mut response_text = String::new();
 
@@ -199,7 +202,7 @@ impl AgentRunner {
             session.messages.push(Message::tool_results(tool_results));
         }
 
-        // 8. Run BeforeOutbound hooks
+        // 9. Run BeforeOutbound hooks
         {
             let mut out_ctx = HookContext {
                 session_key: session_key.to_string(),
@@ -214,7 +217,7 @@ impl AgentRunner {
             hooks.run(HookPoint::BeforeOutbound, &mut out_ctx).await?;
         }
 
-        // 9. Update session
+        // 10. Update session
         self.sessions.update(session).await;
 
         Ok(response_text)

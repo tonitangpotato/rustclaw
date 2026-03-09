@@ -34,6 +34,42 @@ impl Session {
             user_id: None,
         }
     }
+
+    /// Trim messages to stay within context window limits.
+    /// Keeps the first message (system context if present) and last N messages.
+    pub fn trim_messages(&mut self, max_messages: usize) {
+        if self.messages.len() <= max_messages {
+            return;
+        }
+
+        // If we have at least 2 messages and the first is "system" role, keep it
+        let has_system_first = self.messages.first()
+            .map(|m| m.role == "system")
+            .unwrap_or(false);
+
+        if has_system_first && self.messages.len() > 1 {
+            // Keep first message + last (max_messages - 1) messages
+            let keep_from_end = max_messages.saturating_sub(1);
+            let start_idx = self.messages.len() - keep_from_end;
+            
+            let first_msg = self.messages[0].clone();
+            let tail: Vec<_> = self.messages[start_idx..].to_vec();
+            
+            self.messages.clear();
+            self.messages.push(first_msg);
+            self.messages.extend(tail);
+        } else {
+            // No system message, just keep last N messages
+            let start_idx = self.messages.len() - max_messages;
+            self.messages = self.messages[start_idx..].to_vec();
+        }
+
+        tracing::debug!(
+            "Trimmed session '{}' to {} messages",
+            self.key,
+            self.messages.len()
+        );
+    }
 }
 
 /// Manages all active sessions with SQLite backing.
