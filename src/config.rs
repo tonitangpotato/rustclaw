@@ -62,6 +62,46 @@ pub struct Config {
     /// Web dashboard configuration.
     #[serde(default)]
     pub dashboard: DashboardConfig,
+
+    /// Session search configuration.
+    #[serde(default)]
+    pub search: SearchConfig,
+
+    /// Trajectory export configuration.
+    #[serde(default)]
+    pub export: ExportConfig,
+
+    /// Browser control configuration.
+    #[serde(default)]
+    pub browser: BrowserConfig,
+
+    /// Auto skill generation configuration.
+    #[serde(default)]
+    pub skills: SkillsConfig,
+
+    /// Distributed messaging configuration.
+    #[serde(default)]
+    pub distributed: DistributedConfig,
+
+    /// Serverless runtime configuration.
+    #[serde(default)]
+    pub serverless: ServerlessConfig,
+
+    /// GID task graph configuration.
+    #[serde(default)]
+    pub gid: GidConfig,
+
+    /// Git worktree management configuration.
+    #[serde(default)]
+    pub worktree: WorktreeConfig,
+
+    /// Credential proxy configuration.
+    #[serde(default)]
+    pub credential: CredentialConfig,
+
+    /// User modeling configuration.
+    #[serde(default)]
+    pub user_model: UserModelConfig,
 }
 
 fn default_max_session_messages() -> usize {
@@ -112,6 +152,8 @@ pub struct ChannelsConfig {
     pub discord: Option<DiscordConfig>,
     pub slack: Option<SlackConfig>,
     pub signal: Option<SignalConfig>,
+    pub whatsapp: Option<crate::channels::whatsapp::WhatsAppConfig>,
+    pub matrix: Option<crate::channels::matrix::MatrixConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -359,4 +401,286 @@ pub fn resolve_auth(config: &LlmConfig) -> anyhow::Result<AuthMode> {
     };
 
     anyhow::bail!("No auth found. Set api_key/auth_token in config or via {} env var.", env_var)
+}
+
+// ─── New Feature Configs ─────────────────────────────────────
+
+/// Session search configuration (FTS5).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchConfig {
+    /// Whether session search is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Path to the search database.
+    #[serde(default = "default_search_db")]
+    pub db_path: String,
+}
+
+fn default_search_db() -> String {
+    "search.db".to_string()
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            db_path: default_search_db(),
+        }
+    }
+}
+
+/// Trajectory export configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportConfig {
+    /// Whether trajectory export is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Output directory for exported trajectories.
+    #[serde(default = "default_export_dir")]
+    pub output_dir: String,
+}
+
+fn default_export_dir() -> String {
+    "trajectories".to_string()
+}
+
+impl Default for ExportConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            output_dir: default_export_dir(),
+        }
+    }
+}
+
+/// Browser control configuration (CDP).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserConfig {
+    /// Whether browser control is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Chrome DevTools debug URL.
+    #[serde(default = "default_browser_url")]
+    pub debug_url: String,
+}
+
+fn default_browser_url() -> String {
+    "http://localhost:9222".to_string()
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            debug_url: default_browser_url(),
+        }
+    }
+}
+
+/// Auto skill generation configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillsConfig {
+    /// Whether skill generation is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Directory to store generated skills.
+    #[serde(default = "default_skills_dir")]
+    pub skills_dir: String,
+
+    /// Minimum complexity score to trigger skill generation.
+    #[serde(default = "default_min_complexity")]
+    pub min_complexity: f32,
+}
+
+fn default_skills_dir() -> String {
+    ".skills".to_string()
+}
+
+fn default_min_complexity() -> f32 {
+    0.7
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            skills_dir: default_skills_dir(),
+            min_complexity: default_min_complexity(),
+        }
+    }
+}
+
+/// Distributed messaging configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistributedConfig {
+    /// Whether distributed messaging is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Unique node ID for this instance.
+    #[serde(default = "default_node_id")]
+    pub node_id: String,
+
+    /// Address to listen for incoming connections.
+    #[serde(default = "default_listen_addr")]
+    pub listen_addr: String,
+
+    /// Peer node configurations.
+    #[serde(default)]
+    pub peers: Vec<PeerConfig>,
+}
+
+fn default_node_id() -> String {
+    format!("node-{}", uuid::Uuid::new_v4().to_string()[..8].to_string())
+}
+
+fn default_listen_addr() -> String {
+    "0.0.0.0:9000".to_string()
+}
+
+impl Default for DistributedConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            node_id: default_node_id(),
+            listen_addr: default_listen_addr(),
+            peers: Vec::new(),
+        }
+    }
+}
+
+/// Peer node configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerConfig {
+    /// Peer node ID.
+    pub node_id: String,
+    /// Peer address (host:port).
+    pub address: String,
+}
+
+/// Serverless runtime configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerlessConfig {
+    /// Whether serverless mode is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Idle timeout in seconds before hibernation.
+    #[serde(default = "default_idle_timeout")]
+    pub idle_timeout_secs: u64,
+
+    /// Directory for storing hibernated state.
+    #[serde(default = "default_state_dir")]
+    pub state_dir: String,
+}
+
+fn default_idle_timeout() -> u64 {
+    300 // 5 minutes
+}
+
+fn default_state_dir() -> String {
+    ".rustclaw/hibernated".to_string()
+}
+
+impl Default for ServerlessConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            idle_timeout_secs: default_idle_timeout(),
+            state_dir: default_state_dir(),
+        }
+    }
+}
+
+/// GID task graph configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GidConfig {
+    /// Whether GID is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Path to the graph YAML file.
+    #[serde(default = "default_graph_path")]
+    pub graph_path: String,
+}
+
+fn default_graph_path() -> String {
+    ".gid/graph.yml".to_string()
+}
+
+impl Default for GidConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            graph_path: default_graph_path(),
+        }
+    }
+}
+
+/// Git worktree management configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorktreeConfig {
+    /// Whether worktree management is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Directory for storing worktrees.
+    #[serde(default = "default_worktrees_dir")]
+    pub worktrees_dir: String,
+}
+
+fn default_worktrees_dir() -> String {
+    ".rustclaw/worktrees".to_string()
+}
+
+impl Default for WorktreeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            worktrees_dir: default_worktrees_dir(),
+        }
+    }
+}
+
+/// Credential proxy configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialConfig {
+    /// Whether credential proxy is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Path to the encrypted credentials file.
+    #[serde(default = "default_credentials_file")]
+    pub credentials_file: String,
+}
+
+fn default_credentials_file() -> String {
+    ".rustclaw/credentials.enc".to_string()
+}
+
+impl Default for CredentialConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            credentials_file: default_credentials_file(),
+        }
+    }
+}
+
+/// User modeling configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserModelConfig {
+    /// Whether user modeling is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+impl Default for UserModelConfig {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
 }

@@ -574,10 +574,412 @@ fn extract_sse_event(buffer: &mut String) -> Option<String> {
     None
 }
 
+// ─── OpenAI Client ───────────────────────────────────────────
+
+/// OpenAI API client.
+pub struct OpenAIClient {
+    client: reqwest::Client,
+    api_key: String,
+    model: String,
+    max_tokens: u32,
+    base_url: String,
+}
+
+impl OpenAIClient {
+    pub fn new(config: &LlmConfig) -> anyhow::Result<Self> {
+        let api_key = config
+            .api_key
+            .clone()
+            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+            .ok_or_else(|| anyhow::anyhow!("OpenAI API key not found"))?;
+
+        let base_url = config
+            .base_url
+            .clone()
+            .unwrap_or_else(|| "https://api.openai.com".to_string());
+
+        Ok(Self {
+            client: reqwest::Client::new(),
+            api_key,
+            model: config.model.clone(),
+            max_tokens: config.max_tokens,
+            base_url,
+        })
+    }
+
+    /// Convert internal messages to OpenAI format.
+    fn convert_messages(&self, system: &str, messages: &[Message]) -> Vec<serde_json::Value> {
+        let mut result = vec![serde_json::json!({
+            "role": "system",
+            "content": system
+        })];
+
+        for msg in messages {
+            // Extract text content from content blocks
+            let content: Vec<serde_json::Value> = msg
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(serde_json::json!({
+                        "type": "text",
+                        "text": text
+                    })),
+                    ContentBlock::ToolUse { id, name, input } => Some(serde_json::json!({
+                        "type": "function",
+                        "id": id,
+                        "function": {
+                            "name": name,
+                            "arguments": input.to_string()
+                        }
+                    })),
+                    ContentBlock::ToolResult { tool_use_id, content, .. } => Some(serde_json::json!({
+                        "type": "tool_result",
+                        "tool_call_id": tool_use_id,
+                        "content": content
+                    })),
+                })
+                .collect();
+
+            // For simple text messages, just use string content
+            if content.len() == 1 {
+                if let Some(text) = content[0].get("text") {
+                    result.push(serde_json::json!({
+                        "role": msg.role,
+                        "content": text
+                    }));
+                    continue;
+                }
+            }
+
+            result.push(serde_json::json!({
+                "role": msg.role,
+                "content": content
+            }));
+        }
+
+        result
+    }
+
+    /// Convert internal tools to OpenAI format.
+    fn convert_tools(&self, tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
+        tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema
+                    }
+                })
+            })
+            .collect()
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmClient for OpenAIClient {
+    async fn chat(
+        &self,
+        system: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> anyhow::Result<LlmResponse> {
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "messages": self.convert_messages(system, messages),
+        });
+
+        if !tools.is_empty() {
+            body["tools"] = serde_json::json!(self.convert_tools(tools));
+        }
+
+        let resp = self
+            .client
+            .post(format!("{}/v1/chat/completions", self.base_url))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let resp_body: serde_json::Value = resp.json().await?;
+
+        if !status.is_success() {
+            let error_msg = resp_body["error"]["message"]
+                .as_str()
+                .unwrap_or("Unknown error");
+            anyhow::bail!("OpenAI API error ({}): {}", status, error_msg);
+        }
+
+        // Parse response
+        let choice = &resp_body["choices"][0];
+        let msg = &choice["message"];
+
+        let text = msg["content"].as_str().map(|s| s.to_string());
+
+        let mut tool_calls = Vec::new();
+        if let Some(calls) = msg["tool_calls"].as_array() {
+            for call in calls {
+                let func = &call["function"];
+                tool_calls.push(ToolCall {
+                    id: call["id"].as_str().unwrap_or("").to_string(),
+                    name: func["name"].as_str().unwrap_or("").to_string(),
+                    input: serde_json::from_str(func["arguments"].as_str().unwrap_or("{}"))
+                        .unwrap_or(serde_json::json!({})),
+                });
+            }
+        }
+
+        let usage = Usage {
+            input_tokens: resp_body["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32,
+            output_tokens: resp_body["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32,
+            cache_read: 0,
+            cache_write: 0,
+        };
+
+        Ok(LlmResponse {
+            text,
+            tool_calls,
+            stop_reason: choice["finish_reason"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string(),
+            usage,
+        })
+    }
+
+    async fn chat_stream(
+        &self,
+        system: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<StreamChunk>> {
+        // For now, just do non-streaming and convert to stream format
+        let response = self.chat(system, messages, tools).await?;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(10);
+
+        tokio::spawn(async move {
+            if let Some(text) = response.text {
+                let _ = tx.send(StreamChunk::Text(text)).await;
+            }
+            for tc in response.tool_calls {
+                let _ = tx.send(StreamChunk::ToolUse(tc)).await;
+            }
+            let _ = tx.send(StreamChunk::Done(response.usage, response.stop_reason)).await;
+        });
+
+        Ok(rx)
+    }
+}
+
+// ─── Google Client ───────────────────────────────────────────
+
+/// Google Generative AI client.
+pub struct GoogleClient {
+    client: reqwest::Client,
+    api_key: String,
+    model: String,
+    max_tokens: u32,
+}
+
+impl GoogleClient {
+    pub fn new(config: &LlmConfig) -> anyhow::Result<Self> {
+        let api_key = config
+            .api_key
+            .clone()
+            .or_else(|| std::env::var("GOOGLE_API_KEY").ok())
+            .ok_or_else(|| anyhow::anyhow!("Google API key not found"))?;
+
+        Ok(Self {
+            client: reqwest::Client::new(),
+            api_key,
+            model: config.model.clone(),
+            max_tokens: config.max_tokens,
+        })
+    }
+
+    /// Convert messages to Google format.
+    fn convert_messages(&self, system: &str, messages: &[Message]) -> (String, Vec<serde_json::Value>) {
+        let mut contents = Vec::new();
+
+        for msg in messages {
+            let role = match msg.role.as_str() {
+                "user" => "user",
+                "assistant" => "model",
+                _ => "user",
+            };
+
+            let parts: Vec<serde_json::Value> = msg
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(serde_json::json!({ "text": text })),
+                    _ => None,
+                })
+                .collect();
+
+            if !parts.is_empty() {
+                contents.push(serde_json::json!({
+                    "role": role,
+                    "parts": parts
+                }));
+            }
+        }
+
+        (system.to_string(), contents)
+    }
+
+    /// Convert tools to Google format.
+    fn convert_tools(&self, tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
+        if tools.is_empty() {
+            return Vec::new();
+        }
+
+        let function_declarations: Vec<serde_json::Value> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.input_schema
+                })
+            })
+            .collect();
+
+        vec![serde_json::json!({
+            "function_declarations": function_declarations
+        })]
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmClient for GoogleClient {
+    async fn chat(
+        &self,
+        system: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> anyhow::Result<LlmResponse> {
+        let (system_instruction, contents) = self.convert_messages(system, messages);
+
+        let mut body = serde_json::json!({
+            "system_instruction": {
+                "parts": [{ "text": system_instruction }]
+            },
+            "contents": contents,
+            "generationConfig": {
+                "maxOutputTokens": self.max_tokens
+            }
+        });
+
+        let converted_tools = self.convert_tools(tools);
+        if !converted_tools.is_empty() {
+            body["tools"] = serde_json::json!(converted_tools);
+        }
+
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            self.model, self.api_key
+        );
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let resp_body: serde_json::Value = resp.json().await?;
+
+        if !status.is_success() {
+            let error_msg = resp_body["error"]["message"]
+                .as_str()
+                .unwrap_or("Unknown error");
+            anyhow::bail!("Google API error ({}): {}", status, error_msg);
+        }
+
+        // Parse response
+        let candidate = &resp_body["candidates"][0];
+        let content = &candidate["content"];
+
+        let mut text = None;
+        let mut tool_calls = Vec::new();
+
+        if let Some(parts) = content["parts"].as_array() {
+            for part in parts {
+                if let Some(t) = part["text"].as_str() {
+                    text = Some(t.to_string());
+                }
+                if let Some(fc) = part.get("functionCall") {
+                    tool_calls.push(ToolCall {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        name: fc["name"].as_str().unwrap_or("").to_string(),
+                        input: fc["args"].clone(),
+                    });
+                }
+            }
+        }
+
+        let usage = Usage {
+            input_tokens: resp_body["usageMetadata"]["promptTokenCount"]
+                .as_u64()
+                .unwrap_or(0) as u32,
+            output_tokens: resp_body["usageMetadata"]["candidatesTokenCount"]
+                .as_u64()
+                .unwrap_or(0) as u32,
+            cache_read: 0,
+            cache_write: 0,
+        };
+
+        Ok(LlmResponse {
+            text,
+            tool_calls,
+            stop_reason: candidate["finishReason"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string(),
+            usage,
+        })
+    }
+
+    async fn chat_stream(
+        &self,
+        system: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<StreamChunk>> {
+        // For now, just do non-streaming
+        let response = self.chat(system, messages, tools).await?;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(10);
+
+        tokio::spawn(async move {
+            if let Some(text) = response.text {
+                let _ = tx.send(StreamChunk::Text(text)).await;
+            }
+            for tc in response.tool_calls {
+                let _ = tx.send(StreamChunk::ToolUse(tc)).await;
+            }
+            let _ = tx.send(StreamChunk::Done(response.usage, response.stop_reason)).await;
+        });
+
+        Ok(rx)
+    }
+}
+
 /// Create an LLM client based on config.
 pub fn create_client(config: &LlmConfig) -> anyhow::Result<Box<dyn LlmClient>> {
     match config.provider.as_str() {
         "anthropic" => Ok(Box::new(AnthropicClient::new(config)?)),
-        other => anyhow::bail!("Unsupported LLM provider: {}", other),
+        "openai" => Ok(Box::new(OpenAIClient::new(config)?)),
+        "google" => Ok(Box::new(GoogleClient::new(config)?)),
+        other => anyhow::bail!("Unsupported LLM provider: {}. Supported: anthropic, openai, google", other),
     }
 }

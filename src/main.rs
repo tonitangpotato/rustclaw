@@ -1,10 +1,15 @@
 #![allow(dead_code)]
 
 mod agent;
+mod browser;
 mod channels;
 mod config;
+mod credential;
 mod cron;
 mod dashboard;
+mod distributed;
+mod export;
+mod gid;
 mod heartbeat;
 mod hooks;
 mod llm;
@@ -14,10 +19,15 @@ mod plugins;
 mod reload;
 mod sandbox;
 mod safety;
+mod search;
+mod serverless;
 mod session;
+mod skills;
 mod stt;
 mod tools;
 mod tts;
+mod user_model;
+mod worktree;
 mod workspace;
 
 use clap::Parser;

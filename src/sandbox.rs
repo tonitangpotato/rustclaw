@@ -406,6 +406,152 @@ impl PartialEq for ToolCapabilities {
     }
 }
 
+// ─── Docker Sandbox ──────────────────────────────────────────
+
+/// Sandbox mode for tool execution.
+#[derive(Debug, Clone)]
+pub enum SandboxMode {
+    /// Use capability-based sandboxing (current implementation).
+    Capabilities,
+    /// Use Docker container isolation.
+    Docker {
+        /// Docker image to use.
+        image: String,
+        /// Whether to enable network in the container.
+        network: bool,
+        /// Volume mounts: (host_path, container_path).
+        mounts: Vec<(String, String)>,
+    },
+}
+
+impl Default for SandboxMode {
+    fn default() -> Self {
+        SandboxMode::Capabilities
+    }
+}
+
+/// Docker sandbox for running commands in an isolated container.
+pub struct DockerSandbox {
+    image: String,
+    network: bool,
+    mounts: Vec<(String, String)>,
+    timeout_ms: u64,
+}
+
+impl DockerSandbox {
+    /// Create a new Docker sandbox.
+    pub fn new(image: &str) -> Self {
+        Self {
+            image: image.to_string(),
+            network: false,
+            mounts: Vec::new(),
+            timeout_ms: 30_000,
+        }
+    }
+
+    /// Set whether network is enabled in the container.
+    pub fn with_network(mut self, enabled: bool) -> Self {
+        self.network = enabled;
+        self
+    }
+
+    /// Add a volume mount.
+    pub fn with_mount(mut self, host_path: &str, container_path: &str) -> Self {
+        self.mounts.push((host_path.to_string(), container_path.to_string()));
+        self
+    }
+
+    /// Set the execution timeout.
+    pub fn with_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.timeout_ms = timeout_ms;
+        self
+    }
+
+    /// Execute a command inside the Docker container.
+    pub async fn execute(&self, command: &str) -> anyhow::Result<String> {
+        let mut args = vec!["run", "--rm"];
+
+        // Network settings
+        if !self.network {
+            args.push("--network");
+            args.push("none");
+        }
+
+        // Memory limit (256MB default)
+        args.push("--memory");
+        args.push("256m");
+
+        // CPU limit
+        args.push("--cpus");
+        args.push("1.0");
+
+        // Security: no new privileges
+        args.push("--security-opt");
+        args.push("no-new-privileges");
+
+        // Add mounts
+        let mount_strings: Vec<String> = self
+            .mounts
+            .iter()
+            .map(|(h, c)| format!("{}:{}", h, c))
+            .collect();
+        for mount in &mount_strings {
+            args.push("-v");
+            args.push(mount);
+        }
+
+        // Image and command
+        args.push(&self.image);
+        args.push("sh");
+        args.push("-c");
+        args.push(command);
+
+        let output = tokio::time::timeout(
+            Duration::from_millis(self.timeout_ms),
+            tokio::process::Command::new("docker")
+                .args(&args)
+                .output(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Docker execution timed out after {}ms", self.timeout_ms))?
+        .map_err(|e| anyhow::anyhow!("Failed to execute docker: {}", e))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "Docker command failed (exit {}): {}{}",
+                output.status.code().unwrap_or(-1),
+                stdout,
+                if !stderr.is_empty() {
+                    format!("\nSTDERR: {}", stderr)
+                } else {
+                    String::new()
+                }
+            );
+        }
+
+        let mut result = stdout.to_string();
+        if !stderr.is_empty() {
+            result.push_str("\nSTDERR: ");
+            result.push_str(&stderr);
+        }
+
+        Ok(result)
+    }
+
+    /// Check if Docker is available on the system.
+    pub async fn is_available() -> bool {
+        tokio::process::Command::new("docker")
+            .arg("version")
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

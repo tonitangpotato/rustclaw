@@ -261,7 +261,8 @@ async fn get_tasks(State(_state): State<Arc<DashboardState>>) -> impl IntoRespon
 }
 
 async fn get_agents(State(state): State<Arc<DashboardState>>) -> impl IntoResponse {
-    let agents: Vec<AgentInfo> = state
+    // Get agents from config (defined agents)
+    let mut agents: Vec<AgentInfo> = state
         .config
         .agents
         .iter()
@@ -274,6 +275,20 @@ async fn get_agents(State(state): State<Arc<DashboardState>>) -> impl IntoRespon
             status: "idle".to_string(),
         })
         .collect();
+
+    // Also include orchestrator specialists if configured
+    if state.config.orchestrator.enabled {
+        for spec in &state.config.orchestrator.specialists {
+            agents.push(AgentInfo {
+                id: spec.id.clone(),
+                name: spec.name.clone().unwrap_or_else(|| spec.id.clone()),
+                model: spec.model.clone(),
+                workspace: spec.workspace.clone(),
+                is_default: false,
+                status: format!("specialist:{}", spec.role),
+            });
+        }
+    }
 
     let total = agents.len();
     Json(AgentsResponse { agents, total })

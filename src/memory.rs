@@ -15,6 +15,8 @@ pub struct MemoryManager {
     auto_recall: bool,
     auto_store: bool,
     recall_limit: usize,
+    /// Optional namespace prefix for multi-agent isolation.
+    namespace: Option<String>,
 }
 
 impl MemoryManager {
@@ -35,7 +37,38 @@ impl MemoryManager {
             auto_recall: config.memory.auto_recall,
             auto_store: config.memory.auto_store,
             recall_limit: config.memory.recall_limit,
+            namespace: None,
         })
+    }
+
+    /// Set a namespace prefix for memory isolation.
+    ///
+    /// When a namespace is set, all memory operations are prefixed with the namespace,
+    /// allowing multiple agents to share the same Engram database without collision.
+    pub fn with_namespace(mut self, namespace: &str) -> Self {
+        self.namespace = Some(namespace.to_string());
+        self
+    }
+
+    /// Get the current namespace.
+    pub fn namespace(&self) -> Option<&str> {
+        self.namespace.as_deref()
+    }
+
+    /// Apply namespace prefix to content if namespace is set.
+    fn namespaced_content(&self, content: &str) -> String {
+        match &self.namespace {
+            Some(ns) => format!("[{}] {}", ns, content),
+            None => content.to_string(),
+        }
+    }
+
+    /// Apply namespace prefix to query if namespace is set.
+    fn namespaced_query(&self, query: &str) -> String {
+        match &self.namespace {
+            Some(ns) => format!("[{}] {}", ns, query),
+            None => query.to_string(),
+        }
     }
 
     /// Recall relevant memories for a user message.

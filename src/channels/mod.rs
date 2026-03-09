@@ -3,9 +3,11 @@
 //! Each channel implements the `Channel` trait for a unified interface.
 
 pub mod discord;
+pub mod matrix;
 pub mod signal;
 pub mod slack;
 pub mod telegram;
+pub mod whatsapp;
 
 use std::sync::Arc;
 
@@ -82,6 +84,32 @@ pub async fn start_gateway(
         handles.push(tokio::spawn(async move {
             if let Err(e) = signal::start(signal_config, runner).await {
                 tracing::error!("Signal channel error: {}", e);
+            }
+        }));
+    }
+
+    // Start WhatsApp if configured
+    if let Some(wa_config) = &config.channels.whatsapp {
+        tracing::info!("Starting WhatsApp channel...");
+        any_channel = true;
+        let wa_config = wa_config.clone();
+        let runner = runner.clone();
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = whatsapp::start(wa_config, runner).await {
+                tracing::error!("WhatsApp channel error: {}", e);
+            }
+        }));
+    }
+
+    // Start Matrix if configured
+    if let Some(matrix_config) = &config.channels.matrix {
+        tracing::info!("Starting Matrix channel...");
+        any_channel = true;
+        let matrix_config = matrix_config.clone();
+        let runner = runner.clone();
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = matrix::start(matrix_config, runner).await {
+                tracing::error!("Matrix channel error: {}", e);
             }
         }));
     }
