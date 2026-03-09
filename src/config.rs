@@ -33,6 +33,10 @@ pub struct Config {
     /// Heartbeat interval in seconds (0 = disabled)
     #[serde(default = "default_heartbeat_interval")]
     pub heartbeat_interval: u64,
+
+    /// Cron jobs
+    #[serde(default)]
+    pub cron: Vec<CronJobConfig>,
 }
 
 fn default_heartbeat_interval() -> u64 {
@@ -148,6 +152,30 @@ fn default_true() -> bool {
 
 fn default_recall_limit() -> usize {
     5
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CronJobConfig {
+    /// Unique job ID.
+    pub id: String,
+
+    /// Message to inject into agent.
+    pub message: String,
+
+    /// Run every N seconds (mutually exclusive with 'at').
+    pub interval_seconds: Option<u64>,
+
+    /// Run once at a specific datetime: "YYYY-MM-DD HH:MM:SS" (mutually exclusive with interval).
+    pub at: Option<String>,
+
+    /// Session key for the job (default: cron:{id}).
+    pub session_key: Option<String>,
+
+    /// Channel to deliver response (optional).
+    pub channel: Option<String>,
+
+    /// Whether the job is enabled (default: true).
+    pub enabled: Option<bool>,
 }
 
 /// Load config from a YAML file.

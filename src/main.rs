@@ -3,6 +3,7 @@
 mod agent;
 mod channels;
 mod config;
+mod cron;
 mod heartbeat;
 mod hooks;
 mod llm;
@@ -100,6 +101,13 @@ async fn main() -> anyhow::Result<()> {
                 "heartbeat:main",
             )
             .await?;
+
+            // Start cron jobs
+            let cron_jobs = cron::parse_cron_jobs(&cfg.cron);
+            if !cron_jobs.is_empty() {
+                tracing::info!("Starting {} cron job(s)...", cron_jobs.len());
+                cron::start_cron(cron_jobs, runner.clone()).await?;
+            }
 
             // Start channels
             channels::start_gateway(cfg, runner).await?;
