@@ -124,6 +124,11 @@ impl TelegramBot {
 
     /// Process a single update.
     async fn handle_update(&self, update: &serde_json::Value) -> anyhow::Result<()> {
+        // Handle callback queries (inline button presses)
+        if let Some(callback) = update.get("callback_query") {
+            return self.handle_callback_query(callback).await;
+        }
+        
         let message = match update.get("message") {
             Some(m) => m,
             None => return Ok(()), // Skip non-message updates
@@ -286,6 +291,85 @@ impl TelegramBot {
                 text.contains(&mention)
             }
         }
+    }
+    
+    /// Handle an inline button callback query.
+    async fn handle_callback_query(&self, callback: &serde_json::Value) -> anyhow::Result<()> {
+        let callback_id = callback["id"].as_str().unwrap_or("");
+        let user_id = callback["from"]["id"].as_i64().unwrap_or(0);
+        let data = callback["data"].as_str().unwrap_or("");
+        
+        // Get chat_id from the message the button was attached to
+        let chat_id = callback["message"]["chat"]["id"].as_i64().unwrap_or(0);
+        let message_id = callback["message"]["message_id"].as_i64();
+        
+        tracing::info!("Callback query from user {}: {}", user_id, data);
+        
+        // Answer the callback query first (removes the loading indicator)
+        self.answer_callback_query(callback_id, None).await?;
+        
+        // Check access
+        if !self.config.allowed_users.is_empty()
+            && !self.config.allowed_users.contains(&user_id)
+        {
+            tracing::warn!("Unauthorized user for callback: {}", user_id);
+            return Ok(());
+        }
+        
+        // Process callback_data as a new message
+        let session_key = format!("telegram:{}", chat_id);
+        let user_id_str = user_id.to_string();
+        
+        // Send "typing" indicator
+        let _ = self
+            .client
+            .post(self.api_url("sendChatAction"))
+            .json(&serde_json::json!({
+                "chat_id": chat_id,
+                "action": "typing",
+            }))
+            .send()
+            .await;
+        
+        match self
+            .runner
+            .process_message(&session_key, data, Some(&user_id_str), Some("telegram"))
+            .await
+        {
+            Ok(response) => {
+                let trimmed = response.trim();
+                if !trimmed.is_empty()
+                    && trimmed != "NO_REPLY"
+                    && trimmed != "HEARTBEAT_OK"
+                {
+                    self.send_message(chat_id, trimmed, message_id).await?;
+                }
+            }
+            Err(e) => {
+                tracing::error!("Agent error on callback: {}", e);
+                self.send_message(chat_id, &format!("⚠️ Error: {}", e), message_id).await?;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Answer a callback query (acknowledge button press).
+    async fn answer_callback_query(&self, callback_id: &str, text: Option<&str>) -> anyhow::Result<()> {
+        let mut payload = serde_json::json!({
+            "callback_query_id": callback_id,
+        });
+        if let Some(t) = text {
+            payload["text"] = serde_json::json!(t);
+        }
+        
+        self.client
+            .post(self.api_url("answerCallbackQuery"))
+            .json(&payload)
+            .send()
+            .await?;
+        
+        Ok(())
     }
 
     /// Extract voice text if response should be sent as voice.

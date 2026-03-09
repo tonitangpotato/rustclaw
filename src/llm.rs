@@ -178,6 +178,23 @@ impl AnthropicClient {
     }
 }
 
+/// Retry configuration
+const MAX_RETRIES: u32 = 5;
+const INITIAL_BACKOFF_MS: u64 = 1000;
+
+/// Check if a status code should trigger a retry.
+fn should_retry(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status.as_u16(),
+        429 | 500 | 502 | 503 | 529
+    )
+}
+
+/// Check if a status code is a client error (should NOT retry).
+fn is_client_error(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 400 | 401 | 403 | 404)
+}
+
 #[async_trait::async_trait]
 impl LlmClient for AnthropicClient {
     async fn chat(
@@ -206,90 +223,155 @@ impl LlmClient for AnthropicClient {
                 .collect::<Vec<_>>());
         }
 
-        let mut req = self
-            .client
-            .post(format!("{}/v1/messages", self.base_url))
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json");
+        // Retry loop with exponential backoff
+        let mut attempt = 0;
+        let mut last_error: Option<anyhow::Error> = None;
 
-        // Auth headers differ between API key and OAuth token
-        match &self.auth {
-            AuthMode::ApiKey(key) => {
-                req = req.header("x-api-key", key);
-            }
-            AuthMode::OAuthToken(token) => {
-                req = req
-                    .header("Authorization", format!("Bearer {}", token))
-                    .header(
-                        "anthropic-beta",
-                        "claude-code-20250219,oauth-2025-04-20",
-                    )
-                    .header("user-agent", "claude-cli/2.1.39 (external, cli)")
-                    .header("x-app", "cli")
-                    .header("anthropic-dangerous-direct-browser-access", "true");
-            }
-        }
+        loop {
+            attempt += 1;
 
-        let resp = req.json(&body).send().await?;
+            let mut req = self
+                .client
+                .post(format!("{}/v1/messages", self.base_url))
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json");
 
-        let status = resp.status();
-        let resp_body: serde_json::Value = resp.json().await?;
-
-        if !status.is_success() {
-            let error_msg = resp_body["error"]["message"]
-                .as_str()
-                .unwrap_or("Unknown error");
-            anyhow::bail!("Anthropic API error ({}): {}", status, error_msg);
-        }
-
-        // Parse response content blocks
-        let mut text = None;
-        let mut tool_calls = Vec::new();
-
-        if let Some(content_blocks) = resp_body["content"].as_array() {
-            let mut text_parts = Vec::new();
-            for block in content_blocks {
-                match block["type"].as_str() {
-                    Some("text") => {
-                        if let Some(t) = block["text"].as_str() {
-                            text_parts.push(t.to_string());
-                        }
-                    }
-                    Some("tool_use") => {
-                        tool_calls.push(ToolCall {
-                            id: block["id"].as_str().unwrap_or("").to_string(),
-                            name: block["name"].as_str().unwrap_or("").to_string(),
-                            input: block["input"].clone(),
-                        });
-                    }
-                    _ => {}
+            // Auth headers differ between API key and OAuth token
+            match &self.auth {
+                AuthMode::ApiKey(key) => {
+                    req = req.header("x-api-key", key);
+                }
+                AuthMode::OAuthToken(token) => {
+                    req = req
+                        .header("Authorization", format!("Bearer {}", token))
+                        .header(
+                            "anthropic-beta",
+                            "claude-code-20250219,oauth-2025-04-20",
+                        )
+                        .header("user-agent", "claude-cli/2.1.39 (external, cli)")
+                        .header("x-app", "cli")
+                        .header("anthropic-dangerous-direct-browser-access", "true");
                 }
             }
-            if !text_parts.is_empty() {
-                text = Some(text_parts.join("\n"));
+
+            let resp = match req.json(&body).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    if attempt <= MAX_RETRIES {
+                        let backoff = INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1);
+                        tracing::warn!(
+                            "Request failed (attempt {}/{}): {}. Retrying in {}ms...",
+                            attempt, MAX_RETRIES, e, backoff
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                        last_error = Some(e.into());
+                        continue;
+                    }
+                    return Err(e.into());
+                }
+            };
+
+            let status = resp.status();
+
+            // Check for client errors - don't retry these
+            if is_client_error(status) {
+                let resp_body: serde_json::Value = resp.json().await?;
+                let error_msg = resp_body["error"]["message"]
+                    .as_str()
+                    .unwrap_or("Unknown error");
+                anyhow::bail!("Anthropic API error ({}): {}", status, error_msg);
             }
-        }
 
-        let usage = Usage {
-            input_tokens: resp_body["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32,
-            output_tokens: resp_body["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32,
-            cache_read: resp_body["usage"]["cache_read_input_tokens"]
-                .as_u64()
-                .unwrap_or(0) as u32,
-            cache_write: resp_body["usage"]["cache_creation_input_tokens"]
-                .as_u64()
-                .unwrap_or(0) as u32,
-        };
+            // Check for retryable errors
+            if should_retry(status) && attempt <= MAX_RETRIES {
+                // Check for retry-after header (for 429)
+                let retry_after = resp
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok());
 
-        Ok(LlmResponse {
-            text,
-            tool_calls,
-            stop_reason: resp_body["stop_reason"]
-                .as_str()
-                .unwrap_or("unknown")
-                .to_string(),
-            usage,
-        })
+                let backoff = retry_after
+                    .map(|secs| secs * 1000)
+                    .unwrap_or_else(|| INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1));
+
+                tracing::warn!(
+                    "Retryable error {} (attempt {}/{}). Retrying in {}ms...",
+                    status, attempt, MAX_RETRIES, backoff
+                );
+
+                tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                last_error = Some(anyhow::anyhow!("HTTP {}", status));
+                continue;
+            }
+
+            // Non-retryable error or success
+            let resp_body: serde_json::Value = resp.json().await?;
+
+            if !status.is_success() {
+                let error_msg = resp_body["error"]["message"]
+                    .as_str()
+                    .unwrap_or("Unknown error");
+
+                // If we've exhausted retries, include last error info
+                if let Some(le) = &last_error {
+                    anyhow::bail!(
+                        "Anthropic API error ({}) after {} attempts: {} (last error: {})",
+                        status, attempt, error_msg, le
+                    );
+                }
+                anyhow::bail!("Anthropic API error ({}): {}", status, error_msg);
+            }
+
+            // Success! Parse response content blocks
+            let mut text = None;
+            let mut tool_calls = Vec::new();
+
+            if let Some(content_blocks) = resp_body["content"].as_array() {
+                let mut text_parts = Vec::new();
+                for block in content_blocks {
+                    match block["type"].as_str() {
+                        Some("text") => {
+                            if let Some(t) = block["text"].as_str() {
+                                text_parts.push(t.to_string());
+                            }
+                        }
+                        Some("tool_use") => {
+                            tool_calls.push(ToolCall {
+                                id: block["id"].as_str().unwrap_or("").to_string(),
+                                name: block["name"].as_str().unwrap_or("").to_string(),
+                                input: block["input"].clone(),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                if !text_parts.is_empty() {
+                    text = Some(text_parts.join("\n"));
+                }
+            }
+
+            let usage = Usage {
+                input_tokens: resp_body["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32,
+                output_tokens: resp_body["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32,
+                cache_read: resp_body["usage"]["cache_read_input_tokens"]
+                    .as_u64()
+                    .unwrap_or(0) as u32,
+                cache_write: resp_body["usage"]["cache_creation_input_tokens"]
+                    .as_u64()
+                    .unwrap_or(0) as u32,
+            };
+
+            return Ok(LlmResponse {
+                text,
+                tool_calls,
+                stop_reason: resp_body["stop_reason"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_string(),
+                usage,
+            });
+        } // end retry loop
     }
 
     async fn chat_stream(
