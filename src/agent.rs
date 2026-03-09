@@ -18,7 +18,7 @@ use crate::config::{AgentConfig, Config};
 use crate::hooks::{HookContext, HookOutcome, HookPoint, HookRegistry};
 use crate::llm::{self, LlmClient, Message, StreamChunk};
 use crate::memory::MemoryManager;
-use crate::session::SessionManager;
+use crate::session::{summarize_old_messages, SessionManager};
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
@@ -40,6 +40,8 @@ pub struct AgentRunner {
     hooks: Arc<RwLock<HookRegistry>>,
     tools: ToolRegistry,
     llm_client: Box<dyn LlmClient>,
+    /// Optional LLM client for summarization (uses cheaper model)
+    summary_llm: Option<Box<dyn LlmClient>>,
 }
 
 impl AgentRunner {
@@ -53,6 +55,19 @@ impl AgentRunner {
     ) -> Self {
         let llm_client = llm::create_client(&config.llm).expect("Failed to create LLM client");
 
+        // Create summary LLM client if configured
+        let summary_llm = config.summary_model.as_ref().map(|model| {
+            let mut summary_config = config.llm.clone();
+            summary_config.model = model.clone();
+            summary_config.max_tokens = 1024; // Summaries don't need many tokens
+            llm::create_client(&summary_config).expect("Failed to create summary LLM client")
+        });
+
+        if summary_llm.is_some() {
+            tracing::info!("Session summarization enabled with model: {}", 
+                config.summary_model.as_ref().unwrap());
+        }
+
         Self {
             config,
             workspace,
@@ -61,6 +76,7 @@ impl AgentRunner {
             hooks: Arc::new(RwLock::new(hooks)),
             tools,
             llm_client,
+            summary_llm,
         }
     }
 
@@ -132,8 +148,31 @@ impl AgentRunner {
         // 5. Add user message to session
         session.messages.push(Message::text("user", user_message));
 
-        // 6. Trim messages to stay within context window
-        session.trim_messages(self.config.max_session_messages);
+        // 6. Summarize or trim messages to stay within context window
+        if let Some(ref summary_llm) = self.summary_llm {
+            // Try to summarize old messages
+            match summarize_old_messages(
+                &mut session,
+                self.config.max_session_messages,
+                summary_llm.as_ref(),
+            )
+            .await
+            {
+                Ok(true) => {
+                    tracing::info!("Summarized old messages in session {}", session_key);
+                }
+                Ok(false) => {
+                    // No summarization needed
+                }
+                Err(e) => {
+                    tracing::warn!("Summarization failed, falling back to trim: {}", e);
+                    session.trim_messages(self.config.max_session_messages);
+                }
+            }
+        } else {
+            // No summary model configured, just trim
+            session.trim_messages(self.config.max_session_messages);
+        }
 
         // 7. Get tool definitions
         let tool_defs = self.tools.definitions();

@@ -165,6 +165,20 @@ impl TelegramBot {
             }
             return self.handle_voice_message(chat_id, user_id, voice, is_group.then_some(message_id).flatten()).await;
         }
+        
+        // Handle document uploads
+        if let Some(document) = message.get("document") {
+            let reply_to = if is_group { message_id } else { None };
+            return self.handle_document(chat_id, user_id, document, reply_to).await;
+        }
+        
+        // Handle photo uploads (get largest size)
+        if let Some(photos) = message.get("photo").and_then(|p| p.as_array()) {
+            if let Some(largest) = photos.last() {
+                let reply_to = if is_group { message_id } else { None };
+                return self.handle_photo(chat_id, user_id, largest, reply_to).await;
+            }
+        }
 
         if text.is_empty() {
             // Check for audio (not voice note)
@@ -382,6 +396,218 @@ impl TelegramBot {
             .json(&payload)
             .send()
             .await?;
+        
+        Ok(())
+    }
+    
+    /// Handle an incoming document.
+    async fn handle_document(
+        &self,
+        chat_id: i64,
+        user_id: i64,
+        document: &serde_json::Value,
+        reply_to: Option<i64>,
+    ) -> anyhow::Result<()> {
+        // Check access
+        if !self.config.allowed_users.is_empty()
+            && !self.config.allowed_users.contains(&user_id)
+        {
+            tracing::warn!("Unauthorized user for document: {}", user_id);
+            return Ok(());
+        }
+        
+        let file_id = document["file_id"].as_str().unwrap_or("");
+        let file_name = document["file_name"].as_str().unwrap_or("unknown_file");
+        
+        tracing::info!("Document from user {}: {}", user_id, file_name);
+        
+        // Download the file
+        match self.download_telegram_file(file_id, file_name).await {
+            Ok(saved_path) => {
+                let message = format!("[File received: {}, saved to {}]", file_name, saved_path);
+                let session_key = format!("telegram:{}", chat_id);
+                let user_id_str = user_id.to_string();
+                
+                // Process through agent
+                match self
+                    .runner
+                    .process_message(&session_key, &message, Some(&user_id_str), Some("telegram"))
+                    .await
+                {
+                    Ok(response) => {
+                        let trimmed = response.trim();
+                        if !trimmed.is_empty() && trimmed != "NO_REPLY" && trimmed != "HEARTBEAT_OK" {
+                            self.send_response_with_files(chat_id, trimmed, reply_to).await?;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Agent error on document: {}", e);
+                        self.send_message(chat_id, &format!("⚠️ Error: {}", e), reply_to).await?;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to download document: {}", e);
+                self.send_message(chat_id, &format!("⚠️ Failed to download file: {}", e), reply_to).await?;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle an incoming photo.
+    async fn handle_photo(
+        &self,
+        chat_id: i64,
+        user_id: i64,
+        photo: &serde_json::Value,
+        reply_to: Option<i64>,
+    ) -> anyhow::Result<()> {
+        // Check access
+        if !self.config.allowed_users.is_empty()
+            && !self.config.allowed_users.contains(&user_id)
+        {
+            tracing::warn!("Unauthorized user for photo: {}", user_id);
+            return Ok(());
+        }
+        
+        let file_id = photo["file_id"].as_str().unwrap_or("");
+        let file_unique_id = photo["file_unique_id"].as_str().unwrap_or("photo");
+        let file_name = format!("{}.jpg", file_unique_id);
+        
+        tracing::info!("Photo from user {}", user_id);
+        
+        // Download the file
+        match self.download_telegram_file(file_id, &file_name).await {
+            Ok(saved_path) => {
+                let message = format!("[Photo received, saved to {}]", saved_path);
+                let session_key = format!("telegram:{}", chat_id);
+                let user_id_str = user_id.to_string();
+                
+                // Process through agent
+                match self
+                    .runner
+                    .process_message(&session_key, &message, Some(&user_id_str), Some("telegram"))
+                    .await
+                {
+                    Ok(response) => {
+                        let trimmed = response.trim();
+                        if !trimmed.is_empty() && trimmed != "NO_REPLY" && trimmed != "HEARTBEAT_OK" {
+                            self.send_response_with_files(chat_id, trimmed, reply_to).await?;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Agent error on photo: {}", e);
+                        self.send_message(chat_id, &format!("⚠️ Error: {}", e), reply_to).await?;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to download photo: {}", e);
+                self.send_message(chat_id, &format!("⚠️ Failed to download photo: {}", e), reply_to).await?;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Download a file from Telegram and save it locally.
+    async fn download_telegram_file(&self, file_id: &str, file_name: &str) -> anyhow::Result<String> {
+        // Ensure directory exists
+        let dir = "/tmp/rustclaw_files";
+        tokio::fs::create_dir_all(dir).await?;
+        
+        // Get file path via getFile API
+        let file_info = self
+            .client
+            .post(self.api_url("getFile"))
+            .json(&serde_json::json!({ "file_id": file_id }))
+            .send()
+            .await?
+            .json::<serde_json::Value>()
+            .await?;
+        
+        let file_path = file_info["result"]["file_path"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Could not get file path from Telegram"))?;
+        
+        // Download the file
+        let download_url = format!("{}/file/bot{}/{}", TELEGRAM_API, self.token, file_path);
+        let file_bytes = self
+            .client
+            .get(&download_url)
+            .send()
+            .await?
+            .bytes()
+            .await?;
+        
+        // Save to local file
+        let saved_path = format!("{}/{}", dir, file_name);
+        tokio::fs::write(&saved_path, &file_bytes).await?;
+        
+        tracing::debug!("Downloaded file to {}", saved_path);
+        Ok(saved_path)
+    }
+    
+    /// Send a document to a chat.
+    async fn send_document(&self, chat_id: i64, file_path: &str, reply_to: Option<i64>) -> anyhow::Result<()> {
+        let file_bytes = tokio::fs::read(file_path).await?;
+        let file_name = std::path::Path::new(file_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file");
+        
+        let part = reqwest::multipart::Part::bytes(file_bytes)
+            .file_name(file_name.to_string());
+        
+        let mut form = reqwest::multipart::Form::new()
+            .text("chat_id", chat_id.to_string())
+            .part("document", part);
+        
+        if let Some(msg_id) = reply_to {
+            form = form.text("reply_to_message_id", msg_id.to_string());
+        }
+        
+        self.client
+            .post(self.api_url("sendDocument"))
+            .multipart(form)
+            .send()
+            .await?;
+        
+        Ok(())
+    }
+    
+    /// Send a response, checking for FILE: patterns to send as documents.
+    async fn send_response_with_files(&self, chat_id: i64, response: &str, reply_to: Option<i64>) -> anyhow::Result<()> {
+        // Check for FILE: patterns
+        let file_re = regex::Regex::new(r"FILE:(/[^\s]+)").unwrap();
+        let mut text_without_files = response.to_string();
+        let mut files_to_send: Vec<String> = Vec::new();
+        
+        for cap in file_re.captures_iter(response) {
+            let file_path = cap[1].to_string();
+            files_to_send.push(file_path.clone());
+            text_without_files = text_without_files.replace(&format!("FILE:{}", file_path), "");
+        }
+        
+        // Send text message first (if there's text left)
+        let clean_text = text_without_files.trim();
+        if !clean_text.is_empty() {
+            self.send_message(chat_id, clean_text, reply_to).await?;
+        }
+        
+        // Send files
+        for file_path in files_to_send {
+            if std::path::Path::new(&file_path).exists() {
+                if let Err(e) = self.send_document(chat_id, &file_path, None).await {
+                    tracing::error!("Failed to send file {}: {}", file_path, e);
+                    self.send_message(chat_id, &format!("⚠️ Failed to send file: {}", file_path), None).await?;
+                }
+            } else {
+                tracing::warn!("File not found: {}", file_path);
+                self.send_message(chat_id, &format!("⚠️ File not found: {}", file_path), None).await?;
+            }
+        }
         
         Ok(())
     }

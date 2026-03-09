@@ -72,6 +72,96 @@ impl Session {
             self.messages.len()
         );
     }
+
+    /// Summarize old messages instead of just trimming.
+    /// Returns the messages that were summarized (for LLM call).
+    pub fn prepare_for_summarization(&self, max_messages: usize) -> Option<(Vec<Message>, usize)> {
+        if self.messages.len() <= max_messages {
+            return None;
+        }
+
+        // Determine how many messages to summarize
+        // Keep the last (max_messages - 1) messages, plus 1 for the summary
+        let keep_recent = max_messages.saturating_sub(1);
+        let summarize_count = self.messages.len().saturating_sub(keep_recent);
+
+        if summarize_count < 2 {
+            // Not enough messages to summarize
+            return None;
+        }
+
+        // Get the messages to be summarized (first N messages)
+        let to_summarize: Vec<Message> = self.messages[..summarize_count].to_vec();
+
+        Some((to_summarize, summarize_count))
+    }
+
+    /// Apply a summary to the session, replacing old messages.
+    pub fn apply_summary(&mut self, summary: &str, summarized_count: usize) {
+        if summarized_count >= self.messages.len() {
+            // Edge case: all messages were summarized
+            self.messages.clear();
+            self.messages.push(Message::text("system", &format!(
+                "[Previous conversation summary]\n{}",
+                summary
+            )));
+        } else {
+            // Remove old messages and prepend summary
+            let remaining: Vec<Message> = self.messages[summarized_count..].to_vec();
+            self.messages.clear();
+            self.messages.push(Message::text("system", &format!(
+                "[Previous conversation summary]\n{}",
+                summary
+            )));
+            self.messages.extend(remaining);
+        }
+
+        tracing::info!(
+            "Session '{}': summarized {} messages into 1 summary",
+            self.key,
+            summarized_count
+        );
+    }
+}
+
+/// Format messages for summarization prompt.
+pub fn format_messages_for_summary(messages: &[Message]) -> String {
+    let mut formatted = String::new();
+
+    for msg in messages {
+        let role = match msg.role.as_str() {
+            "user" => "User",
+            "assistant" => "Assistant",
+            "system" => "System",
+            _ => &msg.role,
+        };
+
+        // Extract text content from content blocks
+        let text_content: String = msg
+            .content
+            .iter()
+            .filter_map(|block| {
+                match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    ContentBlock::ToolUse { name, .. } => Some(format!("[Tool: {}]", name)),
+                    ContentBlock::ToolResult { content, .. } => {
+                        // Truncate long tool results
+                        let truncated = if content.len() > 200 {
+                            format!("{}...", &content[..200])
+                        } else {
+                            content.clone()
+                        };
+                        Some(format!("[Result: {}]", truncated))
+                    }
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        formatted.push_str(&format!("{}: {}\n", role, text_content));
+    }
+
+    formatted
 }
 
 /// Manages all active sessions with SQLite backing.
@@ -204,6 +294,49 @@ impl SessionManager {
             }
         }
     }
+}
+
+/// Summarize old messages using the LLM.
+pub async fn summarize_old_messages(
+    session: &mut Session,
+    max_messages: usize,
+    llm: &dyn LlmClient,
+) -> anyhow::Result<bool> {
+    // Check if summarization is needed
+    let (messages_to_summarize, count) = match session.prepare_for_summarization(max_messages) {
+        Some(data) => data,
+        None => return Ok(false), // No summarization needed
+    };
+
+    // Format messages for the summary prompt
+    let conversation_text = format_messages_for_summary(&messages_to_summarize);
+
+    let summary_prompt = format!(
+        "Summarize the following conversation in a single concise paragraph. \
+         Focus on key topics discussed, decisions made, and important context. \
+         Do not include greetings or meta-commentary.\n\n\
+         CONVERSATION:\n{}\n\n\
+         SUMMARY:",
+        conversation_text
+    );
+
+    // Call LLM to generate summary
+    let response = llm
+        .chat(
+            "You are a helpful assistant that summarizes conversations concisely.",
+            &[Message::text("user", &summary_prompt)],
+            &[], // No tools needed
+        )
+        .await?;
+
+    let summary = response.text.unwrap_or_else(|| {
+        "[Summary unavailable]".to_string()
+    });
+
+    // Apply the summary to the session
+    session.apply_summary(&summary, count);
+
+    Ok(true)
 }
 
 /// SQLite row mapping.
