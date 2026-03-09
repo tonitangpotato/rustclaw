@@ -294,6 +294,56 @@ impl SessionManager {
             }
         }
     }
+
+    /// List all sessions (from DB).
+    pub async fn list_sessions(&self) -> Vec<Session> {
+        if let Some(pool) = &self.pool {
+            match sqlx::query_as::<_, SessionRow>(
+                "SELECT key, messages, created_at, updated_at, total_tokens, channel, user_id
+                 FROM sessions ORDER BY updated_at DESC LIMIT 100",
+            )
+            .fetch_all(pool)
+            .await
+            {
+                Ok(rows) => rows
+                    .into_iter()
+                    .map(|row| {
+                        let messages: Vec<Message> =
+                            serde_json::from_str(&row.messages).unwrap_or_default();
+                        Session {
+                            key: row.key,
+                            messages,
+                            created_at: row.created_at,
+                            updated_at: row.updated_at,
+                            total_tokens: row.total_tokens as u64,
+                            channel: row.channel,
+                            user_id: row.user_id,
+                        }
+                    })
+                    .collect(),
+                Err(e) => {
+                    tracing::error!("Failed to list sessions: {}", e);
+                    vec![]
+                }
+            }
+        } else {
+            // Return in-memory sessions
+            let sessions = self.sessions.read().await;
+            sessions.values().cloned().collect()
+        }
+    }
+
+    /// Count active sessions.
+    pub async fn count(&self) -> usize {
+        if let Some(pool) = &self.pool {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sessions")
+                .fetch_one(pool)
+                .await
+                .unwrap_or(0) as usize
+        } else {
+            self.sessions.read().await.len()
+        }
+    }
 }
 
 /// Summarize old messages using the LLM.

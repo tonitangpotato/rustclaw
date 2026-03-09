@@ -18,6 +18,7 @@ use crate::config::{AgentConfig, Config};
 use crate::hooks::{HookContext, HookOutcome, HookPoint, HookRegistry};
 use crate::llm::{self, LlmClient, Message, StreamChunk};
 use crate::memory::MemoryManager;
+use crate::safety::{SafetyLayer, wrap_external_content};
 use crate::sandbox::WasmSandbox;
 use crate::session::{summarize_old_messages, SessionManager};
 use crate::tools::ToolRegistry;
@@ -45,6 +46,8 @@ pub struct AgentRunner {
     summary_llm: Option<Box<dyn LlmClient>>,
     /// Sandbox for tool execution
     sandbox: WasmSandbox,
+    /// Safety layer (sanitizer, leak detector, policy engine)
+    safety: SafetyLayer,
 }
 
 impl AgentRunner {
@@ -78,6 +81,9 @@ impl AgentRunner {
                 config.sandbox.tools.len());
         }
 
+        // Initialize safety layer
+        let safety = SafetyLayer::new(&config.safety);
+
         Self {
             config,
             workspace,
@@ -88,6 +94,7 @@ impl AgentRunner {
             llm_client,
             summary_llm,
             sandbox,
+            safety,
         }
     }
 
@@ -120,7 +127,13 @@ impl AgentRunner {
         // 1. Get or create session
         let mut session = self.sessions.get_or_create(session_key).await;
 
-        // 2. Run BeforeInbound hooks
+        // 2. Scan inbound for secrets (SafetyLayer)
+        if let Some(warning) = self.safety.scan_inbound_for_secrets(user_message) {
+            tracing::warn!("Inbound secret detected from user {:?}", user_id);
+            return Ok(warning);
+        }
+
+        // 3. Run BeforeInbound hooks
         let mut hook_ctx = HookContext {
             session_key: session_key.to_string(),
             user_id: user_id.map(String::from),
@@ -267,13 +280,27 @@ impl AgentRunner {
                 let result = self.execute_tool_sandboxed(&tc.name, tc.input.clone()).await;
                 match result {
                     Ok(tool_result) => {
-                        tracing::info!(
-                            "Tool {} → {} chars, error={}",
-                            tc.name,
-                            tool_result.output.len(),
-                            tool_result.is_error
-                        );
-                        tool_results.push((tc.id.clone(), tool_result.output, tool_result.is_error));
+                        // Sanitize tool output through SafetyLayer
+                        let sanitized = self.safety.sanitize_tool_output(&tc.name, &tool_result.output);
+                        if sanitized.was_modified {
+                            tracing::info!(
+                                "Tool {} → {} chars (sanitized, {} warnings), error={}",
+                                tc.name, sanitized.content.len(),
+                                sanitized.warnings.len(), tool_result.is_error
+                            );
+                        } else {
+                            tracing::info!(
+                                "Tool {} → {} chars, error={}",
+                                tc.name, sanitized.content.len(), tool_result.is_error
+                            );
+                        }
+                        // Wrap web_fetch output as untrusted external content
+                        let output = if tc.name == "web_fetch" {
+                            wrap_external_content("web_fetch", &sanitized.content)
+                        } else {
+                            sanitized.content
+                        };
+                        tool_results.push((tc.id.clone(), output, tool_result.is_error));
                     }
                     Err(e) => {
                         tracing::warn!("Tool {} sandbox error: {}", tc.name, e);
@@ -301,7 +328,24 @@ impl AgentRunner {
             hooks.run(HookPoint::BeforeOutbound, &mut out_ctx).await?;
         }
 
-        // 10. Update session
+        // 10. Auto-store to Engram (important interactions)
+        if self.config.memory.auto_store && !response_text.is_empty() {
+            let store_content = format!("{} → {}", user_message, {
+                let end = response_text.len().min(200);
+                let end = response_text.floor_char_boundary(end);
+                &response_text[..end]
+            });
+            if let Err(e) = self.memory.store(
+                &store_content,
+                engramai::MemoryType::Episodic,
+                0.5, // moderate importance
+                Some("auto"),
+            ) {
+                tracing::debug!("Engram auto-store skipped: {}", e);
+            }
+        }
+
+        // 11. Update session
         self.sessions.update(session).await;
 
         Ok(response_text)
@@ -433,6 +477,11 @@ impl AgentRunner {
     }
 
     /// Get all configured agents.
+    /// Get session manager reference.
+    pub fn sessions(&self) -> &SessionManager {
+        &self.sessions
+    }
+
     pub fn agents(&self) -> &[AgentConfig] {
         &self.config.agents
     }
@@ -590,13 +639,19 @@ impl AgentRunner {
                 let result = self.execute_tool_sandboxed(&tc.name, tc.input.clone()).await;
                 match result {
                     Ok(tool_result) => {
+                        let sanitized = self.safety.sanitize_tool_output(&tc.name, &tool_result.output);
                         tracing::info!(
-                            "Tool {} → {} chars, error={}",
-                            tc.name,
-                            tool_result.output.len(),
+                            "Tool {} → {} chars{}, error={}",
+                            tc.name, sanitized.content.len(),
+                            if sanitized.was_modified { " (sanitized)" } else { "" },
                             tool_result.is_error
                         );
-                        tool_results.push((tc.id.clone(), tool_result.output, tool_result.is_error));
+                        let output = if tc.name == "web_fetch" {
+                            wrap_external_content("web_fetch", &sanitized.content)
+                        } else {
+                            sanitized.content
+                        };
+                        tool_results.push((tc.id.clone(), output, tool_result.is_error));
                     }
                     Err(e) => {
                         tracing::warn!("Tool {} sandbox error: {}", tc.name, e);

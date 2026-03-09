@@ -229,8 +229,8 @@ async fn auth_middleware(
 async fn get_status(State(state): State<Arc<DashboardState>>) -> impl IntoResponse {
     let uptime = state.start_time.elapsed().as_secs();
 
-    // Get session count (simplified)
-    let active_sessions = 0; // TODO: Get from session manager
+    // Get session count from SessionManager
+    let active_sessions = state.runner.sessions().count().await;
 
     Json(StatusResponse {
         status: "running".to_string(),
@@ -244,11 +244,34 @@ async fn get_status(State(state): State<Arc<DashboardState>>) -> impl IntoRespon
     })
 }
 
-async fn get_sessions(State(_state): State<Arc<DashboardState>>) -> impl IntoResponse {
-    // TODO: Actually get sessions from SessionManager
+async fn get_sessions(State(state): State<Arc<DashboardState>>) -> impl IntoResponse {
+    let sessions = state.runner.sessions().list_sessions().await;
+    let total = sessions.len();
+    let session_infos: Vec<SessionInfo> = sessions
+        .into_iter()
+        .map(|s| {
+            let last_msg = s.messages.last().and_then(|m| {
+                m.content.iter().find_map(|block| {
+                    if let crate::llm::ContentBlock::Text { text } = block {
+                        let end = text.len().min(100);
+                        let end = text.floor_char_boundary(end);
+                        Some(text[..end].to_string())
+                    } else {
+                        None
+                    }
+                })
+            });
+            SessionInfo {
+                key: s.key,
+                message_count: s.messages.len(),
+                last_message: last_msg,
+                total_tokens: s.total_tokens,
+            }
+        })
+        .collect();
     Json(SessionsResponse {
-        sessions: vec![],
-        total: 0,
+        sessions: session_infos,
+        total,
     })
 }
 

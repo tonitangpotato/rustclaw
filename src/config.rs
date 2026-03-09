@@ -102,6 +102,10 @@ pub struct Config {
     /// User modeling configuration.
     #[serde(default)]
     pub user_model: UserModelConfig,
+
+    /// Safety layer configuration.
+    #[serde(default)]
+    pub safety: crate::safety::SafetyConfig,
 }
 
 fn default_max_session_messages() -> usize {
