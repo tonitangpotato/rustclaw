@@ -2,8 +2,11 @@
 //!
 //! Supports Anthropic (Claude) natively, with extensibility for OpenAI and others.
 //! Uses proper Anthropic Messages API content blocks for tool_use/tool_result.
+//! Includes streaming support via SSE for real-time responses.
 
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
 use crate::config::{self, AuthMode, LlmConfig};
 
@@ -117,6 +120,17 @@ pub struct Usage {
     pub cache_write: u32,
 }
 
+/// A chunk from streaming response.
+#[derive(Debug, Clone)]
+pub enum StreamChunk {
+    /// Partial text content
+    Text(String),
+    /// Complete tool use block
+    ToolUse(ToolCall),
+    /// Stream finished with final usage stats
+    Done(Usage, String), // (usage, stop_reason)
+}
+
 /// LLM client trait.
 #[async_trait::async_trait]
 pub trait LlmClient: Send + Sync {
@@ -126,6 +140,15 @@ pub trait LlmClient: Send + Sync {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> anyhow::Result<LlmResponse>;
+
+    /// Stream chat response, sending chunks through the channel.
+    /// Returns immediately, chunks arrive via the returned receiver.
+    async fn chat_stream(
+        &self,
+        system: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> anyhow::Result<mpsc::Receiver<StreamChunk>>;
 }
 
 /// Anthropic Claude client (supports both API key and OAuth token).
@@ -268,6 +291,205 @@ impl LlmClient for AnthropicClient {
             usage,
         })
     }
+
+    async fn chat_stream(
+        &self,
+        system: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> anyhow::Result<mpsc::Receiver<StreamChunk>> {
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "system": system,
+            "messages": serde_json::to_value(messages)?,
+            "stream": true,
+        });
+
+        if !tools.is_empty() {
+            body["tools"] = serde_json::json!(tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": t.input_schema,
+                    })
+                })
+                .collect::<Vec<_>>());
+        }
+
+        let mut req = self
+            .client
+            .post(format!("{}/v1/messages", self.base_url))
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json");
+
+        match &self.auth {
+            AuthMode::ApiKey(key) => {
+                req = req.header("x-api-key", key);
+            }
+            AuthMode::OAuthToken(token) => {
+                req = req
+                    .header("Authorization", format!("Bearer {}", token))
+                    .header(
+                        "anthropic-beta",
+                        "claude-code-20250219,oauth-2025-04-20",
+                    )
+                    .header("user-agent", "claude-cli/2.1.39 (external, cli)")
+                    .header("x-app", "cli")
+                    .header("anthropic-dangerous-direct-browser-access", "true");
+            }
+        }
+
+        let resp = req.json(&body).send().await?;
+        let status = resp.status();
+
+        if !status.is_success() {
+            let error_body: serde_json::Value = resp.json().await?;
+            let error_msg = error_body["error"]["message"]
+                .as_str()
+                .unwrap_or("Unknown error");
+            anyhow::bail!("Anthropic API error ({}): {}", status, error_msg);
+        }
+
+        let (tx, rx) = mpsc::channel::<StreamChunk>(100);
+
+        // Spawn task to process SSE stream
+        let byte_stream = resp.bytes_stream();
+        tokio::spawn(async move {
+            let mut stream = byte_stream;
+            let mut buffer = String::new();
+            let mut current_tool: Option<PartialToolUse> = None;
+            let mut usage = Usage::default();
+            let mut stop_reason = String::new();
+
+            while let Some(chunk_result) = stream.next().await {
+                let chunk = match chunk_result {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::error!("Stream error: {}", e);
+                        break;
+                    }
+                };
+
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                // Process complete SSE events (lines starting with "data: ")
+                while let Some(event) = extract_sse_event(&mut buffer) {
+                    if event == "[DONE]" {
+                        break;
+                    }
+
+                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&event) {
+                        match data["type"].as_str() {
+                            Some("content_block_start") => {
+                                // Check if it's a tool_use block
+                                if data["content_block"]["type"].as_str() == Some("tool_use") {
+                                    current_tool = Some(PartialToolUse {
+                                        id: data["content_block"]["id"]
+                                            .as_str()
+                                            .unwrap_or("")
+                                            .to_string(),
+                                        name: data["content_block"]["name"]
+                                            .as_str()
+                                            .unwrap_or("")
+                                            .to_string(),
+                                        input_json: String::new(),
+                                    });
+                                }
+                            }
+                            Some("content_block_delta") => {
+                                if let Some(delta) = data.get("delta") {
+                                    match delta["type"].as_str() {
+                                        Some("text_delta") => {
+                                            if let Some(text) = delta["text"].as_str() {
+                                                let _ = tx.send(StreamChunk::Text(text.to_string())).await;
+                                            }
+                                        }
+                                        Some("input_json_delta") => {
+                                            if let Some(partial) = delta["partial_json"].as_str() {
+                                                if let Some(ref mut tool) = current_tool {
+                                                    tool.input_json.push_str(partial);
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            Some("content_block_stop") => {
+                                // If we were building a tool call, emit it
+                                if let Some(tool) = current_tool.take() {
+                                    let input: serde_json::Value =
+                                        serde_json::from_str(&tool.input_json)
+                                            .unwrap_or(serde_json::json!({}));
+                                    let _ = tx
+                                        .send(StreamChunk::ToolUse(ToolCall {
+                                            id: tool.id,
+                                            name: tool.name,
+                                            input,
+                                        }))
+                                        .await;
+                                }
+                            }
+                            Some("message_delta") => {
+                                if let Some(sr) = data["delta"]["stop_reason"].as_str() {
+                                    stop_reason = sr.to_string();
+                                }
+                                if let Some(u) = data.get("usage") {
+                                    usage.output_tokens =
+                                        u["output_tokens"].as_u64().unwrap_or(0) as u32;
+                                }
+                            }
+                            Some("message_start") => {
+                                if let Some(u) = data["message"].get("usage") {
+                                    usage.input_tokens =
+                                        u["input_tokens"].as_u64().unwrap_or(0) as u32;
+                                    usage.cache_read =
+                                        u["cache_read_input_tokens"].as_u64().unwrap_or(0) as u32;
+                                    usage.cache_write =
+                                        u["cache_creation_input_tokens"].as_u64().unwrap_or(0) as u32;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            // Send final Done chunk
+            let _ = tx.send(StreamChunk::Done(usage, stop_reason)).await;
+        });
+
+        Ok(rx)
+    }
+}
+
+/// Partial tool use being accumulated during streaming.
+struct PartialToolUse {
+    id: String,
+    name: String,
+    input_json: String,
+}
+
+/// Extract a complete SSE event from the buffer.
+/// Returns the data portion (after "data: ") if a complete event is found.
+fn extract_sse_event(buffer: &mut String) -> Option<String> {
+    // SSE events are separated by double newlines
+    // Each line within an event starts with "data: " for data lines
+    if let Some(pos) = buffer.find("\n\n") {
+        let event = buffer[..pos].to_string();
+        *buffer = buffer[pos + 2..].to_string();
+
+        // Extract data from "data: " prefix
+        for line in event.lines() {
+            if let Some(data) = line.strip_prefix("data: ") {
+                return Some(data.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Create an LLM client based on config.

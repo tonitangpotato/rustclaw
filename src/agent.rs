@@ -12,9 +12,11 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use tokio::sync::mpsc;
+
 use crate::config::{AgentConfig, Config};
 use crate::hooks::{HookContext, HookOutcome, HookPoint, HookRegistry};
-use crate::llm::{self, LlmClient, Message};
+use crate::llm::{self, LlmClient, Message, StreamChunk};
 use crate::memory::MemoryManager;
 use crate::session::SessionManager;
 use crate::tools::ToolRegistry;
@@ -339,5 +341,211 @@ impl AgentRunner {
     /// Get the default agent config (if any).
     pub fn default_agent(&self) -> Option<&AgentConfig> {
         self.config.agents.iter().find(|a| a.default)
+    }
+
+    /// Process a message with streaming response.
+    /// Returns a channel that emits partial text chunks, then final complete response.
+    /// Only the final response (after all tool calls) is streamed.
+    pub async fn process_message_streaming(
+        &self,
+        session_key: &str,
+        user_message: &str,
+        user_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> anyhow::Result<mpsc::Receiver<String>> {
+        let (tx, rx) = mpsc::channel::<String>(100);
+        
+        // Clone what we need for the spawned task
+        let session_key = session_key.to_string();
+        let user_message = user_message.to_string();
+        let user_id = user_id.map(String::from);
+        let channel = channel.map(String::from);
+        
+        // We need to process in this function because we can't easily move self into async
+        // So we'll do the tool loop here and only stream the final response
+        
+        tracing::info!(
+            "Processing streaming message for session={} user={:?}",
+            session_key,
+            user_id
+        );
+
+        // 1. Get or create session
+        let mut session = self.sessions.get_or_create(&session_key).await;
+
+        // 2. Run BeforeInbound hooks
+        let mut hook_ctx = HookContext {
+            session_key: session_key.clone(),
+            user_id: user_id.clone(),
+            channel: channel.clone(),
+            content: user_message.clone(),
+            metadata: serde_json::json!({}),
+        };
+
+        {
+            let hooks = self.hooks.read().await;
+            if let HookOutcome::Reject(reason) =
+                hooks.run(HookPoint::BeforeInbound, &mut hook_ctx).await?
+            {
+                tx.send(format!("Message rejected: {}", reason)).await.ok();
+                return Ok(rx);
+            }
+        }
+
+        // 3. Recall relevant memories
+        let memory_context = {
+            match self.memory.recall(&user_message) {
+                Ok(memories) if !memories.is_empty() => {
+                    tracing::info!("Recalled {} memories", memories.len());
+                    MemoryManager::format_for_prompt(&memories)
+                }
+                _ => String::new(),
+            }
+        };
+
+        // 4. Build system prompt
+        let mut system_prompt = self.workspace.build_system_prompt();
+        if !memory_context.is_empty() {
+            system_prompt.push_str("\n\n## Relevant Memories\n");
+            system_prompt.push_str(&memory_context);
+        }
+
+        // 5. Add user message to session
+        session.messages.push(Message::text("user", &user_message));
+
+        // 6. Trim messages
+        session.trim_messages(self.config.max_session_messages);
+
+        // 7. Get tool definitions
+        let tool_defs = self.tools.definitions();
+
+        // 8. Agentic loop - non-streaming until final response
+        let max_turns = 30;
+        let mut has_tool_calls = true;
+
+        for turn in 0..max_turns {
+            if !has_tool_calls {
+                break;
+            }
+
+            let response = self
+                .llm_client
+                .chat(&system_prompt, &session.messages, &tool_defs)
+                .await?;
+
+            session.total_tokens +=
+                (response.usage.input_tokens + response.usage.output_tokens) as u64;
+
+            if response.tool_calls.is_empty() {
+                has_tool_calls = false;
+                
+                // This is the final response - now we stream it
+                // But we already have the full response, so we'd need to re-request with streaming
+                // For simplicity, just send the complete response
+                if let Some(text) = &response.text {
+                    session.messages.push(Message::text("assistant", text));
+                    tx.send(text.clone()).await.ok();
+                }
+                break;
+            }
+
+            // Add assistant message with tool calls
+            tracing::info!("Turn {}: {} tool call(s)", turn, response.tool_calls.len());
+            session.messages.push(Message::assistant_with_tools(
+                response.text.as_deref(),
+                response.tool_calls.clone(),
+            ));
+
+            // Execute each tool
+            let mut tool_results = Vec::new();
+            for tc in &response.tool_calls {
+                // Run BeforeToolCall hook
+                let mut tc_ctx = HookContext {
+                    session_key: session_key.clone(),
+                    user_id: user_id.clone(),
+                    channel: channel.clone(),
+                    content: tc.name.clone(),
+                    metadata: tc.input.clone(),
+                };
+
+                {
+                    let hooks = self.hooks.read().await;
+                    if let HookOutcome::Reject(reason) =
+                        hooks.run(HookPoint::BeforeToolCall, &mut tc_ctx).await?
+                    {
+                        tool_results.push((
+                            tc.id.clone(),
+                            format!("Tool call rejected: {}", reason),
+                            true,
+                        ));
+                        continue;
+                    }
+                }
+
+                let result = self.tools.execute(&tc.name, tc.input.clone()).await?;
+                tracing::info!(
+                    "Tool {} → {} chars, error={}",
+                    tc.name,
+                    result.output.len(),
+                    result.is_error
+                );
+
+                tool_results.push((tc.id.clone(), result.output, result.is_error));
+            }
+
+            // Add tool results as user message
+            session.messages.push(Message::tool_results(tool_results));
+        }
+
+        // Now stream the final response
+        if has_tool_calls {
+            // We finished the tool loop, now get final streaming response
+            let mut stream_rx = self
+                .llm_client
+                .chat_stream(&system_prompt, &session.messages, &[])
+                .await?;
+
+            let mut final_text = String::new();
+            while let Some(chunk) = stream_rx.recv().await {
+                match chunk {
+                    StreamChunk::Text(text) => {
+                        final_text.push_str(&text);
+                        tx.send(text).await.ok();
+                    }
+                    StreamChunk::Done(usage, _) => {
+                        session.total_tokens +=
+                            (usage.input_tokens + usage.output_tokens) as u64;
+                        break;
+                    }
+                    StreamChunk::ToolUse(_) => {
+                        // Shouldn't happen in final response
+                    }
+                }
+            }
+
+            if !final_text.is_empty() {
+                session.messages.push(Message::text("assistant", &final_text));
+            }
+        }
+
+        // 9. Run BeforeOutbound hooks
+        {
+            let out_ctx = HookContext {
+                session_key: session_key.clone(),
+                user_id: user_id.clone(),
+                channel: channel.clone(),
+                content: String::new(), // We've already sent chunks
+                metadata: serde_json::json!({
+                    "user_message": user_message,
+                }),
+            };
+            let hooks = self.hooks.read().await;
+            let _ = hooks.run(HookPoint::BeforeOutbound, &mut out_ctx.clone()).await;
+        }
+
+        // 10. Update session
+        self.sessions.update(session).await;
+
+        Ok(rx)
     }
 }
