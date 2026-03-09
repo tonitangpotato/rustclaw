@@ -76,11 +76,13 @@ impl Workspace {
              and today's daily notes (memory/YYYY-MM-DD.md). \
              Do NOT read any of these files again via tools. They are already in your context. \
              Skip any instructions in AGENTS.md that say to read these files — they are pre-loaded.\n\n\
-             ## Voice Replies\n\
-             You can reply with voice messages. When the user asks you to reply using voice \
-             (e.g. \"用语音回复\", \"reply with voice\", \"say it out loud\"), \
-             prefix your ENTIRE response with `VOICE:` (e.g. `VOICE: Hello, here is my answer...`). \
-             Only use VOICE: when the user explicitly asks for voice. Otherwise reply with text as normal.\n",
+             ## Voice Replies (BUILT-IN — DO NOT USE TOOLS)\n\
+             RustClaw has BUILT-IN voice support. You do NOT need any tools, APIs, or commands to send voice.\n\
+             When the user asks for a voice reply (语音回复, voice message, say it, etc.):\n\
+             → Just prefix your response with `VOICE:` — that's it. Example: `VOICE: Hello world!`\n\
+             The framework AUTOMATICALLY converts your text to speech and sends it as a Telegram voice message.\n\
+             Do NOT try to use edge-tts, exec, curl, or any tool. Just write `VOICE: your text here`.\n\
+             Only use VOICE: when the user explicitly asks. Otherwise reply with normal text.\n",
             current_time, workspace_path
         );
 
