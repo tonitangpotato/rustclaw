@@ -353,13 +353,14 @@ impl AgentRunner {
 
     /// Execute a tool with sandbox enforcement.
     /// Checks capabilities, enforces timeouts, and validates path access.
+    /// When Docker mode is enabled, exec commands run inside a container.
     async fn execute_tool_sandboxed(
         &self,
         tool_name: &str,
         input: serde_json::Value,
     ) -> Result<crate::tools::ToolResult, crate::sandbox::SandboxError> {
         use std::time::Duration;
-        use crate::sandbox::SandboxError;
+        use crate::sandbox::{SandboxError, SandboxMode, DockerSandbox};
 
         // If sandbox is disabled, execute directly
         if !self.sandbox.is_enabled() {
@@ -370,6 +371,34 @@ impl AgentRunner {
 
         // Check capabilities before execution
         self.sandbox.check_tool_capabilities(tool_name, &input)?;
+
+        // Check if Docker mode is configured for exec commands
+        if tool_name == "exec" {
+            if let SandboxMode::Docker { ref image, network, ref mounts } = self.config.sandbox.mode {
+                let command = input.get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                let mut docker = DockerSandbox::new(image)
+                    .with_network(network)
+                    .with_timeout_ms(self.sandbox.get_timeout_ms(tool_name));
+
+                for (host, container) in mounts {
+                    docker = docker.with_mount(host, container);
+                }
+
+                return match docker.execute(command).await {
+                    Ok(output) => Ok(crate::tools::ToolResult {
+                        output,
+                        is_error: false,
+                    }),
+                    Err(e) => Ok(crate::tools::ToolResult {
+                        output: format!("Docker exec error: {}", e),
+                        is_error: true,
+                    }),
+                };
+            }
+        }
 
         // Get timeout for this tool
         let timeout_ms = self.sandbox.get_timeout_ms(tool_name);

@@ -123,6 +123,10 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub enabled: bool,
 
+    /// Sandbox mode: "capabilities" (default) or "docker"
+    #[serde(default)]
+    pub mode: SandboxMode,
+
     /// Default timeout for all tools (ms)
     #[serde(default = "default_timeout")]
     pub default_timeout_ms: u64,
@@ -140,6 +144,7 @@ impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            mode: SandboxMode::default(),
             default_timeout_ms: default_timeout(),
             tools: HashMap::new(),
         }
@@ -409,7 +414,8 @@ impl PartialEq for ToolCapabilities {
 // ─── Docker Sandbox ──────────────────────────────────────────
 
 /// Sandbox mode for tool execution.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
 pub enum SandboxMode {
     /// Use capability-based sandboxing (current implementation).
     Capabilities,
