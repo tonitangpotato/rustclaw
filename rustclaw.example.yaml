@@ -1,0 +1,42 @@
+# RustClaw Configuration
+# Copy to rustclaw.yaml and fill in your values.
+
+# Workspace directory (where SOUL.md, AGENTS.md, etc. live)
+workspace: "."
+
+# LLM configuration
+llm:
+  provider: anthropic
+  model: claude-sonnet-4-5-20250514
+  # api_key: sk-ant-...  # or set ANTHROPIC_API_KEY env var
+  max_tokens: 8192
+  temperature: 0.7
+
+# Channel configuration
+channels:
+  telegram:
+    bot_token: "YOUR_BOT_TOKEN"
+    allowed_users: []  # empty = allow all
+    dm_policy: "owner"  # owner | open
+    group_policy: "mention"  # mention | open | off
+
+# Memory (Engram) configuration
+memory:
+  engram_db: "./engram-memory.db"
+  auto_recall: true
+  auto_store: true
+  recall_limit: 5
+
+# Heartbeat interval in seconds (0 = disabled)
+heartbeat_interval: 1800
+
+# Multi-agent configuration (optional)
+# agents:
+#   - id: visibility
+#     name: "Visibility Agent"
+#     workspace: "./agents/visibility"
+#     model: claude-sonnet-4-5-20250514
+#   - id: builder
+#     name: "Builder Agent"  
+#     workspace: "./agents/builder"
+#     model: claude-sonnet-4-5-20250514

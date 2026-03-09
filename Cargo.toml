@@ -1,0 +1,51 @@
+[package]
+name = "rustclaw"
+version = "0.1.0"
+edition = "2021"
+authors = ["tonitangpotato <tonitangpotato@users.noreply.github.com>"]
+description = "Rust-native AI agent framework with cognitive memory, multi-agent orchestration, and security-first design"
+repository = "https://github.com/tonitangpotato/rustclaw"
+license = "MIT"
+readme = "README.md"
+keywords = ["agent", "ai", "llm", "memory", "rust"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+# Core async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP
+axum = "0.8"
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Memory
+engramai = "0.1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+anyhow = "1"
+thiserror = "1"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+base64 = "0.22"
+
+# Process execution
+tokio-process = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

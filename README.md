@@ -1,0 +1,119 @@
+# 🦀 RustClaw
+
+**Rust-native AI agent framework** with cognitive memory, multi-agent orchestration, and security-first design.
+
+> Single binary. Zero IPC overhead. Native Engram memory.
+
+## Why RustClaw?
+
+| Feature | OpenClaw | IronClaw | RustClaw |
+|---|---|---|---|
+| Language | TypeScript | Rust | **Rust** |
+| Memory | MCP/external | PostgreSQL | **engramai (native)** |
+| Multi-agent | Config-based | Not yet | **CEO pattern + GID** |
+| Binary size | ~200MB (Node) | ~15MB | **~7MB** |
+| Startup | ~2s | ~1s | **<100ms** |
+| Memory recall | ~200ms (MCP) | N/A | **~5ms** |
+
+## Architecture
+
+```
+┌──────────────────────────────────────┐
+│            RustClaw Agent            │
+│                                      │
+│  Workspace Files (SOUL.md, etc.)     │
+│  ↕                                   │
+│  Hooks (6 lifecycle points)          │
+│  ↕                                   │
+│  Agent Loop (LLM + Tools)            │
+│  ↕                                   │
+│  Engram (native cognitive memory)    │
+└──────────────┬───────────────────────┘
+               │
+    ┌──────────┼──────────┐
+    ↓          ↓          ↓
+ Telegram    CLI       (future)
+```
+
+## Quick Start
+
+```bash
+# Build
+cargo build --release
+
+# Copy and edit config
+cp rustclaw.example.yaml rustclaw.yaml
+# Edit rustclaw.yaml with your API key and bot token
+
+# Create workspace files
+echo "Be helpful." > SOUL.md
+
+# Run
+./target/release/rustclaw run
+```
+
+## Workspace Files
+
+RustClaw uses markdown files as its "operating system" — compatible with OpenClaw:
+
+| File | Purpose |
+|---|---|
+| `SOUL.md` | Agent personality and values |
+| `AGENTS.md` | Workspace conventions |
+| `USER.md` | Info about the human |
+| `TOOLS.md` | Local tool notes |
+| `HEARTBEAT.md` | Periodic check tasks |
+| `MEMORY.md` | Long-term memory |
+| `IDENTITY.md` | Name, emoji, vibe |
+
+## Tools
+
+Built-in tools available to the agent:
+
+- **exec** — Execute shell commands
+- **read_file** — Read file contents
+- **write_file** — Write files (creates dirs)
+- **list_dir** — List directory contents
+- **web_fetch** — Fetch URL content
+
+## Hooks
+
+6 lifecycle hook points (inspired by IronClaw):
+
+```rust
+enum HookPoint {
+    BeforeInbound,    // Before processing user message
+    BeforeToolCall,   // Before executing a tool
+    BeforeOutbound,   // Before sending response
+    OnSessionStart,   // New session created
+    OnSessionEnd,     // Session ended
+    TransformResponse // Transform final response
+}
+```
+
+## Memory
+
+Native [engramai](https://crates.io/crates/engramai) integration — neuroscience-grounded cognitive memory:
+
+- **ACT-R** activation model
+- **Hebbian** learning (co-activation links)
+- **Ebbinghaus** forgetting curves
+- **Auto-recall** before each LLM call (~5ms)
+- **Auto-consolidation** during heartbeats
+
+## Roadmap
+
+- [x] Core agent loop with tool execution
+- [x] Telegram channel (long polling)
+- [x] Native Engram memory
+- [x] 6-point hook system
+- [ ] SQLite session persistence
+- [ ] Voice I/O (STT + TTS)
+- [ ] Cron & heartbeat system
+- [ ] Multi-agent CEO orchestration (GID integration)
+- [ ] Safety layer (prompt injection, leak detection)
+- [ ] WASM tool sandbox
+
+## License
+
+MIT
