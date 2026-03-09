@@ -12,13 +12,22 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::config::Config;
+use crate::config::{AgentConfig, Config};
 use crate::hooks::{HookContext, HookOutcome, HookPoint, HookRegistry};
 use crate::llm::{self, LlmClient, Message};
 use crate::memory::MemoryManager;
 use crate::session::SessionManager;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
+
+/// A spawned sub-agent with its own workspace and session namespace.
+pub struct SubAgent {
+    pub id: String,
+    pub name: String,
+    pub workspace: Workspace,
+    pub session_prefix: String,
+    pub llm_client: Box<dyn LlmClient>,
+}
 
 /// The core agent runner.
 pub struct AgentRunner {
@@ -221,5 +230,114 @@ impl AgentRunner {
         self.sessions.update(session).await;
 
         Ok(response_text)
+    }
+
+    /// Spawn a sub-agent with a different workspace and optional model override.
+    /// Returns a SubAgent that can be used to process messages in isolation.
+    pub fn spawn_agent(&self, agent_config: &AgentConfig) -> anyhow::Result<SubAgent> {
+        // Load workspace from agent config or use default
+        let workspace_dir = agent_config
+            .workspace
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or(self.config.workspace.as_deref().unwrap_or("."));
+        
+        let workspace = Workspace::load(workspace_dir)?;
+
+        // Create LLM client with model override if specified
+        let mut llm_config = self.config.llm.clone();
+        if let Some(model) = &agent_config.model {
+            llm_config.model = model.clone();
+        }
+        let llm_client = llm::create_client(&llm_config)?;
+
+        let session_prefix = format!("agent:{}:", agent_config.id);
+        let name = agent_config
+            .name
+            .clone()
+            .unwrap_or_else(|| agent_config.id.clone());
+
+        tracing::info!(
+            "Spawned sub-agent '{}' (workspace: {}, model: {})",
+            name,
+            workspace_dir,
+            llm_config.model
+        );
+
+        Ok(SubAgent {
+            id: agent_config.id.clone(),
+            name,
+            workspace,
+            session_prefix,
+            llm_client,
+        })
+    }
+
+    /// Process a message using a sub-agent.
+    pub async fn process_with_subagent(
+        &self,
+        subagent: &SubAgent,
+        user_message: &str,
+        session_suffix: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let session_key = format!(
+            "{}{}",
+            subagent.session_prefix,
+            session_suffix.unwrap_or("main")
+        );
+
+        tracing::info!(
+            "Sub-agent '{}' processing: {}",
+            subagent.name,
+            &user_message[..user_message.len().min(50)]
+        );
+
+        // Get or create session
+        let mut session = self.sessions.get_or_create(&session_key).await;
+
+        // Build system prompt from sub-agent's workspace
+        let system_prompt = subagent.workspace.build_system_prompt();
+
+        // Add user message
+        session.messages.push(Message::text("user", user_message));
+
+        // Trim messages
+        session.trim_messages(self.config.max_session_messages);
+
+        // Get tool definitions (shared tools for now)
+        let tool_defs = self.tools.definitions();
+
+        // Simple one-shot completion (no tool loop for sub-agents for now)
+        let response = subagent
+            .llm_client
+            .chat(&system_prompt, &session.messages, &tool_defs)
+            .await?;
+
+        let response_text = response.text.clone().unwrap_or_default();
+
+        // Add response to session
+        if !response_text.is_empty() {
+            session.messages.push(Message::text("assistant", &response_text));
+        }
+
+        // Update session
+        self.sessions.update(session).await;
+
+        Ok(response_text)
+    }
+
+    /// Get all configured agents.
+    pub fn agents(&self) -> &[AgentConfig] {
+        &self.config.agents
+    }
+
+    /// Find an agent config by ID.
+    pub fn find_agent(&self, id: &str) -> Option<&AgentConfig> {
+        self.config.agents.iter().find(|a| a.id == id)
+    }
+
+    /// Get the default agent config (if any).
+    pub fn default_agent(&self) -> Option<&AgentConfig> {
+        self.config.agents.iter().find(|a| a.default)
     }
 }
