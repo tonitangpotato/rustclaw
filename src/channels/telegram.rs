@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::agent::AgentRunner;
 use crate::config::TelegramConfig;
+use crate::tts::{synthesize, TtsConfig};
 
 const TELEGRAM_API: &str = "https://api.telegram.org";
 
@@ -81,7 +82,11 @@ impl TelegramBot {
         let text = message["text"].as_str().unwrap_or("");
 
         if text.is_empty() {
-            // TODO: Handle voice messages (STT)
+            // Check for voice message
+            if message.get("voice").is_some() || message.get("audio").is_some() {
+                self.send_message(chat_id, "🎤 Voice messages not yet supported. Please type your message.").await?;
+                return Ok(());
+            }
             return Ok(());
         }
 
@@ -123,7 +128,38 @@ impl TelegramBot {
                     && trimmed != "NO_REPLY"
                     && trimmed != "HEARTBEAT_OK"
                 {
-                    self.send_message(chat_id, trimmed).await?;
+                    // Check if response should be sent as voice
+                    if let Some(voice_text) = Self::extract_voice_text(trimmed) {
+                        // Send "recording voice" indicator
+                        let _ = self
+                            .client
+                            .post(self.api_url("sendChatAction"))
+                            .json(&serde_json::json!({
+                                "chat_id": chat_id,
+                                "action": "record_voice",
+                            }))
+                            .send()
+                            .await;
+
+                        // Synthesize TTS
+                        let tts_config = TtsConfig::default();
+                        match synthesize(&voice_text, &tts_config).await {
+                            Ok(ogg_path) => {
+                                if let Err(e) = self.send_voice(chat_id, &ogg_path).await {
+                                    tracing::error!("Failed to send voice: {}", e);
+                                    // Fallback to text
+                                    self.send_message(chat_id, trimmed).await?;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("TTS synthesis failed: {}", e);
+                                // Fallback to text
+                                self.send_message(chat_id, trimmed).await?;
+                            }
+                        }
+                    } else {
+                        self.send_message(chat_id, trimmed).await?;
+                    }
                 }
             }
             Err(e) => {
@@ -133,6 +169,20 @@ impl TelegramBot {
         }
 
         Ok(())
+    }
+
+    /// Extract voice text if response should be sent as voice.
+    /// Returns None if not a voice response, Some(text) with prefix stripped otherwise.
+    fn extract_voice_text(response: &str) -> Option<String> {
+        // Check for VOICE: prefix
+        if let Some(rest) = response.strip_prefix("VOICE:") {
+            return Some(rest.trim().to_string());
+        }
+        // Check for 🔊 prefix
+        if let Some(rest) = response.strip_prefix("🔊") {
+            return Some(rest.trim().to_string());
+        }
+        None
     }
 
     /// Run the long-polling loop.
