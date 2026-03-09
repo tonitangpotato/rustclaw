@@ -10,7 +10,7 @@
 |---|---|---|---|
 | Language | TypeScript | Rust | **Rust** |
 | Memory | MCP/external | PostgreSQL | **engramai (native)** |
-| Multi-agent | Config-based | Not yet | **CEO pattern + GID** |
+| Multi-agent | Config-based | Not yet | **Hierarchical orchestration + GID** |
 | Binary size | ~200MB (Node) | ~15MB | **~7MB** |
 | Startup | ~2s | ~1s | **<100ms** |
 | Memory recall | ~200ms (MCP) | N/A | **~5ms** |
@@ -110,10 +110,12 @@ Native [engramai](https://crates.io/crates/engramai) integration — neuroscienc
 - [ ] SQLite session persistence
 - [ ] Voice I/O (STT + TTS)
 - [ ] Cron & heartbeat system
-- [ ] Multi-agent CEO orchestration (GID integration)
+- [ ] Multi-agent orchestration (planner → DAG → parallel workers)
 - [ ] Safety layer (prompt injection, leak detection)
 - [ ] WASM tool sandbox
 
 ## License
 
-MIT
+**AGPL-3.0** — Free for open source use.
+
+For commercial/proprietary deployments, a separate commercial license is available. See [LICENSE](LICENSE) for details.
