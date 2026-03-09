@@ -100,17 +100,22 @@ async fn run_whisper(wav_path: &str, output_dir: &str) -> anyhow::Result<()> {
             "--model", "base",
             "--output_format", "txt",
             "--output_dir", output_dir,
+            "--language", "zh",
         ])
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .status()
+        .output()
         .await;
 
     match result {
-        Ok(status) if status.success() => return Ok(()),
-        Ok(_) => {
-            // whisper exists but failed, don't try alternatives
-            anyhow::bail!("whisper command failed");
+        Ok(output) if output.status.success() => return Ok(()),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            tracing::warn!("whisper stderr: {}", stderr);
+            tracing::warn!("whisper stdout: {}", stdout);
+            tracing::warn!("whisper exit code: {:?}", output.status.code());
+            anyhow::bail!("whisper command failed (exit {}): {}", output.status, stderr);
         }
         Err(_) => {
             // whisper not found, try whisper-cli
