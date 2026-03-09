@@ -266,7 +266,7 @@ impl SignalBot {
                                 }
                             }
                             Err(e) => {
-                                tracing::debug!("Failed to parse signal-cli output: {} (line: {})", e, &line[..line.len().min(100)]);
+                                tracing::debug!("Failed to parse signal-cli output: {} (line: {})", e, { let _end = line.len().min(100); let _end = line.floor_char_boundary(_end); &line[.._end] });
                             }
                         }
                     }

@@ -150,7 +150,7 @@ pub async fn process_cron_triggers(
         tracing::info!(
             "Processing cron job '{}': {}",
             trigger.job_id,
-            &trigger.message[..trigger.message.len().min(50)]
+            { let _end = trigger.message.len().min(50); let _end = trigger.message.floor_char_boundary(_end); &trigger.message[.._end] }
         );
 
         match runner
@@ -168,7 +168,7 @@ pub async fn process_cron_triggers(
                     tracing::info!(
                         "Cron job '{}' response: {}",
                         trigger.job_id,
-                        &trimmed[..trimmed.len().min(200)]
+                        { let _end = trimmed.len().min(200); let _end = trimmed.floor_char_boundary(_end); &trimmed[.._end] }
                     );
                     // TODO: Route response to appropriate channel if configured
                 }

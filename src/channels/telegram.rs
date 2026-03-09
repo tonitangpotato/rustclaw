@@ -702,7 +702,7 @@ impl TelegramBot {
 
         // Step 3: Transcribe using STT
         let transcription = stt::transcribe(ogg_path).await?;
-        tracing::info!("Transcribed: {}", &transcription[..transcription.len().min(50)]);
+        tracing::info!("Transcribed: {}", { let _end = transcription.len().min(50); let _end = transcription.floor_char_boundary(_end); &transcription[.._end] });
 
         // Clean up the input file
         let _ = tokio::fs::remove_file(ogg_path).await;

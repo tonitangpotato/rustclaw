@@ -43,7 +43,7 @@ pub async fn start_heartbeat(
                     if response.trim() == "HEARTBEAT_OK" {
                         tracing::debug!("Heartbeat: nothing to do");
                     } else {
-                        tracing::info!("Heartbeat response: {}", &response[..response.len().min(200)]);
+                        tracing::info!("Heartbeat response: {}", { let _end = response.len().min(200); let _end = response.floor_char_boundary(_end); &response[.._end] });
                         // TODO: Route heartbeat responses to appropriate channel
                     }
                 }

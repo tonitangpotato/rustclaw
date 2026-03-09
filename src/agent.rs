@@ -395,7 +395,7 @@ impl AgentRunner {
         tracing::info!(
             "Sub-agent '{}' processing: {}",
             subagent.name,
-            &user_message[..user_message.len().min(50)]
+            { let _end = user_message.len().min(50); let _end = user_message.floor_char_boundary(_end); &user_message[.._end] }
         );
 
         // Get or create session
