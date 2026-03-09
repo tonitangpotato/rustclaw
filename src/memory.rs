@@ -98,6 +98,40 @@ impl MemoryManager {
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         Ok(serde_json::to_value(stats)?)
     }
+    
+    /// Explicitly recall memories (for LLM tool use).
+    /// Unlike recall(), this ignores auto_recall setting.
+    pub fn recall_explicit(&self, query: &str, limit: usize) -> anyhow::Result<Vec<RecalledMemory>> {
+        let mut engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let results = engram
+            .recall(query, limit, None, None)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        Ok(results
+            .into_iter()
+            .map(|r| RecalledMemory {
+                content: r.record.content.clone(),
+                memory_type: format!("{:?}", r.record.memory_type),
+                confidence: r.activation,
+                source: Some(r.record.source.clone()),
+            })
+            .collect())
+    }
+    
+    /// Explicitly store a memory (for LLM tool use).
+    /// Unlike store(), this ignores auto_store setting.
+    pub fn store_explicit(
+        &self,
+        content: &str,
+        memory_type: MemoryType,
+        importance: f64,
+    ) -> anyhow::Result<()> {
+        let mut engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        engram
+            .add(content, memory_type, Some(importance), Some("agent_tool"), None)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        Ok(())
+    }
 
     /// Format recalled memories for injection into system prompt.
     pub fn format_for_prompt(memories: &[RecalledMemory]) -> String {

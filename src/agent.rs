@@ -35,7 +35,7 @@ pub struct SubAgent {
 pub struct AgentRunner {
     config: Config,
     workspace: Workspace,
-    memory: MemoryManager,
+    memory: Arc<MemoryManager>,
     sessions: SessionManager,
     hooks: Arc<RwLock<HookRegistry>>,
     tools: ToolRegistry,
@@ -48,7 +48,7 @@ impl AgentRunner {
     pub fn new(
         config: Config,
         workspace: Workspace,
-        memory: MemoryManager,
+        memory: Arc<MemoryManager>,
         sessions: SessionManager,
         hooks: HookRegistry,
         tools: ToolRegistry,

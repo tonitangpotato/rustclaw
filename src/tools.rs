@@ -1,11 +1,16 @@
-//! Tool system — exec, file operations, web fetch.
+//! Tool system — exec, file operations, web fetch, memory.
 //!
 //! Tools are registered in a registry and dispatched by the agent loop.
 //! Each tool implements the Tool trait and provides its JSON schema for LLM.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use engramai::MemoryType;
 use serde::Serialize;
 use serde_json::Value;
+
+use crate::memory::MemoryManager;
 
 /// Result of a tool execution.
 #[derive(Debug, Clone, Serialize)]
@@ -50,6 +55,14 @@ impl ToolRegistry {
         registry.register(Box::new(WebFetchTool));
         registry.register(Box::new(EditFileTool::new(workspace_root)));
         registry.register(Box::new(SearchFilesTool::new(workspace_root)));
+        registry
+    }
+    
+    /// Register all default tools including memory tools.
+    pub fn with_defaults_and_memory(workspace_root: &str, memory: Arc<MemoryManager>) -> Self {
+        let mut registry = Self::with_defaults(workspace_root);
+        registry.register(Box::new(EngramRecallTool::new(memory.clone())));
+        registry.register(Box::new(EngramStoreTool::new(memory)));
         registry
     }
 
@@ -715,4 +728,178 @@ impl Tool for SearchFilesTool {
 /// Simple shell escaping for command arguments.
 fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+// ─── Engram Recall Tool ──────────────────────────────────────
+
+/// Search memories using Engram.
+pub struct EngramRecallTool {
+    memory: Arc<MemoryManager>,
+}
+
+impl EngramRecallTool {
+    pub fn new(memory: Arc<MemoryManager>) -> Self {
+        Self { memory }
+    }
+}
+
+#[async_trait]
+impl Tool for EngramRecallTool {
+    fn name(&self) -> &str {
+        "engram_recall"
+    }
+
+    fn description(&self) -> &str {
+        "Search your memories for relevant information. Use this to recall past conversations, facts, preferences, or any previously stored knowledge."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query to find relevant memories"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of memories to return (default: 5)"
+                }
+            },
+            "required": ["query"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let query = input["query"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing 'query' parameter"))?;
+        let limit = input["limit"].as_u64().unwrap_or(5) as usize;
+
+        match self.memory.recall_explicit(query, limit) {
+            Ok(memories) => {
+                if memories.is_empty() {
+                    return Ok(ToolResult {
+                        output: "No relevant memories found.".to_string(),
+                        is_error: false,
+                    });
+                }
+
+                let mut output = format!("Found {} relevant memories:\n\n", memories.len());
+                for (i, mem) in memories.iter().enumerate() {
+                    output.push_str(&format!(
+                        "{}. [{}] (confidence: {:.2})\n   {}\n\n",
+                        i + 1,
+                        mem.memory_type,
+                        mem.confidence,
+                        mem.content
+                    ));
+                }
+
+                Ok(ToolResult {
+                    output,
+                    is_error: false,
+                })
+            }
+            Err(e) => Ok(ToolResult {
+                output: format!("Memory recall failed: {}", e),
+                is_error: true,
+            }),
+        }
+    }
+}
+
+// ─── Engram Store Tool ───────────────────────────────────────
+
+/// Store new memories using Engram.
+pub struct EngramStoreTool {
+    memory: Arc<MemoryManager>,
+}
+
+impl EngramStoreTool {
+    pub fn new(memory: Arc<MemoryManager>) -> Self {
+        Self { memory }
+    }
+}
+
+#[async_trait]
+impl Tool for EngramStoreTool {
+    fn name(&self) -> &str {
+        "engram_store"
+    }
+
+    fn description(&self) -> &str {
+        "Store important information in memory for future recall. Use this to remember facts, preferences, lessons learned, or important events."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "The information to remember"
+                },
+                "memory_type": {
+                    "type": "string",
+                    "enum": ["factual", "episodic", "procedural", "relational", "emotional", "opinion", "causal"],
+                    "description": "Type of memory: factual (facts), episodic (events), procedural (how-to), relational (people/connections), emotional (feelings), opinion (preferences), causal (cause/effect)"
+                },
+                "importance": {
+                    "type": "number",
+                    "description": "Importance score from 0.0 to 1.0 (default: 0.5)"
+                }
+            },
+            "required": ["content", "memory_type"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let content = input["content"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing 'content' parameter"))?;
+        let memory_type_str = input["memory_type"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing 'memory_type' parameter"))?;
+        let importance = input["importance"].as_f64().unwrap_or(0.5);
+
+        let memory_type = match memory_type_str.to_lowercase().as_str() {
+            "factual" => MemoryType::Factual,
+            "episodic" => MemoryType::Episodic,
+            "procedural" => MemoryType::Procedural,
+            "relational" => MemoryType::Relational,
+            "emotional" => MemoryType::Emotional,
+            "opinion" => MemoryType::Opinion,
+            "causal" => MemoryType::Causal,
+            _ => {
+                return Ok(ToolResult {
+                    output: format!(
+                        "Invalid memory_type '{}'. Must be one of: factual, episodic, procedural, relational, emotional, opinion, causal",
+                        memory_type_str
+                    ),
+                    is_error: true,
+                });
+            }
+        };
+
+        match self.memory.store_explicit(content, memory_type, importance) {
+            Ok(()) => Ok(ToolResult {
+                output: format!(
+                    "Memory stored successfully: {} (type: {}, importance: {:.2})",
+                    if content.len() > 50 {
+                        format!("{}...", &content[..50])
+                    } else {
+                        content.to_string()
+                    },
+                    memory_type_str,
+                    importance
+                ),
+                is_error: false,
+            }),
+            Err(e) => Ok(ToolResult {
+                output: format!("Failed to store memory: {}", e),
+                is_error: true,
+            }),
+        }
+    }
 }

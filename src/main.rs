@@ -74,8 +74,8 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("Workspace loaded: {}", workspace_dir);
             tracing::info!("Agent: {}", ws.identity_name().unwrap_or("unnamed"));
 
-            // Initialize memory
-            let mem = memory::MemoryManager::new(&cfg, &workspace_dir).await?;
+            // Initialize memory (wrap in Arc for tool sharing)
+            let mem = std::sync::Arc::new(memory::MemoryManager::new(&cfg, &workspace_dir).await?);
             tracing::info!("Memory initialized");
 
             // Initialize hooks with safety checks
@@ -88,8 +88,8 @@ async fn main() -> anyhow::Result<()> {
             let sessions = session::SessionManager::new(&cfg).await?;
             tracing::info!("Session manager ready");
 
-            // Initialize tools
-            let tools = tools::ToolRegistry::with_defaults(&workspace_dir);
+            // Initialize tools with memory access for engram_recall/engram_store
+            let tools = tools::ToolRegistry::with_defaults_and_memory(&workspace_dir, mem.clone());
             tracing::info!("Tools registered: {}", tools.definitions().len());
 
             // Build agent runner
