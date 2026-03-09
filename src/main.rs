@@ -8,6 +8,7 @@ mod heartbeat;
 mod hooks;
 mod llm;
 mod memory;
+mod reload;
 mod safety;
 mod session;
 mod stt;
@@ -97,6 +98,11 @@ async fn main() -> anyhow::Result<()> {
 
             // Start channels (wraps runner in Arc)
             let runner = std::sync::Arc::new(runner);
+
+            // Start config hot-reload watcher
+            let (_config_tx, _config_rx, _watcher) =
+                reload::start_config_watcher(&config, cfg.clone())?;
+            reload::start_sighup_listener(config.clone(), _config_tx.clone()).await;
 
             // Start heartbeat
             heartbeat::start_heartbeat(

@@ -39,6 +39,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Regex
 regex = "1"
 
+# File watching (config hot-reload)
+notify = { version = "7", default-features = false, features = ["macos_kqueue"] }
+
 # Utilities
 anyhow = "1"
 futures-util = "0.3"
