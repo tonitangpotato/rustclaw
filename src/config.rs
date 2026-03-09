@@ -92,7 +92,9 @@ fn default_temperature() -> f32 {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChannelsConfig {
     pub telegram: Option<TelegramConfig>,
-    // Future: discord, slack, etc.
+    pub discord: Option<DiscordConfig>,
+    pub slack: Option<SlackConfig>,
+    pub signal: Option<SignalConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +121,55 @@ fn default_dm_policy() -> String {
 
 fn default_group_policy() -> String {
     "mention".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscordConfig {
+    /// Bot token from Discord Developer Portal
+    pub bot_token: String,
+
+    /// Allowed guild (server) IDs (empty = allow all)
+    #[serde(default)]
+    pub allowed_guilds: Vec<u64>,
+
+    /// Allowed channel IDs (empty = allow all in allowed guilds)
+    #[serde(default)]
+    pub allowed_channels: Vec<u64>,
+
+    /// Group policy: "mention" | "open" | "off"
+    #[serde(default = "default_group_policy")]
+    pub group_policy: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlackConfig {
+    /// Bot OAuth token (xoxb-...)
+    pub bot_token: String,
+
+    /// App-level token for Socket Mode (xapp-...)
+    pub app_token: String,
+
+    /// Allowed channel IDs (empty = allow all where bot is member)
+    #[serde(default)]
+    pub allowed_channels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalConfig {
+    /// Path to signal-cli executable
+    #[serde(default = "default_signal_cli_path")]
+    pub signal_cli_path: String,
+
+    /// Phone number registered with Signal (e.g., "+1234567890")
+    pub phone_number: String,
+
+    /// Allowed phone numbers that can message (empty = allow all)
+    #[serde(default)]
+    pub allowed_numbers: Vec<String>,
+}
+
+fn default_signal_cli_path() -> String {
+    "signal-cli".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

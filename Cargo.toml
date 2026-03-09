@@ -54,5 +54,18 @@ base64 = "0.22"
 # Process execution
 tokio-process = "0.2"
 
+# Discord (serenity)
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "cache", "rustls_backend"] }
+
+# WebSocket for Slack Socket Mode
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+
+# Glob pattern matching (for sandbox path restrictions)
+glob = "0.3"
+
+# HTTP middleware for dashboard
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
+
 [dev-dependencies]
 tempfile = "3"
