@@ -58,12 +58,20 @@ impl TelegramBot {
 
     /// Send a text message with MarkdownV2 formatting, falling back to plain text.
     /// If `reply_to` is provided, the message will be a reply to that message.
+    /// Parses `[[button:text|callback_data]]` patterns into inline keyboard buttons.
     async fn send_message(&self, chat_id: i64, text: &str, reply_to: Option<i64>) -> anyhow::Result<()> {
+        // Extract inline buttons from text
+        let (clean_text, buttons) = extract_inline_buttons(text);
+        
         // Split long messages (Telegram limit: 4096 chars)
-        let chunks = split_message(text, 4096);
+        let chunks = split_message(&clean_text, 4096);
+        let total_chunks = chunks.len();
+        
         for (i, chunk) in chunks.iter().enumerate() {
             // Only reply to the first chunk
             let reply_id = if i == 0 { reply_to } else { None };
+            // Only add buttons to the last chunk
+            let add_buttons = i == total_chunks - 1 && !buttons.is_empty();
             
             // Try MarkdownV2 first
             let escaped = escape_markdown_v2(chunk);
@@ -74,6 +82,9 @@ impl TelegramBot {
             });
             if let Some(msg_id) = reply_id {
                 payload["reply_to_message_id"] = serde_json::json!(msg_id);
+            }
+            if add_buttons {
+                payload["reply_markup"] = build_inline_keyboard(&buttons);
             }
             
             let response = self.client
@@ -91,6 +102,9 @@ impl TelegramBot {
                 });
                 if let Some(msg_id) = reply_id {
                     fallback["reply_to_message_id"] = serde_json::json!(msg_id);
+                }
+                if add_buttons {
+                    fallback["reply_markup"] = build_inline_keyboard(&buttons);
                 }
                 self.client
                     .post(self.api_url("sendMessage"))
@@ -669,7 +683,7 @@ impl TelegramBot {
                 .json(&serde_json::json!({
                     "offset": offset,
                     "timeout": 30,
-                    "allowed_updates": ["message"],
+                    "allowed_updates": ["message", "callback_query"],
                 }))
                 .send()
                 .await;
@@ -738,6 +752,66 @@ fn split_message(text: &str, max_len: usize) -> Vec<&str> {
     }
 
     chunks
+}
+
+/// Inline button parsed from text.
+struct InlineButton {
+    text: String,
+    callback_data: String,
+}
+
+/// Extract inline buttons from text.
+/// Pattern: `[[button:text|callback_data]]`
+/// Returns (clean_text, buttons)
+fn extract_inline_buttons(text: &str) -> (String, Vec<InlineButton>) {
+    let mut buttons = Vec::new();
+    let mut clean_text = text.to_string();
+    
+    // Pattern: [[button:text|callback_data]]
+    let re = regex::Regex::new(r"\[\[button:([^|]+)\|([^\]]+)\]\]").unwrap();
+    
+    for cap in re.captures_iter(text) {
+        buttons.push(InlineButton {
+            text: cap[1].trim().to_string(),
+            callback_data: cap[2].trim().to_string(),
+        });
+    }
+    
+    // Remove button patterns from text
+    clean_text = re.replace_all(&clean_text, "").to_string();
+    // Clean up extra whitespace
+    clean_text = clean_text.trim().to_string();
+    
+    (clean_text, buttons)
+}
+
+/// Build Telegram inline keyboard JSON from buttons.
+/// Places buttons in rows of up to 3 buttons each.
+fn build_inline_keyboard(buttons: &[InlineButton]) -> serde_json::Value {
+    let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut current_row: Vec<serde_json::Value> = Vec::new();
+    
+    for button in buttons {
+        current_row.push(serde_json::json!({
+            "text": button.text,
+            "callback_data": button.callback_data,
+        }));
+        
+        // Max 3 buttons per row
+        if current_row.len() >= 3 {
+            rows.push(current_row);
+            current_row = Vec::new();
+        }
+    }
+    
+    // Add remaining buttons
+    if !current_row.is_empty() {
+        rows.push(current_row);
+    }
+    
+    serde_json::json!({
+        "inline_keyboard": rows
+    })
 }
 
 /// Start the Telegram channel.

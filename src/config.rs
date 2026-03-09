@@ -38,6 +38,10 @@ pub struct Config {
     #[serde(default = "default_max_session_messages")]
     pub max_session_messages: usize,
 
+    /// Model to use for session summarization (optional, enables summarization)
+    /// Can be a cheaper model like "claude-3-haiku-20240307" for cost savings
+    pub summary_model: Option<String>,
+
     /// Cron jobs
     #[serde(default)]
     pub cron: Vec<CronJobConfig>,

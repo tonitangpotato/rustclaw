@@ -1,4 +1,6 @@
 //! Session management with SQLite persistence.
+//!
+//! Includes session summarization for long conversations.
 
 use chrono::Utc;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
@@ -7,7 +9,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::config::Config;
-use crate::llm::Message;
+use crate::llm::{ContentBlock, LlmClient, Message};
 
 /// A conversation session.
 #[derive(Debug, Clone)]
