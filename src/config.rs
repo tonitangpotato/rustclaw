@@ -360,8 +360,26 @@ pub fn load_config(path: &str) -> anyhow::Result<Config> {
         );
     }
     let content = std::fs::read_to_string(path)?;
+    // Expand environment variables: ${VAR_NAME} → value
+    let content = expand_env_vars(&content);
     let config: Config = serde_yaml::from_str(&content)?;
     Ok(config)
+}
+
+/// Expand ${VAR_NAME} patterns in a string with environment variable values.
+fn expand_env_vars(input: &str) -> String {
+    let mut result = input.to_string();
+    // Find all ${...} patterns
+    while let Some(start) = result.find("${") {
+        if let Some(end) = result[start..].find('}') {
+            let var_name = &result[start + 2..start + end];
+            let value = std::env::var(var_name).unwrap_or_default();
+            result = format!("{}{}{}", &result[..start], value, &result[start + end + 1..]);
+        } else {
+            break;
+        }
+    }
+    result
 }
 
 /// Auth mode for the LLM client.

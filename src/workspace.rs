@@ -70,7 +70,12 @@ impl Workspace {
             "You are an AI assistant running on RustClaw.\n\
              Current time: {}\n\
              Workspace: {}\n\n\
-             ## Your Context Files\n",
+             ## Your Context Files\n\
+             IMPORTANT: The following workspace files are ALREADY loaded below — \
+             SOUL.md, AGENTS.md, USER.md, TOOLS.md, IDENTITY.md, MEMORY.md, \
+             and today's daily notes (memory/YYYY-MM-DD.md). \
+             Do NOT read any of these files again via tools. They are already in your context. \
+             Skip any instructions in AGENTS.md that say to read these files — they are pre-loaded.\n",
             current_time, workspace_path
         );
 
@@ -109,7 +114,32 @@ impl Workspace {
             }
         }
 
-        // MEMORY.md only in main session (security) - handled separately
+        // Include MEMORY.md in system prompt (truncated to avoid huge context)
+        if let Some(memory) = &self.memory {
+            output.push_str("\n### MEMORY.md\n");
+            // Truncate to ~8KB to keep context manageable
+            if memory.len() > 8192 {
+                output.push_str(&memory[..8192]);
+                output.push_str("\n\n...(truncated, use read_file for full MEMORY.md)...\n");
+            } else {
+                output.push_str(memory);
+            }
+            output.push_str("\n");
+        }
+
+        // Include today's daily notes if they exist
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let daily_path = self.root.join("memory").join(format!("{}.md", today));
+        if let Ok(daily) = std::fs::read_to_string(&daily_path) {
+            output.push_str(&format!("\n### memory/{}.md (today)\n", today));
+            if daily.len() > 4096 {
+                output.push_str(&daily[..4096]);
+                output.push_str("\n\n...(truncated)...\n");
+            } else {
+                output.push_str(&daily);
+            }
+            output.push_str("\n");
+        }
 
         output
     }

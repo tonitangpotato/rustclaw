@@ -1,3 +1,4 @@
 /target
 rustclaw.yaml
 *.db
+.env
