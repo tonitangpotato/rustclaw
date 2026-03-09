@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{self, LlmConfig};
+use crate::config::{self, AuthMode, LlmConfig};
 
 /// A content block in a message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,10 +128,10 @@ pub trait LlmClient: Send + Sync {
     ) -> anyhow::Result<LlmResponse>;
 }
 
-/// Anthropic Claude client.
+/// Anthropic Claude client (supports both API key and OAuth token).
 pub struct AnthropicClient {
     client: reqwest::Client,
-    api_key: String,
+    auth: AuthMode,
     model: String,
     max_tokens: u32,
     base_url: String,
@@ -139,7 +139,7 @@ pub struct AnthropicClient {
 
 impl AnthropicClient {
     pub fn new(config: &LlmConfig) -> anyhow::Result<Self> {
-        let api_key = config::resolve_api_key(config)?;
+        let auth = config::resolve_auth(config)?;
         let base_url = config
             .base_url
             .clone()
@@ -147,7 +147,7 @@ impl AnthropicClient {
 
         Ok(Self {
             client: reqwest::Client::new(),
-            api_key,
+            auth,
             model: config.model.clone(),
             max_tokens: config.max_tokens,
             base_url,
@@ -183,15 +183,31 @@ impl LlmClient for AnthropicClient {
                 .collect::<Vec<_>>());
         }
 
-        let resp = self
+        let mut req = self
             .client
             .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+            .header("content-type", "application/json");
+
+        // Auth headers differ between API key and OAuth token
+        match &self.auth {
+            AuthMode::ApiKey(key) => {
+                req = req.header("x-api-key", key);
+            }
+            AuthMode::OAuthToken(token) => {
+                req = req
+                    .header("Authorization", format!("Bearer {}", token))
+                    .header(
+                        "anthropic-beta",
+                        "claude-code-20250219,oauth-2025-04-20",
+                    )
+                    .header("user-agent", "claude-cli/2.1.39 (external, cli)")
+                    .header("x-app", "cli")
+                    .header("anthropic-dangerous-direct-browser-access", "true");
+            }
+        }
+
+        let resp = req.json(&body).send().await?;
 
         let status = resp.status();
         let resp_body: serde_json::Value = resp.json().await?;

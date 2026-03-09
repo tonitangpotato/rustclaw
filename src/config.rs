@@ -50,6 +50,9 @@ pub struct LlmConfig {
     /// API key (or use env var)
     pub api_key: Option<String>,
 
+    /// OAuth token (for Claude Max / claude-cli auth)
+    pub auth_token: Option<String>,
+
     /// API base URL override
     pub base_url: Option<String>,
 
@@ -161,25 +164,41 @@ pub fn load_config(path: &str) -> anyhow::Result<Config> {
     Ok(config)
 }
 
-/// Resolve API key from config or environment variable.
-pub fn resolve_api_key(config: &LlmConfig) -> anyhow::Result<String> {
-    if let Some(key) = &config.api_key {
-        if !key.is_empty() {
-            return Ok(key.clone());
+/// Auth mode for the LLM client.
+pub enum AuthMode {
+    ApiKey(String),
+    OAuthToken(String),
+}
+
+/// Resolve authentication from config or environment variable.
+pub fn resolve_auth(config: &LlmConfig) -> anyhow::Result<AuthMode> {
+    // Check OAuth token first
+    if let Some(token) = &config.auth_token {
+        if !token.is_empty() {
+            return Ok(AuthMode::OAuthToken(token.clone()));
         }
     }
 
-    // Try environment variables based on provider
+    // Check API key
+    if let Some(key) = &config.api_key {
+        if !key.is_empty() {
+            return Ok(AuthMode::ApiKey(key.clone()));
+        }
+    }
+
+    // Try environment variables
+    if let Ok(token) = std::env::var("ANTHROPIC_AUTH_TOKEN") {
+        return Ok(AuthMode::OAuthToken(token));
+    }
+    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+        return Ok(AuthMode::ApiKey(key));
+    }
+
     let env_var = match config.provider.as_str() {
-        "anthropic" => "ANTHROPIC_API_KEY",
+        "anthropic" => "ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN",
         "openai" => "OPENAI_API_KEY",
         _ => "LLM_API_KEY",
     };
 
-    std::env::var(env_var).map_err(|_| {
-        anyhow::anyhow!(
-            "No API key found. Set it in config or via {} env var.",
-            env_var
-        )
-    })
+    anyhow::bail!("No auth found. Set api_key/auth_token in config or via {} env var.", env_var)
 }

@@ -100,6 +100,17 @@ impl TelegramBot {
         tracing::info!("Message from user {} in chat {}: {}", user_id, chat_id, 
             if text.len() > 50 { &text[..50] } else { text });
 
+        // Send "typing" indicator
+        let _ = self
+            .client
+            .post(self.api_url("sendChatAction"))
+            .json(&serde_json::json!({
+                "chat_id": chat_id,
+                "action": "typing",
+            }))
+            .send()
+            .await;
+
         // Process with agent
         match self
             .runner
@@ -107,8 +118,12 @@ impl TelegramBot {
             .await
         {
             Ok(response) => {
-                if !response.is_empty() && response != "NO_REPLY" {
-                    self.send_message(chat_id, &response).await?;
+                let trimmed = response.trim();
+                if !trimmed.is_empty()
+                    && trimmed != "NO_REPLY"
+                    && trimmed != "HEARTBEAT_OK"
+                {
+                    self.send_message(chat_id, trimmed).await?;
                 }
             }
             Err(e) => {
