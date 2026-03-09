@@ -75,7 +75,12 @@ impl Workspace {
              SOUL.md, AGENTS.md, USER.md, TOOLS.md, IDENTITY.md, MEMORY.md, \
              and today's daily notes (memory/YYYY-MM-DD.md). \
              Do NOT read any of these files again via tools. They are already in your context. \
-             Skip any instructions in AGENTS.md that say to read these files — they are pre-loaded.\n",
+             Skip any instructions in AGENTS.md that say to read these files — they are pre-loaded.\n\n\
+             ## Voice Replies\n\
+             You can reply with voice messages. When the user asks you to reply using voice \
+             (e.g. \"用语音回复\", \"reply with voice\", \"say it out loud\"), \
+             prefix your ENTIRE response with `VOICE:` (e.g. `VOICE: Hello, here is my answer...`). \
+             Only use VOICE: when the user explicitly asks for voice. Otherwise reply with text as normal.\n",
             current_time, workspace_path
         );
 

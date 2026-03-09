@@ -218,7 +218,11 @@ impl AgentRunner {
                 // No tool calls — add final assistant message and break
                 if !response_text.is_empty() {
                     tracing::info!("Final response ({} chars): {}...", response_text.len(),
-                        &response_text[..response_text.len().min(100)]);
+                        {
+                            let end = response_text.len().min(100);
+                            let end = response_text.floor_char_boundary(end);
+                            &response_text[..end]
+                        });
                     session
                         .messages
                         .push(Message::text("assistant", &response_text));
