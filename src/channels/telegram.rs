@@ -254,7 +254,11 @@ impl TelegramBot {
             .send()
             .await;
 
-        // Process with agent
+        // Process with agent (streaming or regular)
+        if self.config.stream_mode {
+            return self.process_with_streaming(chat_id, &session_key, &text, user_id, reply_to).await;
+        }
+
         match self
             .runner
             .process_message(&session_key, &text, Some(&user_id_str), Some("telegram"))

@@ -176,6 +176,10 @@ pub struct TelegramConfig {
     /// Group policy: "mention" | "open" | "off"
     #[serde(default = "default_group_policy")]
     pub group_policy: String,
+
+    /// Enable streaming mode (edits message as response streams in)
+    #[serde(default)]
+    pub stream_mode: bool,
 }
 
 fn default_dm_policy() -> String {
