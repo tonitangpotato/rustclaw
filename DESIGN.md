@@ -187,33 +187,46 @@ RustClaw's CEO pattern is powered by potato's existing Rust projects:
 
 ## MVP Scope (Week 1-2)
 
-### Must Have
-- [ ] Telegram channel (receive messages, send text/voice, STT via Whisper)
-- [ ] LLM provider: Anthropic (Claude) via HTTP
-- [ ] Session management (SQLite)
-- [ ] Workspace file loading (SOUL.md, AGENTS.md, etc.)
-- [ ] Engram native integration (auto-recall, auto-store)
-- [ ] Hook system (6 hook points)
-- [ ] Basic tool: exec (shell commands)
-- [ ] Basic tool: read/write files
-- [ ] Cron + Heartbeat
-- [ ] TTS via edge-tts
+### Must Have (ALL DONE ✅)
+- [x] Telegram channel (receive messages, send text/voice, STT via Whisper)
+- [x] LLM provider: Anthropic (Claude) via HTTP (OAuth + stealth headers)
+- [x] Session management (SQLite)
+- [x] Workspace file loading (SOUL.md, AGENTS.md, etc.)
+- [x] Engram native integration (auto-recall + auto-store via hooks)
+- [x] Hook system (6 hook points)
+- [x] Basic tool: exec (shell commands)
+- [x] Basic tool: read/write files
+- [x] Cron + Heartbeat
+- [x] TTS via edge-tts
 
-### Nice to Have (Week 3-4)
-- [ ] Multi-agent orchestrator (CEO pattern + git worktree)
-- [ ] Safety layer (prompt injection, leak detection — from IronClaw)
-- [ ] Web fetch tool
-- [ ] Browser control (via CDP)
-- [ ] Multiple LLM providers (OpenAI, Google)
-- [ ] FTS5 session search (search past conversations — from Hermes)
+### Nice to Have (ALL DONE ✅)
+- [x] Multi-agent orchestrator (CEO pattern + git worktree)
+- [x] Safety layer (IronClaw port: sanitizer, leak detector, policy engine, credential detect — 1,995 lines)
+- [x] Web fetch tool
+- [x] Browser control (via CDP)
+- [x] Multiple LLM providers (OpenAI, Google)
+- [x] FTS5 session search (search past conversations — from Hermes)
 
-### Future
-- [ ] Auto skill generation (agent writes SKILL.md after solving hard problems — from Hermes)
-- [ ] Discord channel
+### Also Done ✅ (originally "Future")
+- [x] Auto skill generation (from Hermes)
+- [x] Discord, Slack, Signal, WhatsApp, Matrix channels (6 total)
+- [x] Trajectory export (ShareGPT format)
+- [x] Distributed agent bus (TCP)
+- [x] Serverless hibernate/wake
+- [x] Docker sandbox (ephemeral, capabilities mode — see persistent upgrade below)
+- [x] GID native task graph
+- [x] Credential proxy/injection
+- [x] User modeling (Honcho-style)
+- [x] Config hot-reload (SIGHUP + file watcher)
+- [x] Dashboard (axum web UI on :8081)
+- [x] Streaming responses (SSE)
+
+### Future (not yet implemented)
 - [ ] WASM tool sandbox (from IronClaw)
 - [ ] Modal/serverless execution backend (from Hermes)
 - [ ] Trajectory export for training data (ShareGPT format — from Hermes)
 - [ ] Distributed agents (across machines)
+- [ ] **Persistent Docker sandbox** — current Docker sandbox uses ephemeral containers (`--rm` per exec call), which breaks multi-step workflows (no state persistence, can't see workspace files unless mounted). When multi-user or untrusted code execution is needed, upgrade to: persistent container per session, workspace volume binding, `docker exec` for commands, container lifecycle management (create/reuse/destroy). ~500-800 lines. Not needed for single-user personal use — capabilities mode (path whitelist + timeout) is sufficient.
 
 ## Crate Dependencies
 
