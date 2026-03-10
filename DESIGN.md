@@ -223,6 +223,13 @@ RustClaw's CEO pattern is powered by potato's existing Rust projects:
 
 ### Future (not yet implemented)
 - [ ] WASM tool sandbox (from IronClaw)
+- [ ] **Builder specialist → Claude Code subprocess**
+  - Builder specialist 不自己写代码，而是启动 Claude Code CLI 作为 PTY 子进程
+  - 流程：CEO 分配编码任务 → builder 用 `claude 'task description'` 在目标 workdir 启动 Claude Code → 监控进度 (process poll/log) → 收集结果 → 回报 CEO
+  - 优势：Claude Code 有编码专用优化（extended thinking, ripgrep, context management, coding system prompt）
+  - 用 git worktree 隔离并行任务，避免冲突
+  - 完成后 `openclaw gateway wake` 通知 CEO
+  - 参考：OpenClaw coding-agent skill 已验证此模式可行
 - [ ] Modal/serverless execution backend (from Hermes)
 - [ ] Trajectory export for training data (ShareGPT format — from Hermes)
 - [ ] Distributed agents (across machines)
