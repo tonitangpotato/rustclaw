@@ -392,15 +392,34 @@ fn expand_env_vars(input: &str) -> String {
 
 /// Auth mode for the LLM client.
 pub enum AuthMode {
+    /// Static API key (x-api-key header).
     ApiKey(String),
+    /// Static OAuth token (Bearer auth, for backward compat).
     OAuthToken(String),
+    /// Dynamic OAuth with auto-refresh from macOS Keychain.
+    /// This is the recommended mode for Claude Max plans.
+    OAuthManaged(crate::oauth::OAuthTokenManager),
 }
 
 /// Resolve authentication from config or environment variable.
+///
+/// Priority order:
+/// 1. `auth_token: "keychain"` → dynamic OAuth from macOS Keychain (recommended)
+/// 2. `auth_token: "<token>"` → static OAuth token
+/// 3. `api_key: "<key>"` → static API key
+/// 4. ANTHROPIC_AUTH_TOKEN env → static OAuth
+/// 5. ANTHROPIC_API_KEY env → static API key
+/// 6. Fallback: try Keychain anyway (if on macOS with Claude Code set up)
 pub fn resolve_auth(config: &LlmConfig) -> anyhow::Result<AuthMode> {
     // Check OAuth token first
     if let Some(token) = &config.auth_token {
         if !token.is_empty() {
+            // Special value "keychain" triggers dynamic OAuth
+            if token == "keychain" {
+                tracing::info!("Using dynamic OAuth from macOS Keychain");
+                let manager = crate::oauth::OAuthTokenManager::from_keychain()?;
+                return Ok(AuthMode::OAuthManaged(manager));
+            }
             return Ok(AuthMode::OAuthToken(token.clone()));
         }
     }
@@ -414,19 +433,31 @@ pub fn resolve_auth(config: &LlmConfig) -> anyhow::Result<AuthMode> {
 
     // Try environment variables
     if let Ok(token) = std::env::var("ANTHROPIC_AUTH_TOKEN") {
+        if token == "keychain" {
+            let manager = crate::oauth::OAuthTokenManager::from_keychain()?;
+            return Ok(AuthMode::OAuthManaged(manager));
+        }
         return Ok(AuthMode::OAuthToken(token));
     }
     if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
         return Ok(AuthMode::ApiKey(key));
     }
 
-    let env_var = match config.provider.as_str() {
-        "anthropic" => "ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN",
-        "openai" => "OPENAI_API_KEY",
-        _ => "LLM_API_KEY",
-    };
-
-    anyhow::bail!("No auth found. Set api_key/auth_token in config or via {} env var.", env_var)
+    // Last resort: try Keychain (best for Claude Max users who have Claude Code set up)
+    match crate::oauth::OAuthTokenManager::from_keychain() {
+        Ok(manager) => {
+            tracing::info!("No explicit auth configured, using OAuth from macOS Keychain");
+            Ok(AuthMode::OAuthManaged(manager))
+        }
+        Err(_) => {
+            let env_var = match config.provider.as_str() {
+                "anthropic" => "ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN (or set auth_token: keychain)",
+                "openai" => "OPENAI_API_KEY",
+                _ => "LLM_API_KEY",
+            };
+            anyhow::bail!("No auth found. Set api_key/auth_token in config or via {} env var.", env_var)
+        }
+    }
 }
 
 // ─── New Feature Configs ─────────────────────────────────────

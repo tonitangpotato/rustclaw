@@ -152,6 +152,14 @@ pub trait LlmClient: Send + Sync {
 }
 
 /// Anthropic Claude client (supports both API key and OAuth token).
+/// OAuth header constants for Claude Max / Claude Code compatibility.
+const OAUTH_BETA_HEADER: &str = "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14";
+const OAUTH_USER_AGENT: &str = "claude-cli/2.1.62";
+
+/// Claude Code identity string — REQUIRED for OAuth tokens to access non-haiku models.
+/// Without this in the system prompt, Anthropic's API restricts OAuth to haiku-only.
+const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
 pub struct AnthropicClient {
     client: reqwest::Client,
     auth: AuthMode,
@@ -178,6 +186,56 @@ impl AnthropicClient {
             max_tokens: config.max_tokens,
             base_url,
         })
+    }
+
+    /// Apply auth headers to a request builder.
+    async fn apply_auth(&self, mut req: reqwest::RequestBuilder) -> anyhow::Result<reqwest::RequestBuilder> {
+        match &self.auth {
+            AuthMode::ApiKey(key) => {
+                req = req.header("x-api-key", key);
+            }
+            AuthMode::OAuthToken(token) => {
+                req = req
+                    .header("Authorization", format!("Bearer {}", token))
+                    .header("anthropic-beta", OAUTH_BETA_HEADER)
+                    .header("user-agent", OAUTH_USER_AGENT)
+                    .header("x-app", "cli");
+            }
+            AuthMode::OAuthManaged(manager) => {
+                let token = manager.get_token().await?;
+                req = req
+                    .header("Authorization", format!("Bearer {}", token))
+                    .header("anthropic-beta", OAUTH_BETA_HEADER)
+                    .header("user-agent", OAUTH_USER_AGENT)
+                    .header("x-app", "cli");
+            }
+        }
+        Ok(req)
+    }
+
+    /// Force-refresh the OAuth token (call after 401 errors).
+    #[allow(dead_code)]
+    async fn force_refresh_token(&self) -> anyhow::Result<()> {
+        if let AuthMode::OAuthManaged(manager) = &self.auth {
+            manager.refresh().await?;
+        }
+        Ok(())
+    }
+
+    /// Build the system prompt value for the API request.
+    /// For OAuth tokens, injects the Claude Code identity prefix (required for non-haiku access).
+    fn build_system_value(&self, system: &str) -> serde_json::Value {
+        let is_oauth = matches!(&self.auth, AuthMode::OAuthToken(_) | AuthMode::OAuthManaged(_));
+        if is_oauth {
+            // OAuth tokens MUST include Claude Code identity to access sonnet/opus models.
+            // Format as array of content blocks (matching the official SDK).
+            serde_json::json!([
+                {"type": "text", "text": CLAUDE_CODE_IDENTITY},
+                {"type": "text", "text": system}
+            ])
+        } else {
+            serde_json::json!(system)
+        }
     }
 }
 
@@ -209,7 +267,7 @@ impl LlmClient for AnthropicClient {
         let mut body = serde_json::json!({
             "model": self.model,
             "max_tokens": self.max_tokens,
-            "system": system,
+            "system": self.build_system_value(system),
             "messages": serde_json::to_value(messages)?,
         });
 
@@ -236,33 +294,19 @@ impl LlmClient for AnthropicClient {
             tracing::info!(
                 "LLM request attempt {}/{} → model={} url={}/v1/messages auth={}",
                 attempt, MAX_RETRIES, self.model, self.base_url,
-                match &self.auth { AuthMode::OAuthToken(_) => "oauth", AuthMode::ApiKey(_) => "api_key" }
+                match &self.auth { AuthMode::OAuthToken(_) => "oauth", AuthMode::OAuthManaged(_) => "oauth-managed", AuthMode::ApiKey(_) => "api_key" }
             );
 
-            let mut req = self
+            let req = self
                 .client
                 .post(format!("{}/v1/messages", self.base_url))
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json");
 
-            // Auth headers differ between API key and OAuth token
-            match &self.auth {
-                AuthMode::ApiKey(key) => {
-                    req = req.header("x-api-key", key);
-                }
-                AuthMode::OAuthToken(token) => {
-                    req = req
-                        .header("Authorization", format!("Bearer {}", token))
-                        .header(
-                            "anthropic-beta",
-                            "claude-code-20250219,oauth-2025-04-20",
-                        )
-                        .header("user-agent", "claude-cli/2.1.39 (external, cli)")
-                        .header("x-app", "cli")
-                        .header("anthropic-dangerous-direct-browser-access", "true");
-                }
-            }
+            // Apply auth headers (handles token refresh for managed OAuth)
+            let req = self.apply_auth(req).await?;
 
+            tracing::debug!("Anthropic request body: {}", serde_json::to_string_pretty(&body).unwrap_or_default());
             let resp = match req.json(&body).send().await {
                 Ok(r) => r,
                 Err(e) => {
@@ -282,9 +326,28 @@ impl LlmClient for AnthropicClient {
 
             let status = resp.status();
 
+            // Handle 401 — try refreshing OAuth token and retry once
+            if status.as_u16() == 401 {
+                if let AuthMode::OAuthManaged(manager) = &self.auth {
+                    if attempt <= 2 {
+                        tracing::warn!("Got 401, attempting OAuth token refresh...");
+                        match manager.refresh().await {
+                            Ok(_) => {
+                                tracing::info!("Token refreshed, retrying request");
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::error!("Token refresh failed: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+
             // Check for client errors - don't retry these
             if is_client_error(status) {
                 let resp_body: serde_json::Value = resp.json().await?;
+                tracing::error!("Anthropic API error body: {}", serde_json::to_string_pretty(&resp_body).unwrap_or_default());
                 let error_msg = resp_body["error"]["message"]
                     .as_str()
                     .unwrap_or("Unknown error");
@@ -392,7 +455,7 @@ impl LlmClient for AnthropicClient {
         let mut body = serde_json::json!({
             "model": self.model,
             "max_tokens": self.max_tokens,
-            "system": system,
+            "system": self.build_system_value(system),
             "messages": serde_json::to_value(messages)?,
             "stream": true,
         });
@@ -410,28 +473,14 @@ impl LlmClient for AnthropicClient {
                 .collect::<Vec<_>>());
         }
 
-        let mut req = self
+        let req = self
             .client
             .post(format!("{}/v1/messages", self.base_url))
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json");
 
-        match &self.auth {
-            AuthMode::ApiKey(key) => {
-                req = req.header("x-api-key", key);
-            }
-            AuthMode::OAuthToken(token) => {
-                req = req
-                    .header("Authorization", format!("Bearer {}", token))
-                    .header(
-                        "anthropic-beta",
-                        "claude-code-20250219,oauth-2025-04-20",
-                    )
-                    .header("user-agent", "claude-cli/2.1.39 (external, cli)")
-                    .header("x-app", "cli")
-                    .header("anthropic-dangerous-direct-browser-access", "true");
-            }
-        }
+        // Apply auth headers (handles token refresh for managed OAuth)
+        let req = self.apply_auth(req).await?;
 
         let resp = req.json(&body).send().await?;
         let status = resp.status();

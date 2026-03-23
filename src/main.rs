@@ -14,6 +14,7 @@ mod heartbeat;
 mod hooks;
 mod llm;
 mod memory;
+mod oauth;
 mod orchestrator;
 mod plugins;
 mod reload;

@@ -41,13 +41,15 @@ pub struct AgentRunner {
     sessions: SessionManager,
     hooks: Arc<RwLock<HookRegistry>>,
     tools: ToolRegistry,
-    llm_client: Box<dyn LlmClient>,
+    llm_client: Arc<RwLock<Box<dyn LlmClient>>>,
     /// Optional LLM client for summarization (uses cheaper model)
     summary_llm: Option<Box<dyn LlmClient>>,
     /// Sandbox for tool execution
     sandbox: WasmSandbox,
     /// Safety layer (sanitizer, leak detector, policy engine)
     safety: SafetyLayer,
+    /// Runtime model override (set via /model command)
+    model_override: Arc<RwLock<Option<String>>>,
 }
 
 impl AgentRunner {
@@ -91,11 +93,49 @@ impl AgentRunner {
             sessions,
             hooks: Arc::new(RwLock::new(hooks)),
             tools,
-            llm_client,
+            llm_client: Arc::new(RwLock::new(llm_client)),
             summary_llm,
             sandbox,
             safety,
+            model_override: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Get the current config.
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Set the model at runtime (e.g., via /model command).
+    /// Recreates the LLM client with the new model.
+    pub async fn set_model(&self, model: &str) {
+        {
+            let mut override_guard = self.model_override.write().await;
+            *override_guard = Some(model.to_string());
+        }
+        
+        // Recreate LLM client with new model
+        let mut llm_config = self.config.llm.clone();
+        llm_config.model = model.to_string();
+        match llm::create_client(&llm_config) {
+            Ok(new_client) => {
+                let mut client_guard = self.llm_client.write().await;
+                *client_guard = new_client;
+                tracing::info!("Model switched to: {}", model);
+            }
+            Err(e) => {
+                tracing::error!("Failed to create LLM client for model {}: {}", model, e);
+            }
+        }
+    }
+
+    /// Clear a session's conversation history.
+    pub async fn clear_session(&self, session_key: &str) {
+        // Get the session and clear its messages
+        let mut session = self.sessions.get_or_create(session_key).await;
+        session.messages.clear();
+        self.sessions.update(session).await;
+        tracing::info!("Session cleared: {}", session_key);
     }
 
     /// Process an incoming message and return a response.
@@ -208,6 +248,7 @@ impl AgentRunner {
         for turn in 0..max_turns {
             let response = self
                 .llm_client
+                .read().await
                 .chat(&system_prompt, &session.messages, &tool_defs)
                 .await?;
 
@@ -612,6 +653,7 @@ impl AgentRunner {
 
             let response = self
                 .llm_client
+                .read().await
                 .chat(&system_prompt, &session.messages, &tool_defs)
                 .await?;
 
@@ -698,6 +740,7 @@ impl AgentRunner {
             // We finished the tool loop, now get final streaming response
             let mut stream_rx = self
                 .llm_client
+                .read().await
                 .chat_stream(&system_prompt, &session.messages, &[])
                 .await?;
 

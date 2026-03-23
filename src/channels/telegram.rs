@@ -233,6 +233,14 @@ impl TelegramBot {
             return Ok(());
         }
 
+        // Handle slash commands before passing to agent
+        if text.starts_with('/') {
+            let handled = self.handle_command(chat_id, &text).await?;
+            if handled {
+                return Ok(());
+            }
+        }
+
         // Build session key
         let session_key = format!("telegram:{}", chat_id);
         let user_id_str = user_id.to_string();
@@ -325,6 +333,87 @@ impl TelegramBot {
         }
     }
     
+    /// Available models for model switching.
+    const AVAILABLE_MODELS: &'static [(&'static str, &'static str)] = &[
+        ("claude-sonnet-4-5-20250929", "Sonnet 4.5"),
+        ("claude-sonnet-4-6", "Sonnet 4.6"),
+        ("claude-opus-4-5-20251101", "Opus 4.5"),
+        ("claude-opus-4-6", "Opus 4.6"),
+        ("claude-haiku-4-5-20251001", "Haiku 4.5"),
+    ];
+
+    /// Handle slash commands. Returns true if the command was handled.
+    async fn handle_command(&self, chat_id: i64, text: &str) -> anyhow::Result<bool> {
+        let cmd = text.split_whitespace().next().unwrap_or("");
+        // Strip @botname from command (e.g., /model@rustblawbot)
+        let cmd = cmd.split('@').next().unwrap_or(cmd);
+
+        match cmd {
+            "/model" => {
+                let arg = text.strip_prefix(cmd).unwrap_or("").trim();
+                if arg.is_empty() {
+                    // Show model selection with inline keyboard
+                    let current = &self.runner.config().llm.model;
+                    let mut buttons = Vec::new();
+                    for (model_id, label) in Self::AVAILABLE_MODELS {
+                        let marker = if current == model_id { " ✓" } else { "" };
+                        buttons.push(serde_json::json!([{
+                            "text": format!("{}{}", label, marker),
+                            "callback_data": format!("__model:{}", model_id)
+                        }]));
+                    }
+                    let payload = serde_json::json!({
+                        "chat_id": chat_id,
+                        "text": format!("🤖 Current model: `{}`\n\nChoose a model:", current),
+                        "parse_mode": "Markdown",
+                        "reply_markup": {
+                            "inline_keyboard": buttons
+                        }
+                    });
+                    self.client
+                        .post(self.api_url("sendMessage"))
+                        .json(&payload)
+                        .send()
+                        .await?;
+                    return Ok(true);
+                }
+                // Direct model set: /model claude-sonnet-4-6
+                self.runner.set_model(arg).await;
+                self.send_message(chat_id, &format!("✅ Model set to `{}`", arg), None).await?;
+                Ok(true)
+            }
+            "/status" => {
+                let model = &self.runner.config().llm.model;
+                let msg = format!(
+                    "🐾 **RustClaw Status**\n\n\
+                     • Model: `{}`\n\
+                     • Auth: OAuth (Keychain)\n\
+                     • Bot: @{}\n\
+                     • Status: Online ✅",
+                    model, self.bot_username
+                );
+                self.send_message(chat_id, &msg, None).await?;
+                Ok(true)
+            }
+            "/new" => {
+                let session_key = format!("telegram:{}", chat_id);
+                self.runner.clear_session(&session_key).await;
+                self.send_message(chat_id, "🔄 New conversation started.", None).await?;
+                Ok(true)
+            }
+            "/help" => {
+                let msg = "🐾 **RustClaw Commands**\n\n\
+                    /model — Show or switch AI model\n\
+                    /status — Show bot status\n\
+                    /new — Start a new conversation\n\
+                    /help — Show this help";
+                self.send_message(chat_id, msg, None).await?;
+                Ok(true)
+            }
+            _ => Ok(false), // Not a known command, pass to agent
+        }
+    }
+
     /// Handle an inline button callback query.
     async fn handle_callback_query(&self, callback: &serde_json::Value) -> anyhow::Result<()> {
         let callback_id = callback["id"].as_str().unwrap_or("");
@@ -337,16 +426,52 @@ impl TelegramBot {
         
         tracing::info!("Callback query from user {}: {}", user_id, data);
         
-        // Answer the callback query first (removes the loading indicator)
-        self.answer_callback_query(callback_id, None).await?;
-        
         // Check access
         if !self.config.allowed_users.is_empty()
             && !self.config.allowed_users.contains(&user_id)
         {
             tracing::warn!("Unauthorized user for callback: {}", user_id);
+            self.answer_callback_query(callback_id, Some("Unauthorized")).await?;
             return Ok(());
         }
+
+        // Handle model switch callbacks
+        if let Some(model_id) = data.strip_prefix("__model:") {
+            self.runner.set_model(model_id).await;
+            // Find the display name
+            let display = Self::AVAILABLE_MODELS.iter()
+                .find(|(id, _)| *id == model_id)
+                .map(|(_, name)| *name)
+                .unwrap_or(model_id);
+            self.answer_callback_query(callback_id, Some(&format!("Switched to {}", display))).await?;
+            
+            // Update the message to show the new selection
+            if let Some(msg_id) = message_id {
+                let mut buttons = Vec::new();
+                for (mid, label) in Self::AVAILABLE_MODELS {
+                    let marker = if *mid == model_id { " ✓" } else { "" };
+                    buttons.push(serde_json::json!([{
+                        "text": format!("{}{}", label, marker),
+                        "callback_data": format!("__model:{}", mid)
+                    }]));
+                }
+                let _ = self.client
+                    .post(self.api_url("editMessageText"))
+                    .json(&serde_json::json!({
+                        "chat_id": chat_id,
+                        "message_id": msg_id,
+                        "text": format!("✅ Model: `{}`", model_id),
+                        "parse_mode": "Markdown",
+                        "reply_markup": { "inline_keyboard": buttons }
+                    }))
+                    .send()
+                    .await;
+            }
+            return Ok(());
+        }
+
+        // Answer the callback query (removes the loading indicator)
+        self.answer_callback_query(callback_id, None).await?;
         
         // Process callback_data as a new message
         let session_key = format!("telegram:{}", chat_id);
