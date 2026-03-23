@@ -518,12 +518,11 @@ dependencies = [
 
 [[package]]
 name = "engramai"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a998d3fad6c8c5f689c2519e5fc11c16ae1c7a88b1c8237705b81769405239b"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "clap",
  "log",
  "rand 0.8.5",
  "rusqlite",
