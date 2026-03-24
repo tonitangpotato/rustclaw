@@ -13,6 +13,7 @@ use serenity::Client;
 
 use crate::agent::AgentRunner;
 use crate::config::DiscordConfig;
+use crate::text_utils;
 
 /// Discord bot handler.
 struct DiscordHandler {
@@ -125,7 +126,7 @@ impl DiscordHandler {
 
         // Discord message limit is 2000 chars
         if !clean_text.is_empty() {
-            let chunks = split_message(clean_text, 2000);
+            let chunks = text_utils::split_message(clean_text, 2000);
             for chunk in chunks {
                 let builder = CreateMessage::new().content(chunk);
                 channel_id.send_message(&ctx.http, builder).await?;
@@ -216,7 +217,7 @@ impl EventHandler for DiscordHandler {
             "Discord message from {} in {}: {}",
             msg.author.name,
             session_key,
-            content.chars().take(50).collect::<String>()
+            text_utils::truncate_chars(&content, 50)
         );
 
         // Show typing indicator
@@ -249,39 +250,6 @@ impl EventHandler for DiscordHandler {
 }
 
 /// Split a message into chunks respecting Discord's character limit.
-fn split_message(text: &str, max_len: usize) -> Vec<&str> {
-    if text.len() <= max_len {
-        return vec![text];
-    }
-
-    let mut chunks = Vec::new();
-    let mut start = 0;
-
-    while start < text.len() {
-        let mut end = std::cmp::min(start + max_len, text.len());
-        // Ensure end is on a char boundary
-        while end > start && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        // Try to split at a newline
-        let split_at = if end < text.len() {
-            text[start..end]
-                .rfind('\n')
-                .map(|pos| start + pos + 1)
-                .unwrap_or(end)
-        } else {
-            end
-        };
-        if split_at <= start {
-            start = text.ceil_char_boundary(start + 1);
-            continue;
-        }
-        chunks.push(&text[start..split_at]);
-        start = split_at;
-    }
-
-    chunks
-}
 
 /// Start the Discord channel.
 pub async fn start(config: DiscordConfig, runner: Arc<AgentRunner>) -> anyhow::Result<()> {

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::agent::AgentRunner;
 use crate::config::TelegramConfig;
 use crate::stt;
+use crate::text_utils;
 use crate::tts::{synthesize, TtsConfig};
 
 const TELEGRAM_API: &str = "https://api.telegram.org";
@@ -64,7 +65,7 @@ impl TelegramBot {
         let (clean_text, buttons) = extract_inline_buttons(text);
         
         // Split long messages (Telegram limit: 4096 chars)
-        let chunks = split_message(&clean_text, 4096);
+        let chunks = text_utils::split_message(&clean_text, 4096);
         let total_chunks = chunks.len();
         
         for (i, chunk) in chunks.iter().enumerate() {
@@ -249,7 +250,7 @@ impl TelegramBot {
         let reply_to = if is_group { message_id } else { None };
 
         tracing::info!("Message from user {} in chat {}: {}", user_id, chat_id, 
-            text.chars().take(50).collect::<String>());
+            text_utils::truncate_chars(&text, 50));
 
         // Send "typing" indicator
         let _ = self
@@ -1083,40 +1084,6 @@ fn escape_markdown_v2(text: &str) -> String {
 }
 
 /// Split a message into chunks respecting Telegram's character limit.
-fn split_message(text: &str, max_len: usize) -> Vec<&str> {
-    if text.len() <= max_len {
-        return vec![text];
-    }
-
-    let mut chunks = Vec::new();
-    let mut start = 0;
-
-    while start < text.len() {
-        let mut end = std::cmp::min(start + max_len, text.len());
-        // Ensure end is on a char boundary
-        while end > start && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        // Try to split at a newline
-        let split_at = if end < text.len() {
-            text[start..end]
-                .rfind('\n')
-                .map(|pos| start + pos + 1)
-                .unwrap_or(end)
-        } else {
-            end
-        };
-        if split_at <= start {
-            // Safety: advance to next char boundary to avoid infinite loop
-            start = text.ceil_char_boundary(start + 1);
-            continue;
-        }
-        chunks.push(&text[start..split_at]);
-        start = split_at;
-    }
-
-    chunks
-}
 
 /// Inline button parsed from text.
 struct InlineButton {

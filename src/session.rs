@@ -146,11 +146,7 @@ pub fn format_messages_for_summary(messages: &[Message]) -> String {
                     ContentBlock::ToolUse { name, .. } => Some(format!("[Tool: {}]", name)),
                     ContentBlock::ToolResult { content, .. } => {
                         // Truncate long tool results
-                        let truncated = if content.chars().count() > 200 {
-                            format!("{}...", content.chars().take(200).collect::<String>())
-                        } else {
-                            content.clone()
-                        };
+                        let truncated = crate::text_utils::truncate_chars(content, 200);
                         Some(format!("[Result: {}]", truncated))
                     }
                 }

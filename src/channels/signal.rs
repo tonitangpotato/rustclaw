@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 
 use crate::agent::AgentRunner;
 use crate::config::SignalConfig;
+use crate::text_utils;
 
 /// Signal bot using signal-cli subprocess.
 struct SignalBot {
@@ -99,7 +100,7 @@ impl SignalBot {
     /// Send a text message.
     async fn send_message(&self, recipient: &str, text: &str) -> anyhow::Result<()> {
         // Split long messages (Signal has a limit around 2000 chars)
-        let chunks = split_message(text, 2000);
+        let chunks = text_utils::split_message(text, 2000);
 
         for chunk in chunks {
             self.send_rpc("send", serde_json::json!({
@@ -215,7 +216,7 @@ impl SignalBot {
         tracing::info!(
             "Signal message from {}: {}",
             sender,
-            text.chars().take(50).collect::<String>()
+            text_utils::truncate_chars(&text, 50)
         );
 
         // Process with agent
@@ -292,37 +293,6 @@ impl SignalBot {
 }
 
 /// Split a message into chunks respecting Signal's character limit.
-fn split_message(text: &str, max_len: usize) -> Vec<&str> {
-    if text.len() <= max_len {
-        return vec![text];
-    }
-
-    let mut chunks = Vec::new();
-    let mut start = 0;
-
-    while start < text.len() {
-        let mut end = std::cmp::min(start + max_len, text.len());
-        while end > start && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        let split_at = if end < text.len() {
-            text[start..end]
-                .rfind('\n')
-                .map(|pos| start + pos + 1)
-                .unwrap_or(end)
-        } else {
-            end
-        };
-        if split_at <= start {
-            start = text.ceil_char_boundary(start + 1);
-            continue;
-        }
-        chunks.push(&text[start..split_at]);
-        start = split_at;
-    }
-
-    chunks
-}
 
 // --- signal-cli JSON-RPC types ---
 

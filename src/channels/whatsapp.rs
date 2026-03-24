@@ -15,6 +15,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentRunner;
+use crate::text_utils;
 
 /// WhatsApp Cloud API base URL.
 const WHATSAPP_API_URL: &str = "https://graph.facebook.com/v18.0";
@@ -285,7 +286,7 @@ impl WhatsAppChannel {
         tracing::info!(
             "WhatsApp message from {}: {} ({})",
             from,
-            text.chars().take(50).collect::<String>(),
+            text_utils::truncate_chars(&text, 50),
             timestamp
         );
 
@@ -308,7 +309,7 @@ impl WhatsAppChannel {
                     && trimmed != "HEARTBEAT_OK"
                 {
                     // Split long messages (WhatsApp limit: 4096 chars)
-                    for chunk in split_message(trimmed, 4096) {
+                    for chunk in text_utils::split_message_with_spaces(trimmed, 4096) {
                         self.send_message(from, chunk).await?;
                     }
                 }
@@ -371,40 +372,6 @@ async fn handle_webhook(
 }
 
 /// Split a message into chunks respecting WhatsApp's character limit.
-fn split_message(text: &str, max_len: usize) -> Vec<&str> {
-    if text.len() <= max_len {
-        return vec![text];
-    }
-
-    let mut chunks = Vec::new();
-    let mut start = 0;
-
-    while start < text.len() {
-        let mut end = std::cmp::min(start + max_len, text.len());
-        while end > start && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        
-        // Try to split at a newline or space
-        let split_at = if end < text.len() {
-            text[start..end]
-                .rfind('\n')
-                .or_else(|| text[start..end].rfind(' '))
-                .map(|pos| start + pos + 1)
-                .unwrap_or(end)
-        } else {
-            end
-        };
-        if split_at <= start {
-            start = text.ceil_char_boundary(start + 1);
-            continue;
-        }
-        chunks.push(&text[start..split_at]);
-        start = split_at;
-    }
-
-    chunks
-}
 
 /// Start the WhatsApp channel (convenience function).
 pub async fn start(config: WhatsAppConfig, runner: Arc<AgentRunner>) -> anyhow::Result<()> {

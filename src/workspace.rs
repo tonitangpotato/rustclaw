@@ -126,11 +126,7 @@ impl Workspace {
             output.push_str("\n### MEMORY.md\n");
             // Truncate to ~8KB to keep context manageable
             if memory.len() > 8192 {
-                let mut end = 8192;
-                while end > 0 && !memory.is_char_boundary(end) {
-                    end -= 1;
-                }
-                output.push_str(&memory[..end]);
+                output.push_str(crate::text_utils::truncate_bytes(memory, 8192));
                 output.push_str("\n\n...(truncated, use read_file for full MEMORY.md)...\n");
             } else {
                 output.push_str(memory);
@@ -144,12 +140,7 @@ impl Workspace {
         if let Ok(daily) = std::fs::read_to_string(&daily_path) {
             output.push_str(&format!("\n### memory/{}.md (today)\n", today));
             if daily.len() > 4096 {
-                // Find a valid UTF-8 char boundary at or before 4096
-                let mut end = 4096;
-                while end > 0 && !daily.is_char_boundary(end) {
-                    end -= 1;
-                }
-                output.push_str(&daily[..end]);
+                output.push_str(crate::text_utils::truncate_bytes(&daily, 4096));
                 output.push_str("\n\n...(truncated)...\n");
             } else {
                 output.push_str(&daily);

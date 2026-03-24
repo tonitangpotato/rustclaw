@@ -274,7 +274,7 @@ impl Tool for ReadFileTool {
         let result = if result.len() > 50_000 {
             format!(
                 "{}\n... (truncated, {} total lines)",
-                &result[..50_000],
+                crate::text_utils::truncate_bytes(&result, 50_000),
                 lines.len()
             )
         } else if lines.len() > offset + limit {
@@ -493,7 +493,7 @@ impl Tool for WebFetchTool {
         let text = strip_html_basic(&body);
 
         let result = if text.len() > max_chars {
-            format!("{}\n... (truncated)", &text[..max_chars])
+            format!("{}\n... (truncated)", crate::text_utils::truncate_bytes(&text, max_chars))
         } else {
             text
         };
@@ -725,7 +725,7 @@ impl Tool for SearchFilesTool {
 
         // Limit output
         let result = if stdout.len() > 30_000 {
-            format!("{}\n... (truncated, too many matches)", &stdout[..30_000])
+            format!("{}\n... (truncated, too many matches)", crate::text_utils::truncate_bytes(&stdout, 30_000))
         } else {
             stdout.to_string()
         };

@@ -25,6 +25,7 @@ mod serverless;
 mod session;
 mod skills;
 mod stt;
+mod text_utils;
 mod tools;
 mod tts;
 mod user_model;

@@ -11,6 +11,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
 use crate::agent::AgentRunner;
 use crate::config::SlackConfig;
+use crate::text_utils;
 
 const SLACK_API: &str = "https://slack.com/api";
 
@@ -116,7 +117,7 @@ impl SlackBot {
         let mrkdwn = Self::to_mrkdwn(text);
 
         // Split long messages (Slack limit: 4000 chars for text field)
-        let chunks = split_message(&mrkdwn, 4000);
+        let chunks = text_utils::split_message(&mrkdwn, 4000);
 
         for chunk in chunks {
             let mut payload = serde_json::json!({
@@ -296,7 +297,7 @@ impl SlackBot {
             "Slack message from {} in {}: {}",
             user,
             channel,
-            content.chars().take(50).collect::<String>()
+            text_utils::truncate_chars(&content, 50)
         );
 
         // Process with agent
@@ -386,37 +387,6 @@ impl SlackBot {
 }
 
 /// Split a message into chunks respecting Slack's character limit.
-fn split_message(text: &str, max_len: usize) -> Vec<&str> {
-    if text.len() <= max_len {
-        return vec![text];
-    }
-
-    let mut chunks = Vec::new();
-    let mut start = 0;
-
-    while start < text.len() {
-        let mut end = std::cmp::min(start + max_len, text.len());
-        while end > start && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        let split_at = if end < text.len() {
-            text[start..end]
-                .rfind('\n')
-                .map(|pos| start + pos + 1)
-                .unwrap_or(end)
-        } else {
-            end
-        };
-        if split_at <= start {
-            start = text.ceil_char_boundary(start + 1);
-            continue;
-        }
-        chunks.push(&text[start..split_at]);
-        start = split_at;
-    }
-
-    chunks
-}
 
 // --- Slack API response types ---
 

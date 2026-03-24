@@ -369,13 +369,9 @@ fn sanitize_filename(name: &str) -> String {
         .collect()
 }
 
-/// Truncate a string to the given length.
+/// Truncate a string to the given byte length (char-boundary safe).
 fn truncate(s: &str, max_len: usize) -> &str {
-    if s.len() <= max_len {
-        s
-    } else {
-        &s[..max_len]
-    }
+    crate::text_utils::truncate_bytes(s, max_len)
 }
 
 #[cfg(test)]
