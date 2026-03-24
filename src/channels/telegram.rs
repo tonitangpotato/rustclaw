@@ -249,7 +249,7 @@ impl TelegramBot {
         let reply_to = if is_group { message_id } else { None };
 
         tracing::info!("Message from user {} in chat {}: {}", user_id, chat_id, 
-            if text.len() > 50 { &text[..50] } else { &text });
+            text.chars().take(50).collect::<String>());
 
         // Send "typing" indicator
         let _ = self

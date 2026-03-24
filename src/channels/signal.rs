@@ -215,7 +215,7 @@ impl SignalBot {
         tracing::info!(
             "Signal message from {}: {}",
             sender,
-            if text.len() > 50 { &text[..50] } else { text }
+            text.chars().take(50).collect::<String>()
         );
 
         // Process with agent

@@ -296,7 +296,7 @@ impl SlackBot {
             "Slack message from {} in {}: {}",
             user,
             channel,
-            if content.len() > 50 { &content[..50] } else { &content }
+            content.chars().take(50).collect::<String>()
         );
 
         // Process with agent

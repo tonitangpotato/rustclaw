@@ -370,14 +370,14 @@ impl SkillGenerator {
 
     /// Format the example section.
     fn format_example(&self, ctx: &ProblemContext) -> String {
-        let truncated_query = if ctx.query.len() > 200 {
-            format!("{}...", &ctx.query[..200])
+        let truncated_query = if ctx.query.chars().count() > 200 {
+            format!("{}...", ctx.query.chars().take(200).collect::<String>())
         } else {
             ctx.query.clone()
         };
 
-        let truncated_result = if ctx.result.len() > 500 {
-            format!("{}...", &ctx.result[..500])
+        let truncated_result = if ctx.result.chars().count() > 500 {
+            format!("{}...", ctx.result.chars().take(500).collect::<String>())
         } else {
             ctx.result.clone()
         };

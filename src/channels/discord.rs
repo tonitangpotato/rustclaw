@@ -216,7 +216,7 @@ impl EventHandler for DiscordHandler {
             "Discord message from {} in {}: {}",
             msg.author.name,
             session_key,
-            if content.len() > 50 { &content[..50] } else { &content }
+            content.chars().take(50).collect::<String>()
         );
 
         // Show typing indicator

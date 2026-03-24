@@ -898,8 +898,8 @@ impl Tool for EngramStoreTool {
             Ok(()) => Ok(ToolResult {
                 output: format!(
                     "Memory stored successfully: {} (type: {}, importance: {:.2})",
-                    if content.len() > 50 {
-                        format!("{}...", &content[..50])
+                    if content.chars().count() > 50 {
+                        format!("{}...", content.chars().take(50).collect::<String>())
                     } else {
                         content.to_string()
                     },
@@ -1005,8 +1005,8 @@ impl Tool for DelegateTaskTool {
             output: format!(
                 "Task '{}' submitted to orchestrator.\n- Description: {}\n- Roles: {:?}\n- Priority: {}\nThe task will be assigned to an appropriate specialist agent.",
                 task_id,
-                if description.len() > 100 {
-                    format!("{}...", &description[..100])
+                if description.chars().count() > 100 {
+                    format!("{}...", description.chars().take(100).collect::<String>())
                 } else {
                     description.to_string()
                 },

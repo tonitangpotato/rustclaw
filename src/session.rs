@@ -146,8 +146,8 @@ pub fn format_messages_for_summary(messages: &[Message]) -> String {
                     ContentBlock::ToolUse { name, .. } => Some(format!("[Tool: {}]", name)),
                     ContentBlock::ToolResult { content, .. } => {
                         // Truncate long tool results
-                        let truncated = if content.len() > 200 {
-                            format!("{}...", &content[..200])
+                        let truncated = if content.chars().count() > 200 {
+                            format!("{}...", content.chars().take(200).collect::<String>())
                         } else {
                             content.clone()
                         };

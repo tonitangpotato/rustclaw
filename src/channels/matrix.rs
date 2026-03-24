@@ -258,7 +258,7 @@ impl MatrixChannel {
             "Matrix message from {} in {}: {}",
             sender,
             room_id,
-            if text.len() > 50 { &text[..50] } else { &text }
+            text.chars().take(50).collect::<String>()
         );
 
         // Build session key

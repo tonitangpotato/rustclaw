@@ -285,7 +285,7 @@ impl WhatsAppChannel {
         tracing::info!(
             "WhatsApp message from {}: {} ({})",
             from,
-            if text.len() > 50 { &text[..50] } else { &text },
+            text.chars().take(50).collect::<String>(),
             timestamp
         );
 
