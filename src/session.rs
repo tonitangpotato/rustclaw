@@ -57,7 +57,22 @@ impl Session {
         };
 
         // Ensure we don't split in the middle of a tool_use/tool_result pair
-        let start_idx = self.safe_split_index(raw_start);
+        let mut start_idx = self.safe_split_index(raw_start);
+
+        // Anthropic requires first message after system to be role=user.
+        // If we'd start with an assistant message, advance until we hit a user message.
+        while start_idx < self.messages.len() {
+            if self.messages[start_idx].role == "user" {
+                // But skip user messages that are pure tool_results (they need preceding assistant)
+                let is_pure_tool_result = self.messages[start_idx].content.iter().all(|b| {
+                    matches!(b, ContentBlock::ToolResult { .. })
+                });
+                if !is_pure_tool_result {
+                    break;
+                }
+            }
+            start_idx += 1;
+        }
 
         if has_system_first && self.messages.len() > 1 {
             let first_msg = self.messages[0].clone();
