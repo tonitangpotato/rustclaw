@@ -56,23 +56,8 @@ impl Session {
             self.messages.len() - max_messages
         };
 
-        // Ensure we don't split in the middle of a tool_use/tool_result pair
-        let mut start_idx = self.safe_split_index(raw_start);
-
-        // Anthropic requires first message after system to be role=user.
-        // If we'd start with an assistant message, advance until we hit a user message.
-        while start_idx < self.messages.len() {
-            if self.messages[start_idx].role == "user" {
-                // But skip user messages that are pure tool_results (they need preceding assistant)
-                let is_pure_tool_result = self.messages[start_idx].content.iter().all(|b| {
-                    matches!(b, ContentBlock::ToolResult { .. })
-                });
-                if !is_pure_tool_result {
-                    break;
-                }
-            }
-            start_idx += 1;
-        }
+        // Ensure safe split: no orphaned tool_results AND user-first
+        let start_idx = self.safe_split_index(raw_start);
 
         if has_system_first && self.messages.len() > 1 {
             let first_msg = self.messages[0].clone();
@@ -92,11 +77,11 @@ impl Session {
         );
     }
 
-    /// Find a safe split index that doesn't orphan tool_result blocks.
-    /// Given a desired split point, walk it backwards if the message at that
-    /// index is a user message containing tool_result blocks (which need the
-    /// preceding assistant tool_use message).
+    /// Find a safe split index that doesn't orphan tool_result blocks
+    /// AND ensures the first kept message is a proper user message.
+    /// Guarantees Anthropic API compatibility (user-first after system).
     fn safe_split_index(&self, mut idx: usize) -> usize {
+        // Step 1: don't orphan tool_result blocks
         while idx > 0 {
             let msg = &self.messages[idx];
             let has_tool_result = msg.role == "user" && msg.content.iter().any(|b| {
@@ -108,6 +93,22 @@ impl Session {
                 break;
             }
         }
+
+        // Step 2: ensure first kept message is a user message (not assistant, not pure tool_result)
+        // Anthropic requires user-first after system prompt.
+        while idx < self.messages.len() {
+            let msg = &self.messages[idx];
+            if msg.role == "user" {
+                let is_pure_tool_result = msg.content.iter().all(|b| {
+                    matches!(b, ContentBlock::ToolResult { .. })
+                });
+                if !is_pure_tool_result {
+                    break;
+                }
+            }
+            idx += 1;
+        }
+
         idx
     }
 
@@ -158,7 +159,9 @@ impl Session {
             )));
         } else {
             // Remove old messages and prepend summary
-            let remaining: Vec<Message> = self.messages[summarized_count..].to_vec();
+            // Use safe_split_index to ensure remaining starts with a proper user message
+            let safe_start = self.safe_split_index(summarized_count);
+            let remaining: Vec<Message> = self.messages[safe_start..].to_vec();
             self.messages.clear();
             self.messages.push(Message::text("system", &format!(
                 "[Previous conversation summary]\n{}",
