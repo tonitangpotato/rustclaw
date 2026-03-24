@@ -395,7 +395,10 @@ fn split_message(text: &str, max_len: usize) -> Vec<&str> {
     let mut start = 0;
 
     while start < text.len() {
-        let end = std::cmp::min(start + max_len, text.len());
+        let mut end = std::cmp::min(start + max_len, text.len());
+        while end > start && !text.is_char_boundary(end) {
+            end -= 1;
+        }
         let split_at = if end < text.len() {
             text[start..end]
                 .rfind('\n')
@@ -404,6 +407,10 @@ fn split_message(text: &str, max_len: usize) -> Vec<&str> {
         } else {
             end
         };
+        if split_at <= start {
+            start = text.ceil_char_boundary(start + 1);
+            continue;
+        }
         chunks.push(&text[start..split_at]);
         start = split_at;
     }
