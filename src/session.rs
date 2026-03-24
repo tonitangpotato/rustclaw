@@ -49,11 +49,33 @@ impl Session {
             .map(|m| m.role == "system")
             .unwrap_or(false);
 
-        if has_system_first && self.messages.len() > 1 {
-            // Keep first message + last (max_messages - 1) messages
+        let mut start_idx = if has_system_first && self.messages.len() > 1 {
             let keep_from_end = max_messages.saturating_sub(1);
-            let start_idx = self.messages.len() - keep_from_end;
-            
+            self.messages.len() - keep_from_end
+        } else {
+            self.messages.len() - max_messages
+        };
+
+        // Fix tool_use/tool_result pairing: if the first kept message is a user
+        // message containing tool_result blocks, we must also keep the preceding
+        // assistant message that contains the matching tool_use blocks.
+        // Walk backwards until we hit a message that doesn't start with orphaned
+        // tool_results.
+        let skip = if has_system_first { 1 } else { 0 };
+        while start_idx > skip {
+            let msg = &self.messages[start_idx];
+            let has_orphan_tool_result = msg.role == "user" && msg.content.iter().any(|b| {
+                matches!(b, ContentBlock::ToolResult { .. })
+            });
+            if has_orphan_tool_result {
+                // Include the previous message (should be assistant with tool_use)
+                start_idx -= 1;
+            } else {
+                break;
+            }
+        }
+
+        if has_system_first && self.messages.len() > 1 {
             let first_msg = self.messages[0].clone();
             let tail: Vec<_> = self.messages[start_idx..].to_vec();
             
@@ -61,8 +83,6 @@ impl Session {
             self.messages.push(first_msg);
             self.messages.extend(tail);
         } else {
-            // No system message, just keep last N messages
-            let start_idx = self.messages.len() - max_messages;
             self.messages = self.messages[start_idx..].to_vec();
         }
 
