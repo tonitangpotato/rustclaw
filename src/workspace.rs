@@ -25,6 +25,8 @@ pub struct Workspace {
     pub memory: Option<String>,
     pub identity: Option<String>,
     pub bootstrap: Option<String>,
+    /// Current LLM model name (set after construction).
+    pub model: Option<String>,
 }
 
 impl Workspace {
@@ -41,6 +43,7 @@ impl Workspace {
             memory: Self::read_optional(&root, "MEMORY.md"),
             identity: Self::read_optional(&root, "IDENTITY.md"),
             bootstrap: Self::read_optional(&root, "BOOTSTRAP.md"),
+            model: None,
             root,
         })
     }
@@ -66,10 +69,14 @@ impl Workspace {
         let current_time = Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
         let workspace_path = self.root.display().to_string();
 
+        // Get current model name
+        let model_name = self.model.as_deref().unwrap_or("unknown");
+
         let mut output = format!(
             "You are an AI assistant running on RustClaw.\n\
              Current time: {}\n\
-             Workspace: {}\n\n\
+             Workspace: {}\n\
+             Model: {}\n\n\
              ## Your Context Files\n\
              IMPORTANT: The following workspace files are ALREADY loaded below — \
              SOUL.md, AGENTS.md, USER.md, TOOLS.md, IDENTITY.md, MEMORY.md, \
@@ -83,7 +90,7 @@ impl Workspace {
              The framework AUTOMATICALLY converts your text to speech and sends it as a Telegram voice message.\n\
              Do NOT try to use edge-tts, exec, curl, or any tool. Just write `VOICE: your text here`.\n\
              Only use VOICE: when the user explicitly asks. Otherwise reply with normal text.\n",
-            current_time, workspace_path
+            current_time, workspace_path, model_name
         );
 
         if let Some(soul) = &self.soul {

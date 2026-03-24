@@ -55,7 +55,7 @@ pub struct AgentRunner {
 impl AgentRunner {
     pub fn new(
         config: Config,
-        workspace: Workspace,
+        mut workspace: Workspace,
         memory: Arc<MemoryManager>,
         sessions: SessionManager,
         hooks: HookRegistry,
@@ -85,6 +85,9 @@ impl AgentRunner {
 
         // Initialize safety layer
         let safety = SafetyLayer::new(&config.safety);
+
+        // Set model name in workspace for system prompt
+        workspace.model = Some(config.llm.model.clone());
 
         Self {
             config,
