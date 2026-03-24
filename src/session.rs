@@ -49,31 +49,15 @@ impl Session {
             .map(|m| m.role == "system")
             .unwrap_or(false);
 
-        let mut start_idx = if has_system_first && self.messages.len() > 1 {
+        let raw_start = if has_system_first && self.messages.len() > 1 {
             let keep_from_end = max_messages.saturating_sub(1);
             self.messages.len() - keep_from_end
         } else {
             self.messages.len() - max_messages
         };
 
-        // Fix tool_use/tool_result pairing: if the first kept message is a user
-        // message containing tool_result blocks, we must also keep the preceding
-        // assistant message that contains the matching tool_use blocks.
-        // Walk backwards until we hit a message that doesn't start with orphaned
-        // tool_results.
-        let skip = if has_system_first { 1 } else { 0 };
-        while start_idx > skip {
-            let msg = &self.messages[start_idx];
-            let has_orphan_tool_result = msg.role == "user" && msg.content.iter().any(|b| {
-                matches!(b, ContentBlock::ToolResult { .. })
-            });
-            if has_orphan_tool_result {
-                // Include the previous message (should be assistant with tool_use)
-                start_idx -= 1;
-            } else {
-                break;
-            }
-        }
+        // Ensure we don't split in the middle of a tool_use/tool_result pair
+        let start_idx = self.safe_split_index(raw_start);
 
         if has_system_first && self.messages.len() > 1 {
             let first_msg = self.messages[0].clone();
@@ -93,6 +77,25 @@ impl Session {
         );
     }
 
+    /// Find a safe split index that doesn't orphan tool_result blocks.
+    /// Given a desired split point, walk it backwards if the message at that
+    /// index is a user message containing tool_result blocks (which need the
+    /// preceding assistant tool_use message).
+    fn safe_split_index(&self, mut idx: usize) -> usize {
+        while idx > 0 {
+            let msg = &self.messages[idx];
+            let has_tool_result = msg.role == "user" && msg.content.iter().any(|b| {
+                matches!(b, ContentBlock::ToolResult { .. })
+            });
+            if has_tool_result {
+                idx -= 1;
+            } else {
+                break;
+            }
+        }
+        idx
+    }
+
     /// Summarize old messages instead of just trimming.
     /// Returns the messages that were summarized (for LLM call).
     pub fn prepare_for_summarization(&self, max_messages: usize) -> Option<(Vec<Message>, usize)> {
@@ -103,11 +106,24 @@ impl Session {
         // Determine how many messages to summarize
         // Keep the last (max_messages - 1) messages, plus 1 for the summary
         let keep_recent = max_messages.saturating_sub(1);
-        let summarize_count = self.messages.len().saturating_sub(keep_recent);
+        let mut summarize_count = self.messages.len().saturating_sub(keep_recent);
 
         if summarize_count < 2 {
             // Not enough messages to summarize
             return None;
+        }
+
+        // Ensure we don't split in the middle of a tool_use/tool_result pair
+        let safe_idx = self.safe_split_index(summarize_count);
+        if safe_idx != summarize_count {
+            tracing::debug!(
+                "Adjusted summarization split {} -> {} to preserve tool pairing",
+                summarize_count, safe_idx
+            );
+            summarize_count = safe_idx;
+            if summarize_count < 2 {
+                return None;
+            }
         }
 
         // Get the messages to be summarized (first N messages)
