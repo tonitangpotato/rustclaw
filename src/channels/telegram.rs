@@ -354,10 +354,10 @@ impl TelegramBot {
                 let arg = text.strip_prefix(cmd).unwrap_or("").trim();
                 if arg.is_empty() {
                     // Show model selection with inline keyboard
-                    let current = &self.runner.config().llm.model;
+                    let current = self.runner.current_model().await;
                     let mut buttons = Vec::new();
                     for (model_id, label) in Self::AVAILABLE_MODELS {
-                        let marker = if current == model_id { " ✓" } else { "" };
+                        let marker = if current == *model_id { " ✓" } else { "" };
                         buttons.push(serde_json::json!([{
                             "text": format!("{}{}", label, marker),
                             "callback_data": format!("__model:{}", model_id)
@@ -384,7 +384,7 @@ impl TelegramBot {
                 Ok(true)
             }
             "/status" => {
-                let model = &self.runner.config().llm.model;
+                let model = self.runner.current_model().await;
                 let msg = format!(
                     "🐾 **RustClaw Status**\n\n\
                      • Model: `{}`\n\

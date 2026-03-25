@@ -134,6 +134,9 @@ pub enum StreamChunk {
 /// LLM client trait.
 #[async_trait::async_trait]
 pub trait LlmClient: Send + Sync {
+    /// Return the model name this client is configured to use.
+    fn model_name(&self) -> &str;
+
     async fn chat(
         &self,
         system: &str,
@@ -258,6 +261,10 @@ fn is_client_error(status: reqwest::StatusCode) -> bool {
 
 #[async_trait::async_trait]
 impl LlmClient for AnthropicClient {
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+
     async fn chat(
         &self,
         system: &str,
@@ -738,6 +745,10 @@ impl OpenAIClient {
 
 #[async_trait::async_trait]
 impl LlmClient for OpenAIClient {
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+
     async fn chat(
         &self,
         system: &str,
@@ -917,6 +928,10 @@ impl GoogleClient {
 
 #[async_trait::async_trait]
 impl LlmClient for GoogleClient {
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+
     async fn chat(
         &self,
         system: &str,

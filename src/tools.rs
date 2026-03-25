@@ -10,6 +10,16 @@ use engramai::MemoryType;
 use serde::Serialize;
 use serde_json::Value;
 
+use gid_core::{
+    Graph, Node, Edge, NodeStatus,
+    parser::{load_graph as gid_load_graph, save_graph as gid_save_graph},
+    query::QueryEngine,
+    validator::Validator,
+    visual::{render, VisualFormat},
+    advise::{analyze as advise_analyze},
+    history::HistoryManager,
+    refactor,
+};
 use crate::memory::MemoryManager;
 use crate::orchestrator::{SharedOrchestrator, Task};
 
@@ -76,6 +86,33 @@ impl ToolRegistry {
         let mut registry = Self::with_defaults_and_memory(workspace_root, memory);
         registry.register(Box::new(DelegateTaskTool::new(orchestrator)));
         registry
+    }
+
+    /// Register GID (task graph) tools.
+    pub fn with_gid(mut self, graph_path: &str) -> Self {
+        let graph = Arc::new(tokio::sync::RwLock::new(
+            gid_load_graph(std::path::Path::new(graph_path)).unwrap_or_default()
+        ));
+        let path = Arc::new(graph_path.to_string());
+
+        // Original 5 tools (backward compatible)
+        self.register(Box::new(GidTasksTool::new(graph.clone())));
+        self.register(Box::new(GidAddTaskTool::new(graph.clone(), path.clone())));
+        self.register(Box::new(GidUpdateTaskTool::new(graph.clone(), path.clone())));
+        self.register(Box::new(GidAddEdgeTool::new(graph.clone(), path.clone())));
+        self.register(Box::new(GidReadTool::new(graph.clone())));
+
+        // New gid-core tools
+        self.register(Box::new(GidCompleteTool::new(graph.clone(), path.clone())));
+        self.register(Box::new(GidQueryImpactTool::new(graph.clone())));
+        self.register(Box::new(GidQueryDepsTool::new(graph.clone())));
+        self.register(Box::new(GidValidateTool::new(graph.clone())));
+        self.register(Box::new(GidAdviseTool::new(graph.clone())));
+        self.register(Box::new(GidVisualTool::new(graph.clone())));
+        self.register(Box::new(GidHistoryTool::new(path.clone())));
+        self.register(Box::new(GidRefactorTool::new(graph.clone(), path.clone())));
+
+        self
     }
 
     pub fn register(&mut self, tool: Box<dyn Tool>) {
@@ -1015,5 +1052,882 @@ impl Tool for DelegateTaskTool {
             ),
             is_error: false,
         })
+    }
+}
+
+// ─── GID Tools ───────────────────────────────────────────────
+
+type SharedGraph = Arc<tokio::sync::RwLock<Graph>>;
+type SharedPath = Arc<String>;
+
+/// Helper: save graph to disk after mutation.
+fn save_gid_graph(graph: &Graph, path: &str) -> anyhow::Result<()> {
+    gid_save_graph(graph, std::path::Path::new(path))
+}
+
+/// Parse status string to NodeStatus.
+fn parse_status(s: &str) -> Result<NodeStatus, String> {
+    match s {
+        "todo" => Ok(NodeStatus::Todo),
+        "in_progress" => Ok(NodeStatus::InProgress),
+        "done" => Ok(NodeStatus::Done),
+        "blocked" => Ok(NodeStatus::Blocked),
+        "cancelled" => Ok(NodeStatus::Cancelled),
+        _ => Err(format!("Unknown status: {}", s)),
+    }
+}
+
+// ── gid_tasks: list tasks with optional status filter ──
+
+struct GidTasksTool {
+    graph: SharedGraph,
+}
+
+impl GidTasksTool {
+    fn new(graph: SharedGraph) -> Self {
+        Self { graph }
+    }
+}
+
+#[async_trait]
+impl Tool for GidTasksTool {
+    fn name(&self) -> &str {
+        "gid_tasks"
+    }
+
+    fn description(&self) -> &str {
+        "List tasks in the project graph. Optionally filter by status. Shows summary stats and ready tasks."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "description": "Filter by status: todo, in_progress, done, blocked, cancelled",
+                    "enum": ["todo", "in_progress", "done", "blocked", "cancelled"]
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let graph = self.graph.read().await;
+        let status_filter = input["status"].as_str();
+
+        let summary = graph.summary();
+        let mut output = format!(
+            "📊 Graph: {} nodes, {} edges\n  todo={} in_progress={} done={} blocked={} cancelled={}\n  ready={}\n\n",
+            summary.total_nodes, summary.total_edges,
+            summary.todo, summary.in_progress, summary.done, summary.blocked, summary.cancelled,
+            summary.ready
+        );
+
+        let nodes: Vec<&Node> = if let Some(status) = status_filter {
+            let target = match parse_status(status) {
+                Ok(s) => s,
+                Err(e) => return Ok(ToolResult { output: e, is_error: true }),
+            };
+            graph.nodes.iter().filter(|n| n.status == target).collect()
+        } else {
+            graph.nodes.iter().collect()
+        };
+
+        for node in &nodes {
+            let deps: Vec<String> = graph.edges_from(&node.id)
+                .iter()
+                .filter(|e| e.relation == "depends_on")
+                .map(|e| e.to.clone())
+                .collect();
+            let dep_str = if deps.is_empty() { String::new() } else { format!(" → [{}]", deps.join(", ")) };
+            let desc = node.description.as_deref().unwrap_or("");
+            let desc_str = if desc.is_empty() { String::new() } else { format!(" — {}", desc) };
+            output.push_str(&format!("  [{}] {} ({}){}{}\n", node.status, node.id, node.title, desc_str, dep_str));
+        }
+
+        if nodes.is_empty() {
+            output.push_str("  (no tasks match)\n");
+        }
+
+        Ok(ToolResult { output, is_error: false })
+    }
+}
+
+// ── gid_add_task: add a new task ──
+
+struct GidAddTaskTool {
+    graph: SharedGraph,
+    path: SharedPath,
+}
+
+impl GidAddTaskTool {
+    fn new(graph: SharedGraph, path: SharedPath) -> Self {
+        Self { graph, path }
+    }
+}
+
+#[async_trait]
+impl Tool for GidAddTaskTool {
+    fn name(&self) -> &str {
+        "gid_add_task"
+    }
+
+    fn description(&self) -> &str {
+        "Add a new task to the project graph."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "Unique task ID (e.g. 'impl-auth')" },
+                "title": { "type": "string", "description": "Task title" },
+                "description": { "type": "string", "description": "Detailed description (optional)" },
+                "status": { "type": "string", "enum": ["todo", "in_progress", "done", "blocked"], "description": "Initial status (default: todo)" },
+                "priority": { "type": "integer", "description": "Priority 0-255 (0=highest, optional)" },
+                "tags": { "type": "array", "items": { "type": "string" }, "description": "Tags (optional)" },
+                "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Task IDs this depends on (optional)" }
+            },
+            "required": ["id", "title"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let id = input["id"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'id'"))?;
+        let title = input["title"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'title'"))?;
+
+        let mut node = Node::new(id, title);
+
+        if let Some(desc) = input["description"].as_str() {
+            node = node.with_description(desc);
+        }
+        if let Some(status) = input["status"].as_str() {
+            node = node.with_status(parse_status(status).unwrap_or(NodeStatus::Todo));
+        }
+        if let Some(p) = input["priority"].as_u64() {
+            node = node.with_priority(p as u8);
+        }
+        if let Some(tags) = input["tags"].as_array() {
+            node = node.with_tags(tags.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+        }
+
+        let mut graph = self.graph.write().await;
+        graph.add_node(node);
+
+        // Add dependency edges
+        if let Some(deps) = input["depends_on"].as_array() {
+            for dep in deps {
+                if let Some(dep_id) = dep.as_str() {
+                    graph.add_edge(Edge::depends_on(id, dep_id));
+                }
+            }
+        }
+
+        save_gid_graph(&graph, &self.path)?;
+
+        Ok(ToolResult {
+            output: format!("✅ Task '{}' added: {}", id, title),
+            is_error: false,
+        })
+    }
+}
+
+// ── gid_update_task: update task status/fields ──
+
+struct GidUpdateTaskTool {
+    graph: SharedGraph,
+    path: SharedPath,
+}
+
+impl GidUpdateTaskTool {
+    fn new(graph: SharedGraph, path: SharedPath) -> Self {
+        Self { graph, path }
+    }
+}
+
+#[async_trait]
+impl Tool for GidUpdateTaskTool {
+    fn name(&self) -> &str {
+        "gid_update_task"
+    }
+
+    fn description(&self) -> &str {
+        "Update a task's status, title, description, or other fields."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "Task ID to update" },
+                "status": { "type": "string", "enum": ["todo", "in_progress", "done", "blocked", "cancelled"], "description": "New status" },
+                "title": { "type": "string", "description": "New title (optional)" },
+                "description": { "type": "string", "description": "New description (optional)" }
+            },
+            "required": ["id"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let id = input["id"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'id'"))?;
+
+        let mut graph = self.graph.write().await;
+
+        let node = graph.get_node_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("Task '{}' not found", id))?;
+
+        let mut changes = Vec::new();
+
+        if let Some(status) = input["status"].as_str() {
+            let new_status = match parse_status(status) {
+                Ok(s) => s,
+                Err(e) => return Ok(ToolResult { output: e, is_error: true }),
+            };
+            changes.push(format!("status → {}", new_status));
+            node.status = new_status;
+        }
+        if let Some(title) = input["title"].as_str() {
+            changes.push(format!("title → {}", title));
+            node.title = title.to_string();
+        }
+        if let Some(desc) = input["description"].as_str() {
+            changes.push("description updated".to_string());
+            node.description = Some(desc.to_string());
+        }
+
+        if changes.is_empty() {
+            return Ok(ToolResult { output: format!("No changes for task '{}'", id), is_error: false });
+        }
+
+        save_gid_graph(&graph, &self.path)?;
+
+        Ok(ToolResult {
+            output: format!("✅ Task '{}' updated: {}", id, changes.join(", ")),
+            is_error: false,
+        })
+    }
+}
+
+// ── gid_add_edge: add a dependency edge ──
+
+struct GidAddEdgeTool {
+    graph: SharedGraph,
+    path: SharedPath,
+}
+
+impl GidAddEdgeTool {
+    fn new(graph: SharedGraph, path: SharedPath) -> Self {
+        Self { graph, path }
+    }
+}
+
+#[async_trait]
+impl Tool for GidAddEdgeTool {
+    fn name(&self) -> &str {
+        "gid_add_edge"
+    }
+
+    fn description(&self) -> &str {
+        "Add a dependency edge between two tasks (e.g. task A depends_on task B)."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "from": { "type": "string", "description": "Source task ID" },
+                "to": { "type": "string", "description": "Target task ID" },
+                "relation": { "type": "string", "enum": ["depends_on", "blocks", "subtask_of", "relates_to"], "description": "Relationship type (default: depends_on)" }
+            },
+            "required": ["from", "to"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let from = input["from"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'from'"))?;
+        let to = input["to"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'to'"))?;
+        let relation = input["relation"].as_str().unwrap_or("depends_on");
+
+        let mut graph = self.graph.write().await;
+        graph.add_edge(Edge::new(from, to, relation));
+        save_gid_graph(&graph, &self.path)?;
+
+        Ok(ToolResult {
+            output: format!("✅ Edge added: {} —[{}]→ {}", from, relation, to),
+            is_error: false,
+        })
+    }
+}
+
+// ── gid_read: read full graph as YAML ──
+
+struct GidReadTool {
+    graph: SharedGraph,
+}
+
+impl GidReadTool {
+    fn new(graph: SharedGraph) -> Self {
+        Self { graph }
+    }
+}
+
+#[async_trait]
+impl Tool for GidReadTool {
+    fn name(&self) -> &str {
+        "gid_read"
+    }
+
+    fn description(&self) -> &str {
+        "Read the full project graph as YAML (nodes, edges, dependencies)."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {}
+        })
+    }
+
+    async fn execute(&self, _input: Value) -> anyhow::Result<ToolResult> {
+        let graph = self.graph.read().await;
+        let yaml = serde_yaml::to_string(&*graph)?;
+        Ok(ToolResult { output: yaml, is_error: false })
+    }
+}
+
+// ── gid_complete: mark task done and show unblocked tasks ──
+
+struct GidCompleteTool {
+    graph: SharedGraph,
+    path: SharedPath,
+}
+
+impl GidCompleteTool {
+    fn new(graph: SharedGraph, path: SharedPath) -> Self {
+        Self { graph, path }
+    }
+}
+
+#[async_trait]
+impl Tool for GidCompleteTool {
+    fn name(&self) -> &str {
+        "gid_complete"
+    }
+
+    fn description(&self) -> &str {
+        "Mark a task as done and show which tasks are now unblocked."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "Task ID to mark as done" }
+            },
+            "required": ["id"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let id = input["id"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'id'"))?;
+
+        let mut graph = self.graph.write().await;
+
+        // Check task exists
+        if graph.get_node(id).is_none() {
+            return Ok(ToolResult { output: format!("Task '{}' not found", id), is_error: true });
+        }
+
+        // Get ready tasks before completion
+        let ready_before: std::collections::HashSet<String> = graph.ready_tasks()
+            .iter().map(|n| n.id.clone()).collect();
+
+        // Mark done
+        graph.update_status(id, NodeStatus::Done);
+
+        // Get ready tasks after completion
+        let ready_after: Vec<&Node> = graph.ready_tasks();
+        let newly_unblocked: Vec<&str> = ready_after.iter()
+            .filter(|n| !ready_before.contains(&n.id))
+            .map(|n| n.id.as_str())
+            .collect();
+
+        save_gid_graph(&graph, &self.path)?;
+
+        let mut output = format!("✅ Task '{}' marked done.", id);
+        if !newly_unblocked.is_empty() {
+            output.push_str(&format!("\n🔓 Now unblocked: {}", newly_unblocked.join(", ")));
+        }
+
+        Ok(ToolResult { output, is_error: false })
+    }
+}
+
+// ── gid_query_impact: impact analysis ──
+
+struct GidQueryImpactTool {
+    graph: SharedGraph,
+}
+
+impl GidQueryImpactTool {
+    fn new(graph: SharedGraph) -> Self {
+        Self { graph }
+    }
+}
+
+#[async_trait]
+impl Tool for GidQueryImpactTool {
+    fn name(&self) -> &str {
+        "gid_query_impact"
+    }
+
+    fn description(&self) -> &str {
+        "Analyze impact: what tasks would be affected if this task changes?"
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "Task ID to analyze" }
+            },
+            "required": ["id"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let id = input["id"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'id'"))?;
+
+        let graph = self.graph.read().await;
+        let engine = QueryEngine::new(&graph);
+
+        let impacted = engine.impact(id);
+
+        if impacted.is_empty() {
+            return Ok(ToolResult {
+                output: format!("No other tasks depend on '{}'.", id),
+                is_error: false,
+            });
+        }
+
+        let mut output = format!("🔥 {} task(s) would be impacted by changes to '{}':\n", impacted.len(), id);
+        for node in impacted {
+            output.push_str(&format!("  • {} ({})\n", node.id, node.title));
+        }
+
+        Ok(ToolResult { output, is_error: false })
+    }
+}
+
+// ── gid_query_deps: dependency query ──
+
+struct GidQueryDepsTool {
+    graph: SharedGraph,
+}
+
+impl GidQueryDepsTool {
+    fn new(graph: SharedGraph) -> Self {
+        Self { graph }
+    }
+}
+
+#[async_trait]
+impl Tool for GidQueryDepsTool {
+    fn name(&self) -> &str {
+        "gid_query_deps"
+    }
+
+    fn description(&self) -> &str {
+        "Query dependencies: what does this task depend on (direct or transitive)?"
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "Task ID to query" },
+                "transitive": { "type": "boolean", "description": "Include transitive dependencies (default: true)" }
+            },
+            "required": ["id"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let id = input["id"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'id'"))?;
+        let transitive = input["transitive"].as_bool().unwrap_or(true);
+
+        let graph = self.graph.read().await;
+        let engine = QueryEngine::new(&graph);
+
+        let deps = engine.deps(id, transitive);
+
+        if deps.is_empty() {
+            return Ok(ToolResult {
+                output: format!("Task '{}' has no dependencies.", id),
+                is_error: false,
+            });
+        }
+
+        let mut output = format!("📦 {} dependencies for '{}':\n", deps.len(), id);
+        for node in deps {
+            let status_icon = match node.status {
+                NodeStatus::Done => "✅",
+                NodeStatus::InProgress => "🔄",
+                _ => "○",
+            };
+            output.push_str(&format!("  {} {} ({})\n", status_icon, node.id, node.title));
+        }
+
+        Ok(ToolResult { output, is_error: false })
+    }
+}
+
+// ── gid_validate: graph validation ──
+
+struct GidValidateTool {
+    graph: SharedGraph,
+}
+
+impl GidValidateTool {
+    fn new(graph: SharedGraph) -> Self {
+        Self { graph }
+    }
+}
+
+#[async_trait]
+impl Tool for GidValidateTool {
+    fn name(&self) -> &str {
+        "gid_validate"
+    }
+
+    fn description(&self) -> &str {
+        "Validate graph integrity: detect cycles, orphan nodes, missing references."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {}
+        })
+    }
+
+    async fn execute(&self, _input: Value) -> anyhow::Result<ToolResult> {
+        let graph = self.graph.read().await;
+        let validator = Validator::new(&graph);
+        let result = validator.validate();
+
+        Ok(ToolResult {
+            output: result.to_string(),
+            is_error: !result.is_valid(),
+        })
+    }
+}
+
+// ── gid_advise: graph analysis and suggestions ──
+
+struct GidAdviseTool {
+    graph: SharedGraph,
+}
+
+impl GidAdviseTool {
+    fn new(graph: SharedGraph) -> Self {
+        Self { graph }
+    }
+}
+
+#[async_trait]
+impl Tool for GidAdviseTool {
+    fn name(&self) -> &str {
+        "gid_advise"
+    }
+
+    fn description(&self) -> &str {
+        "Analyze graph and suggest improvements: detect issues, recommend task order."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {}
+        })
+    }
+
+    async fn execute(&self, _input: Value) -> anyhow::Result<ToolResult> {
+        let graph = self.graph.read().await;
+        let result = advise_analyze(&graph);
+
+        if result.items.is_empty() {
+            return Ok(ToolResult {
+                output: format!("✅ No issues found. Graph looks healthy! Score: {}/100", result.health_score),
+                is_error: false,
+            });
+        }
+
+        let mut output = format!("📋 {} suggestion(s) (score: {}/100):\n\n", result.items.len(), result.health_score);
+        for advice in &result.items {
+            output.push_str(&format!("{}\n\n", advice));
+        }
+
+        Ok(ToolResult { output, is_error: false })
+    }
+}
+
+// ── gid_visual: render graph as ASCII ──
+
+struct GidVisualTool {
+    graph: SharedGraph,
+}
+
+impl GidVisualTool {
+    fn new(graph: SharedGraph) -> Self {
+        Self { graph }
+    }
+}
+
+#[async_trait]
+impl Tool for GidVisualTool {
+    fn name(&self) -> &str {
+        "gid_visual"
+    }
+
+    fn description(&self) -> &str {
+        "Render the graph visually (ASCII tree, DOT, or Mermaid diagram)."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "format": {
+                    "type": "string",
+                    "enum": ["ascii", "dot", "mermaid"],
+                    "description": "Output format (default: ascii)"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let format_str = input["format"].as_str().unwrap_or("ascii");
+        let format = match format_str.parse::<VisualFormat>() {
+            Ok(f) => f,
+            Err(e) => return Ok(ToolResult { output: e.to_string(), is_error: true }),
+        };
+
+        let graph = self.graph.read().await;
+        let output = render(&graph, format);
+
+        Ok(ToolResult { output, is_error: false })
+    }
+}
+
+// ── gid_history: list/save snapshots ──
+
+struct GidHistoryTool {
+    path: SharedPath,
+}
+
+impl GidHistoryTool {
+    fn new(path: SharedPath) -> Self {
+        Self { path }
+    }
+}
+
+#[async_trait]
+impl Tool for GidHistoryTool {
+    fn name(&self) -> &str {
+        "gid_history"
+    }
+
+    fn description(&self) -> &str {
+        "List graph history snapshots or save a new snapshot."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "save"],
+                    "description": "Action to perform (default: list)"
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Commit message when saving (optional)"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let action = input["action"].as_str().unwrap_or("list");
+        let graph_path = std::path::Path::new(self.path.as_str());
+        let history_dir = graph_path.parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join(".gid-history");
+
+        let manager = HistoryManager::new(&history_dir);
+
+        match action {
+            "list" => {
+                let entries = manager.list_snapshots()?;
+                if entries.is_empty() {
+                    return Ok(ToolResult {
+                        output: "No history snapshots found.".to_string(),
+                        is_error: false,
+                    });
+                }
+                let mut output = format!("📜 {} snapshot(s):\n", entries.len());
+                for entry in entries.iter().take(10) {
+                    let msg = entry.message.as_deref().unwrap_or("-");
+                    output.push_str(&format!("  {} — {} ({} nodes, {} edges)\n",
+                        entry.timestamp, msg, entry.node_count, entry.edge_count));
+                }
+                if entries.len() > 10 {
+                    output.push_str(&format!("  ... and {} more\n", entries.len() - 10));
+                }
+                Ok(ToolResult { output, is_error: false })
+            }
+            "save" => {
+                let message = input["message"].as_str();
+                let graph = gid_load_graph(graph_path)?;
+                let filename = manager.save_snapshot(&graph, message)?;
+                Ok(ToolResult {
+                    output: format!("📸 Snapshot saved: {}", filename),
+                    is_error: false,
+                })
+            }
+            _ => Ok(ToolResult {
+                output: format!("Unknown action: {}. Use 'list' or 'save'.", action),
+                is_error: true,
+            }),
+        }
+    }
+}
+
+// ── gid_refactor: rename/merge/split nodes ──
+
+struct GidRefactorTool {
+    graph: SharedGraph,
+    path: SharedPath,
+}
+
+impl GidRefactorTool {
+    fn new(graph: SharedGraph, path: SharedPath) -> Self {
+        Self { graph, path }
+    }
+}
+
+#[async_trait]
+impl Tool for GidRefactorTool {
+    fn name(&self) -> &str {
+        "gid_refactor"
+    }
+
+    fn description(&self) -> &str {
+        "Refactor graph structure: rename nodes, merge tasks, split tasks, update titles."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": ["rename", "merge", "update_title"],
+                    "description": "Operation type"
+                },
+                "id": { "type": "string", "description": "Target node ID" },
+                "new_id": { "type": "string", "description": "New ID (for rename)" },
+                "new_title": { "type": "string", "description": "New title (for update_title)" },
+                "merge_into": { "type": "string", "description": "Target node to merge into (for merge)" },
+                "preview": { "type": "boolean", "description": "Preview only, don't apply (default: false)" }
+            },
+            "required": ["operation", "id"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let operation = input["operation"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'operation'"))?;
+        let id = input["id"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'id'"))?;
+        let preview = input["preview"].as_bool().unwrap_or(false);
+
+        let mut graph = self.graph.write().await;
+
+        match operation {
+            "rename" => {
+                let new_id = input["new_id"].as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'new_id' for rename"))?;
+
+                if preview {
+                    return match refactor::preview_rename(&graph, id, new_id) {
+                        Some(p) => Ok(ToolResult { output: p.to_string(), is_error: false }),
+                        None => Ok(ToolResult { output: format!("Node '{}' not found", id), is_error: true }),
+                    };
+                }
+
+                if !refactor::apply_rename(&mut graph, id, new_id) {
+                    return Ok(ToolResult {
+                        output: format!("Failed to rename: '{}' not found or '{}' already exists", id, new_id),
+                        is_error: true,
+                    });
+                }
+                save_gid_graph(&graph, &self.path)?;
+
+                Ok(ToolResult {
+                    output: format!("✅ Renamed '{}' → '{}'", id, new_id),
+                    is_error: false,
+                })
+            }
+            "merge" => {
+                let target = input["merge_into"].as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'merge_into' for merge"))?;
+                // Generate new merged ID
+                let new_id = format!("{}-{}", id, target);
+
+                if preview {
+                    return match refactor::preview_merge(&graph, id, target, &new_id) {
+                        Some(p) => Ok(ToolResult { output: p.to_string(), is_error: false }),
+                        None => Ok(ToolResult { output: format!("One or both nodes not found: '{}', '{}'", id, target), is_error: true }),
+                    };
+                }
+
+                if !refactor::apply_merge(&mut graph, id, target, &new_id) {
+                    return Ok(ToolResult {
+                        output: format!("Failed to merge: one or both nodes not found"),
+                        is_error: true,
+                    });
+                }
+                save_gid_graph(&graph, &self.path)?;
+
+                Ok(ToolResult {
+                    output: format!("✅ Merged '{}' + '{}' → '{}'", id, target, new_id),
+                    is_error: false,
+                })
+            }
+            "update_title" => {
+                let new_title = input["new_title"].as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'new_title'"))?;
+
+                if !refactor::update_title(&mut graph, id, new_title) {
+                    return Ok(ToolResult {
+                        output: format!("Node '{}' not found", id),
+                        is_error: true,
+                    });
+                }
+                save_gid_graph(&graph, &self.path)?;
+
+                Ok(ToolResult {
+                    output: format!("✅ Updated title for '{}': {}", id, new_title),
+                    is_error: false,
+                })
+            }
+            _ => Ok(ToolResult {
+                output: format!("Unknown operation: {}. Use 'rename', 'merge', or 'update_title'.", operation),
+                is_error: true,
+            }),
+        }
     }
 }

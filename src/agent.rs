@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 use crate::config::{AgentConfig, Config};
 use crate::hooks::{HookContext, HookOutcome, HookPoint, HookRegistry};
 use crate::llm::{self, LlmClient, Message, StreamChunk};
+use crate::reload::ConfigReceiver;
 use crate::memory::MemoryManager;
 use crate::safety::{SafetyLayer, wrap_external_content};
 use crate::sandbox::WasmSandbox;
@@ -109,6 +110,12 @@ impl AgentRunner {
         &self.config
     }
 
+    /// Get the currently active model name (respects runtime overrides).
+    pub async fn current_model(&self) -> String {
+        let client = self.llm_client.read().await;
+        client.model_name().to_string()
+    }
+
     /// Set the model at runtime (e.g., via /model command).
     /// Recreates the LLM client with the new model.
     pub async fn set_model(&self, model: &str) {
@@ -130,6 +137,39 @@ impl AgentRunner {
                 tracing::error!("Failed to create LLM client for model {}: {}", model, e);
             }
         }
+    }
+
+    /// Start watching for config changes and hot-reload LLM model, temperature, etc.
+    pub fn start_config_reload_listener(self: &Arc<Self>, mut config_rx: ConfigReceiver) {
+        let runner = Arc::clone(self);
+        tokio::spawn(async move {
+            // Skip the initial value (already applied at startup)
+            while config_rx.changed().await.is_ok() {
+                let new_config = config_rx.borrow_and_update().clone();
+
+                // Hot-reload LLM model
+                {
+                    let current_model = {
+                        let client = runner.llm_client.read().await;
+                        client.model_name().to_string()
+                    };
+                    let override_guard = runner.model_override.read().await;
+                    // Only auto-reload if there's no manual /model override active
+                    if override_guard.is_none() && new_config.llm.model != current_model {
+                        tracing::info!(
+                            "Hot-reloading LLM model: {} → {}",
+                            current_model,
+                            new_config.llm.model
+                        );
+                        runner.set_model(&new_config.llm.model).await;
+                    }
+                }
+
+                // Hot-reload workspace model display
+                // (workspace.model is used in system prompt to tell the agent what model it is)
+            }
+            tracing::warn!("Config reload listener exited");
+        });
     }
 
     /// Clear a session's conversation history.

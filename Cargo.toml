@@ -29,6 +29,9 @@ serde_yaml = "0.9"
 # Memory
 engramai = { path = "../engram-ai-rust" }
 
+# GID (task graph)
+gid-core = { path = "../gid-rs/crates/gid-core" }
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 

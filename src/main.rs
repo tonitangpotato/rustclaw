@@ -9,7 +9,6 @@ mod cron;
 mod dashboard;
 mod distributed;
 mod export;
-mod gid;
 mod heartbeat;
 mod hooks;
 mod llm;
@@ -119,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
             };
 
             // Initialize tools with memory and orchestrator access
-            let tools = if let Some(ref orch_ref) = orch {
+            let mut tools = if let Some(ref orch_ref) = orch {
                 tools::ToolRegistry::with_defaults_and_orchestrator(
                     &workspace_dir,
                     mem.clone(),
@@ -128,6 +127,22 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 tools::ToolRegistry::with_defaults_and_memory(&workspace_dir, mem.clone())
             };
+
+            // Register GID tools if enabled
+            if cfg.gid.enabled {
+                let graph_path = if std::path::Path::new(&cfg.gid.graph_path).is_absolute() {
+                    cfg.gid.graph_path.clone()
+                } else {
+                    format!("{}/{}", workspace_dir, cfg.gid.graph_path)
+                };
+                // Ensure parent directory exists
+                if let Some(parent) = std::path::Path::new(&graph_path).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                tools = tools.with_gid(&graph_path);
+                tracing::info!("GID tools enabled (graph: {})", graph_path);
+            }
+
             tracing::info!("Tools registered: {}", tools.definitions().len());
 
             // Initialize plugin registry
@@ -154,9 +169,12 @@ async fn main() -> anyhow::Result<()> {
             let runner = std::sync::Arc::new(runner);
 
             // Start config hot-reload watcher
-            let (_config_tx, _config_rx, _watcher) =
+            let (config_tx, config_rx, _watcher) =
                 reload::start_config_watcher(&config, cfg.clone())?;
-            reload::start_sighup_listener(config.clone(), _config_tx.clone()).await;
+            reload::start_sighup_listener(config.clone(), config_tx.clone()).await;
+
+            // Wire config changes to agent runner (hot-reload model, etc.)
+            runner.start_config_reload_listener(config_rx);
 
             // Start heartbeat
             heartbeat::start_heartbeat(

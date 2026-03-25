@@ -811,6 +811,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gid-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "walkdir",
+]
+
+[[package]]
 name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2017,6 +2030,7 @@ dependencies = [
  "clap",
  "engramai",
  "futures-util",
+ "gid-core",
  "glob",
  "mime_guess",
  "notify",
