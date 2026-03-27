@@ -47,9 +47,9 @@ pub struct Config {
     /// Can be a cheaper model like "claude-3-haiku-20240307" for cost savings
     pub summary_model: Option<String>,
 
-    /// Cron jobs
+    /// Cron configuration
     #[serde(default)]
-    pub cron: Vec<CronJobConfig>,
+    pub cron: CronConfig,
 
     /// Orchestrator (CEO multi-agent) configuration.
     #[serde(default)]
@@ -129,6 +129,10 @@ pub struct LlmConfig {
 
     /// OAuth token (for Claude Max / claude-cli auth)
     pub auth_token: Option<String>,
+
+    /// Path to auth profiles JSON file (for multi-token rotation).
+    /// Default: ~/.rustclaw/auth-profiles.json
+    pub auth_profiles_path: Option<String>,
 
     /// API base URL override
     pub base_url: Option<String>,
@@ -286,26 +290,65 @@ fn default_recall_limit() -> usize {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CronJobConfig {
-    /// Unique job ID.
-    pub id: String,
+    /// Unique job name/ID.
+    pub name: String,
 
-    /// Message to inject into agent.
-    pub message: String,
+    /// Cron schedule expression (e.g., "0 9 * * *" = 9AM daily).
+    /// Mutually exclusive with interval_seconds and at.
+    pub schedule: Option<String>,
 
-    /// Run every N seconds (mutually exclusive with 'at').
+    /// Run every N seconds (mutually exclusive with 'schedule' and 'at').
     pub interval_seconds: Option<u64>,
 
-    /// Run once at a specific datetime: "YYYY-MM-DD HH:MM:SS" (mutually exclusive with interval).
+    /// Run once at a specific datetime: "YYYY-MM-DD HH:MM:SS" (mutually exclusive with others).
     pub at: Option<String>,
 
-    /// Session key for the job (default: cron:{id}).
-    pub session_key: Option<String>,
-
-    /// Channel to deliver response (optional).
-    pub channel: Option<String>,
+    /// The task to execute when the job fires.
+    pub task: CronTaskConfig,
 
     /// Whether the job is enabled (default: true).
-    pub enabled: Option<bool>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Session key for AgentMessage tasks (default: cron:{name}).
+    pub session_key: Option<String>,
+
+    /// Channel to deliver response (optional, for AgentMessage tasks).
+    pub channel: Option<String>,
+}
+
+/// Task type for cron jobs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CronTaskConfig {
+    /// Run a shell command.
+    Shell {
+        command: String,
+    },
+    /// Send a message to the agent (triggers agent loop).
+    AgentMessage {
+        message: String,
+    },
+    /// Execute a script file.
+    Script {
+        path: String,
+    },
+}
+
+/// Top-level cron configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CronConfig {
+    /// Timezone for cron schedules (default: "UTC").
+    #[serde(default = "default_cron_timezone")]
+    pub timezone: String,
+
+    /// List of cron jobs.
+    #[serde(default)]
+    pub jobs: Vec<CronJobConfig>,
+}
+
+fn default_cron_timezone() -> String {
+    "UTC".to_string()
 }
 
 /// Orchestrator (CEO multi-agent) configuration.

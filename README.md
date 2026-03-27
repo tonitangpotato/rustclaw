@@ -91,6 +91,35 @@ enum HookPoint {
 }
 ```
 
+## Auth Profile Rotation
+
+Multi-token auth with automatic rotation and cooldown tracking (matches OpenClaw's design):
+
+```
+~/.rustclaw/auth-profiles.json    ← credential store (never in rustclaw.yaml)
+```
+
+- **Multiple OAuth profiles** per provider with priority ordering
+- **Round-robin rotation** — sorted by `lastUsed` (oldest first)
+- **Auto-failover** on 429 (rate limit) and 529 (overloaded)
+- **Exponential backoff cooldown** — 1min → 5min → 25min → 1h max
+- **Automatic cooldown expiry** — error counts reset after cooldown passes
+- **Usage stats persisted** to disk after each request
+
+```json
+{
+  "version": 1,
+  "profiles": {
+    "anthropic:keychain": { "type": "oauth", "provider": "anthropic", "access": "keychain", "refresh": "keychain", "expires": 9999999999999 },
+    "anthropic:default":  { "type": "token", "provider": "anthropic", "token": "sk-ant-..." },
+    "anthropic:manual":   { "type": "token", "provider": "anthropic", "token": "sk-ant-..." }
+  },
+  "order": { "anthropic": ["anthropic:keychain", "anthropic:default", "anthropic:manual"] }
+}
+```
+
+Special `"access": "keychain"` profile uses dynamic OAuth from macOS Keychain (auto-refresh).
+
 ## Memory
 
 Native [engramai](https://crates.io/crates/engramai) integration — neuroscience-grounded cognitive memory:
@@ -107,6 +136,7 @@ Native [engramai](https://crates.io/crates/engramai) integration — neuroscienc
 - [x] Telegram channel (long polling)
 - [x] Native Engram memory
 - [x] 6-point hook system
+- [x] Auth profile rotation (multi-token, cooldown tracking)
 - [ ] SQLite session persistence
 - [ ] Voice I/O (STT + TTS)
 - [ ] Cron & heartbeat system

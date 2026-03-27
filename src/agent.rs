@@ -234,16 +234,23 @@ impl AgentRunner {
             }
         }
 
-        // 3. Recall relevant memories
-        let memory_context = {
-            match self.memory.recall(user_message) {
-                Ok(memories) if !memories.is_empty() => {
-                    tracing::info!("Recalled {} memories", memories.len());
-                    MemoryManager::format_for_prompt(&memories)
-                }
-                _ => String::new(),
+        // 3. Extract recalled memories from hook metadata (set by EngramRecallHook)
+        let memory_context = hook_ctx
+            .metadata
+            .get("engram_recall")
+            .and_then(|v| v.get("formatted"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_default();
+
+        if !memory_context.is_empty() {
+            if let Some(count) = hook_ctx.metadata.get("engram_recall")
+                .and_then(|v| v.get("count"))
+                .and_then(|v| v.as_u64())
+            {
+                tracing::info!("Recalled {} memories via hook", count);
             }
-        }; // memory recall
+        }
 
         // 4. Build system prompt (include HEARTBEAT.md if this is a heartbeat poll)
         let mut system_prompt = self.workspace.build_system_prompt_with_options(is_heartbeat);
@@ -397,7 +404,7 @@ impl AgentRunner {
             session.messages.push(Message::tool_results(tool_results));
         }
 
-        // 9. Run BeforeOutbound hooks
+        // 9. Run BeforeOutbound hooks (includes EngramStoreHook for auto-store)
         {
             let mut out_ctx = HookContext {
                 session_key: session_key.to_string(),
@@ -412,24 +419,7 @@ impl AgentRunner {
             hooks.run(HookPoint::BeforeOutbound, &mut out_ctx).await?;
         }
 
-        // 10. Auto-store to Engram (important interactions)
-        if self.config.memory.auto_store && !response_text.is_empty() {
-            let store_content = format!("{} → {}", user_message, {
-                let end = response_text.len().min(200);
-                let end = response_text.floor_char_boundary(end);
-                &response_text[..end]
-            });
-            if let Err(e) = self.memory.store(
-                &store_content,
-                engramai::MemoryType::Episodic,
-                0.5, // moderate importance
-                Some("auto"),
-            ) {
-                tracing::debug!("Engram auto-store skipped: {}", e);
-            }
-        }
-
-        // 11. Update session
+        // 10. Update session
         self.sessions.update(session).await;
 
         Ok(response_text)

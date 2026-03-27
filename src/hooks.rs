@@ -59,7 +59,8 @@ pub trait Hook: Send + Sync {
     }
 
     /// Execute the hook.
-    async fn execute(&self, ctx: &HookContext) -> anyhow::Result<HookOutcome>;
+    /// Takes mutable context to allow hooks to modify content or metadata.
+    async fn execute(&self, ctx: &mut HookContext) -> anyhow::Result<HookOutcome>;
 }
 
 /// Registry that manages all hooks.

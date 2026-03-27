@@ -1,0 +1,15 @@
+project: null
+nodes:
+- id: resume-writing
+  title: 完成简历写作
+  status: todo
+  description: 今晚回来继续完成简历的撰写工作
+  tags:
+  - urgent
+  - career
+  - tonight
+  priority: 50
+  findings: {}
+  file_cache: {}
+  tool_history: []
+edges: []

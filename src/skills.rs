@@ -128,7 +128,7 @@ impl SkillGenerator {
                 "exec" => "shell",
                 "read_file" | "write_file" | "edit_file" | "list_dir" | "search_files" => "filesystem",
                 "web_fetch" => "web",
-                "engram_recall" | "engram_store" => "memory",
+                "engram_recall" | "engram_store" | "engram_recall_associated" => "memory",
                 "delegate_task" => "orchestration",
                 _ => "other",
             };

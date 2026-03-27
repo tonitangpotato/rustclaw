@@ -6,8 +6,10 @@
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex};
 
+use crate::auth_profiles::{AuthProfileCredential, AuthProfileFailureReason, AuthProfileManager};
 use crate::config::{self, AuthMode, LlmConfig};
 
 /// A content block in a message.
@@ -166,6 +168,10 @@ const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CL
 pub struct AnthropicClient {
     client: reqwest::Client,
     auth: AuthMode,
+    /// Auth profile manager for multi-token rotation (optional).
+    profile_manager: Option<Arc<Mutex<AuthProfileManager>>>,
+    /// Current profile ID being used (if using profile rotation).
+    current_profile_id: Arc<Mutex<Option<String>>>,
     model: String,
     max_tokens: u32,
     base_url: String,
@@ -179,21 +185,44 @@ impl AnthropicClient {
             .clone()
             .unwrap_or_else(|| "https://api.anthropic.com".to_string());
 
+        // Initialize auth profile manager (for multi-token rotation)
+        let profile_manager = match AuthProfileManager::new(config.auth_profiles_path.as_deref()) {
+            Ok(mgr) => {
+                if mgr.has_profiles("anthropic") {
+                    let profile_count = mgr.store().list_profiles_for_provider("anthropic").len();
+                    tracing::info!(
+                        "Auth profile rotation enabled: {} profile(s) for anthropic",
+                        profile_count
+                    );
+                    Some(Arc::new(Mutex::new(mgr)))
+                } else {
+                    tracing::debug!("No auth profiles found, using single-token mode");
+                    None
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load auth profiles, using single-token mode: {}", e);
+                None
+            }
+        };
+
         Ok(Self {
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .build()?,
             auth,
+            profile_manager,
+            current_profile_id: Arc::new(Mutex::new(None)),
             model: config.model.clone(),
             max_tokens: config.max_tokens,
             base_url,
         })
     }
 
-    /// Apply auth headers to a request builder.
-    async fn apply_auth(&self, mut req: reqwest::RequestBuilder) -> anyhow::Result<reqwest::RequestBuilder> {
-        match &self.auth {
+    /// Apply auth headers to a request builder using the given auth mode.
+    async fn apply_auth_mode(&self, mut req: reqwest::RequestBuilder, auth: &AuthMode) -> anyhow::Result<reqwest::RequestBuilder> {
+        match auth {
             AuthMode::ApiKey(key) => {
                 req = req.header("x-api-key", key);
             }
@@ -214,6 +243,84 @@ impl AnthropicClient {
             }
         }
         Ok(req)
+    }
+
+    /// Apply auth headers to a request builder (uses primary auth).
+    async fn apply_auth(&self, req: reqwest::RequestBuilder) -> anyhow::Result<reqwest::RequestBuilder> {
+        self.apply_auth_mode(req, &self.auth).await
+    }
+
+    /// Apply auth from a profile credential.
+    async fn apply_profile_auth(
+        &self,
+        mut req: reqwest::RequestBuilder,
+        credential: &AuthProfileCredential,
+    ) -> anyhow::Result<reqwest::RequestBuilder> {
+        if credential.is_keychain() {
+            // Use the primary auth (which should be OAuthManaged from Keychain)
+            return self.apply_auth(req).await;
+        }
+
+        match credential {
+            AuthProfileCredential::ApiKey { key, .. } => {
+                req = req.header("x-api-key", key);
+            }
+            AuthProfileCredential::Token { token, .. } => {
+                req = req
+                    .header("Authorization", format!("Bearer {}", token))
+                    .header("anthropic-beta", OAUTH_BETA_HEADER)
+                    .header("user-agent", OAUTH_USER_AGENT)
+                    .header("x-app", "cli");
+            }
+            AuthProfileCredential::OAuth { access, .. } => {
+                req = req
+                    .header("Authorization", format!("Bearer {}", access))
+                    .header("anthropic-beta", OAUTH_BETA_HEADER)
+                    .header("user-agent", OAUTH_USER_AGENT)
+                    .header("x-app", "cli");
+            }
+        }
+        Ok(req)
+    }
+
+    /// Get the next available profile for rotation.
+    /// Returns (profile_id, credential) or None if no profiles available.
+    async fn next_profile(&self) -> Option<(String, AuthProfileCredential)> {
+        let manager = self.profile_manager.as_ref()?;
+        let mut mgr = manager.lock().await;
+
+        let profile_id = mgr.next_profile("anthropic")?;
+        let credential = mgr.get_credential(&profile_id)?.clone();
+
+        Some((profile_id, credential))
+    }
+
+    /// Mark a profile as used successfully.
+    async fn mark_profile_used(&self, profile_id: &str) {
+        if let Some(ref manager) = self.profile_manager {
+            let mut mgr = manager.lock().await;
+            mgr.mark_used(profile_id);
+        }
+    }
+
+    /// Mark a profile as failed.
+    async fn mark_profile_failure(&self, profile_id: &str, reason: AuthProfileFailureReason) {
+        if let Some(ref manager) = self.profile_manager {
+            let mut mgr = manager.lock().await;
+            mgr.mark_failure(profile_id, reason);
+        }
+    }
+
+    /// Map HTTP status code to failure reason.
+    fn status_to_failure_reason(status: u16) -> AuthProfileFailureReason {
+        match status {
+            401 => AuthProfileFailureReason::Auth,
+            403 => AuthProfileFailureReason::AuthPermanent,
+            429 => AuthProfileFailureReason::RateLimit,
+            500 | 502 | 503 => AuthProfileFailureReason::Overloaded,
+            529 => AuthProfileFailureReason::Overloaded,
+            _ => AuthProfileFailureReason::Unknown,
+        }
     }
 
     /// Force-refresh the OAuth token (call after 401 errors).
@@ -291,17 +398,38 @@ impl LlmClient for AnthropicClient {
                 .collect::<Vec<_>>());
         }
 
-        // Retry loop with exponential backoff
+        // Retry loop with exponential backoff and profile rotation
         let mut attempt = 0;
         let mut last_error: Option<anyhow::Error> = None;
+        let mut current_profile: Option<(String, AuthProfileCredential)> = None;
+        let mut tried_profiles: Vec<String> = Vec::new();
+
+        // Get max attempts: base retries + profile count
+        let profile_count = if let Some(ref mgr) = self.profile_manager {
+            mgr.lock().await.store().list_profiles_for_provider("anthropic").len()
+        } else {
+            0
+        };
+        let total_retries = MAX_RETRIES + profile_count as u32 * 2;
 
         loop {
             attempt += 1;
 
+            // Determine which auth to use
+            let (auth_label, use_profile) = if let Some((ref id, _)) = current_profile {
+                (format!("profile:{}", id), true)
+            } else {
+                let label = match &self.auth {
+                    AuthMode::OAuthToken(_) => "oauth",
+                    AuthMode::OAuthManaged(_) => "oauth-managed",
+                    AuthMode::ApiKey(_) => "api_key",
+                };
+                (label.to_string(), false)
+            };
+
             tracing::info!(
                 "LLM request attempt {}/{} → model={} url={}/v1/messages auth={}",
-                attempt, MAX_RETRIES, self.model, self.base_url,
-                match &self.auth { AuthMode::OAuthToken(_) => "oauth", AuthMode::OAuthManaged(_) => "oauth-managed", AuthMode::ApiKey(_) => "api_key" }
+                attempt, total_retries, self.model, self.base_url, auth_label
             );
 
             let req = self
@@ -310,8 +438,16 @@ impl LlmClient for AnthropicClient {
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json");
 
-            // Apply auth headers (handles token refresh for managed OAuth)
-            let req = self.apply_auth(req).await?;
+            // Apply auth headers — use profile if set, otherwise primary
+            let req = if use_profile {
+                if let Some((_, ref cred)) = current_profile {
+                    self.apply_profile_auth(req, cred).await?
+                } else {
+                    self.apply_auth(req).await?
+                }
+            } else {
+                self.apply_auth(req).await?
+            };
 
             tracing::debug!("Anthropic request body: {}", serde_json::to_string_pretty(&body).unwrap_or_default());
             let resp = match req.json(&body).send().await {
@@ -335,6 +471,12 @@ impl LlmClient for AnthropicClient {
 
             // Handle 401 — try refreshing OAuth token and retry once
             if status.as_u16() == 401 {
+                // Mark current profile as failed if using profile rotation
+                if let Some((ref id, _)) = current_profile {
+                    self.mark_profile_failure(id, AuthProfileFailureReason::Auth).await;
+                    tried_profiles.push(id.clone());
+                }
+
                 if let AuthMode::OAuthManaged(manager) = &self.auth {
                     if attempt <= 2 {
                         tracing::warn!("Got 401, attempting OAuth token refresh...");
@@ -351,8 +493,8 @@ impl LlmClient for AnthropicClient {
                 }
             }
 
-            // Check for client errors - don't retry these
-            if is_client_error(status) {
+            // Check for client errors - don't retry these (except for profile rotation on 401)
+            if is_client_error(status) && status.as_u16() != 401 {
                 let resp_body: serde_json::Value = resp.json().await?;
                 tracing::error!("Anthropic API error body: {}", serde_json::to_string_pretty(&resp_body).unwrap_or_default());
                 let error_msg = resp_body["error"]["message"]
@@ -362,7 +504,49 @@ impl LlmClient for AnthropicClient {
             }
 
             // Check for retryable errors
-            if should_retry(status) && attempt <= MAX_RETRIES {
+            if should_retry(status) && attempt <= total_retries {
+                // Mark current profile as failed
+                if let Some((ref id, _)) = current_profile {
+                    let reason = Self::status_to_failure_reason(status.as_u16());
+                    self.mark_profile_failure(id, reason).await;
+                    tried_profiles.push(id.clone());
+                }
+
+                // On 429/529/401, try rotating to next available profile
+                if matches!(status.as_u16(), 401 | 429 | 529) {
+                    // Try to get next profile (skipping already tried ones)
+                    let next_profile = if let Some(ref manager) = self.profile_manager {
+                        let mut mgr = manager.lock().await;
+                        let order = mgr.store_mut().resolve_auth_order("anthropic");
+
+                        // Find first profile not yet tried
+                        let mut found = None;
+                        for profile_id in order {
+                            if !tried_profiles.contains(&profile_id) {
+                                if let Some(cred) = mgr.get_credential(&profile_id).cloned() {
+                                    found = Some((profile_id, cred));
+                                    break;
+                                }
+                            }
+                        }
+                        found
+                    } else {
+                        None
+                    };
+
+                    if let Some((profile_id, cred)) = next_profile {
+                        tracing::warn!(
+                            "Overloaded ({}) on attempt {}. Rotating to profile '{}'...",
+                            status, attempt, profile_id
+                        );
+                        current_profile = Some((profile_id, cred));
+                        // Short delay before trying next profile
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        last_error = Some(anyhow::anyhow!("HTTP {}", status));
+                        continue;
+                    }
+                }
+
                 // Check for retry-after header (for 429)
                 let retry_after = resp
                     .headers()
@@ -376,7 +560,7 @@ impl LlmClient for AnthropicClient {
 
                 tracing::warn!(
                     "Retryable error {} (attempt {}/{}). Retrying in {}ms...",
-                    status, attempt, MAX_RETRIES, backoff
+                    status, attempt, total_retries, backoff
                 );
 
                 tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
@@ -400,6 +584,11 @@ impl LlmClient for AnthropicClient {
                     );
                 }
                 anyhow::bail!("Anthropic API error ({}): {}", status, error_msg);
+            }
+
+            // Success! Mark profile as used
+            if let Some((ref id, _)) = current_profile {
+                self.mark_profile_used(id).await;
             }
 
             // Success! Parse response content blocks
@@ -480,25 +669,209 @@ impl LlmClient for AnthropicClient {
                 .collect::<Vec<_>>());
         }
 
-        let req = self
-            .client
-            .post(format!("{}/v1/messages", self.base_url))
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json");
+        // Retry loop with exponential backoff and profile rotation (same pattern as chat())
+        let mut attempt = 0;
+        let mut last_error: Option<anyhow::Error> = None;
+        let mut current_profile: Option<(String, AuthProfileCredential)> = None;
+        let mut tried_profiles: Vec<String> = Vec::new();
 
-        // Apply auth headers (handles token refresh for managed OAuth)
-        let req = self.apply_auth(req).await?;
+        // Get max attempts: base retries + profile count
+        let profile_count = if let Some(ref mgr) = self.profile_manager {
+            mgr.lock().await.store().list_profiles_for_provider("anthropic").len()
+        } else {
+            0
+        };
+        let total_retries = MAX_RETRIES + profile_count as u32 * 2;
 
-        let resp = req.json(&body).send().await?;
-        let status = resp.status();
+        let resp = loop {
+            attempt += 1;
 
-        if !status.is_success() {
-            let error_body: serde_json::Value = resp.json().await?;
-            let error_msg = error_body["error"]["message"]
-                .as_str()
-                .unwrap_or("Unknown error");
-            anyhow::bail!("Anthropic API error ({}): {}", status, error_msg);
-        }
+            // Determine which auth to use
+            let (auth_label, use_profile) = if let Some((ref id, _)) = current_profile {
+                (format!("profile:{}", id), true)
+            } else {
+                // Try to get a profile for streaming
+                if current_profile.is_none() && self.profile_manager.is_some() {
+                    current_profile = self.next_profile().await;
+                }
+                if let Some((ref id, _)) = current_profile {
+                    (format!("profile:{}", id), true)
+                } else {
+                    let label = match &self.auth {
+                        AuthMode::OAuthToken(_) => "oauth",
+                        AuthMode::OAuthManaged(_) => "oauth-managed",
+                        AuthMode::ApiKey(_) => "api_key",
+                    };
+                    (label.to_string(), false)
+                }
+            };
+
+            tracing::info!(
+                "LLM stream request attempt {}/{} → model={} url={}/v1/messages auth={}",
+                attempt, total_retries, self.model, self.base_url, auth_label
+            );
+
+            let req = self
+                .client
+                .post(format!("{}/v1/messages", self.base_url))
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json");
+
+            // Apply auth headers — use profile if set, otherwise primary
+            let req = if use_profile {
+                if let Some((_, ref cred)) = current_profile {
+                    self.apply_profile_auth(req, cred).await?
+                } else {
+                    self.apply_auth(req).await?
+                }
+            } else {
+                self.apply_auth(req).await?
+            };
+
+            let resp_result = req.json(&body).send().await;
+            let resp = match resp_result {
+                Ok(r) => r,
+                Err(e) => {
+                    if attempt <= MAX_RETRIES {
+                        let backoff = INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1);
+                        tracing::warn!(
+                            "Stream request failed (attempt {}/{}): {}. Retrying in {}ms...",
+                            attempt, MAX_RETRIES, e, backoff
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                        last_error = Some(e.into());
+                        continue;
+                    }
+                    return Err(e.into());
+                }
+            };
+
+            let status = resp.status();
+
+            // Handle 401 — try refreshing OAuth token and retry
+            if status.as_u16() == 401 {
+                // Mark current profile as failed if using profile rotation
+                if let Some((ref id, _)) = current_profile {
+                    self.mark_profile_failure(id, AuthProfileFailureReason::Auth).await;
+                    tried_profiles.push(id.clone());
+                }
+
+                if let AuthMode::OAuthManaged(manager) = &self.auth {
+                    if attempt <= 2 {
+                        tracing::warn!("Got 401 on stream, attempting OAuth token refresh...");
+                        match manager.refresh().await {
+                            Ok(_) => {
+                                tracing::info!("Token refreshed, retrying stream request");
+                                current_profile = None; // Reset to try primary auth again
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::error!("Token refresh failed: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check for client errors - don't retry these (except for profile rotation on 401)
+            if is_client_error(status) && status.as_u16() != 401 {
+                let resp_body: serde_json::Value = resp.json().await?;
+                tracing::error!("Anthropic stream API error body: {}", serde_json::to_string_pretty(&resp_body).unwrap_or_default());
+                let error_msg = resp_body["error"]["message"]
+                    .as_str()
+                    .unwrap_or("Unknown error");
+                anyhow::bail!("Anthropic API error ({}): {}", status, error_msg);
+            }
+
+            // Check for retryable errors
+            if should_retry(status) && attempt <= total_retries {
+                // Mark current profile as failed
+                if let Some((ref id, _)) = current_profile {
+                    let reason = Self::status_to_failure_reason(status.as_u16());
+                    self.mark_profile_failure(id, reason).await;
+                    tried_profiles.push(id.clone());
+                }
+
+                // On 429/529/401, try rotating to next available profile
+                if matches!(status.as_u16(), 401 | 429 | 529) {
+                    // Try to get next profile (skipping already tried ones)
+                    let next_profile = if let Some(ref manager) = self.profile_manager {
+                        let mut mgr = manager.lock().await;
+                        let order = mgr.store_mut().resolve_auth_order("anthropic");
+
+                        // Find first profile not yet tried
+                        let mut found = None;
+                        for profile_id in order {
+                            if !tried_profiles.contains(&profile_id) {
+                                if let Some(cred) = mgr.get_credential(&profile_id).cloned() {
+                                    found = Some((profile_id, cred));
+                                    break;
+                                }
+                            }
+                        }
+                        found
+                    } else {
+                        None
+                    };
+
+                    if let Some((profile_id, cred)) = next_profile {
+                        tracing::warn!(
+                            "Stream overloaded ({}) on attempt {}. Rotating to profile '{}'...",
+                            status, attempt, profile_id
+                        );
+                        current_profile = Some((profile_id, cred));
+                        // Short delay before trying next profile
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        last_error = Some(anyhow::anyhow!("HTTP {}", status));
+                        continue;
+                    }
+                }
+
+                // Check for retry-after header (for 429)
+                let retry_after = resp
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok());
+
+                let backoff = retry_after
+                    .map(|secs| secs * 1000)
+                    .unwrap_or_else(|| INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1));
+
+                tracing::warn!(
+                    "Stream retryable error {} (attempt {}/{}). Retrying in {}ms...",
+                    status, attempt, total_retries, backoff
+                );
+
+                tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                last_error = Some(anyhow::anyhow!("HTTP {}", status));
+                continue;
+            }
+
+            // Non-retryable error
+            if !status.is_success() {
+                let resp_body: serde_json::Value = resp.json().await?;
+                let error_msg = resp_body["error"]["message"]
+                    .as_str()
+                    .unwrap_or("Unknown error");
+
+                // If we've exhausted retries, include last error info
+                if let Some(le) = &last_error {
+                    anyhow::bail!(
+                        "Anthropic stream API error ({}) after {} attempts: {} (last error: {})",
+                        status, attempt, error_msg, le
+                    );
+                }
+                anyhow::bail!("Anthropic stream API error ({}): {}", status, error_msg);
+            }
+
+            // Success! Mark profile as used
+            if let Some((ref id, _)) = current_profile {
+                self.mark_profile_used(id).await;
+            }
+
+            break resp;
+        }; // end retry loop
 
         let (tx, rx) = mpsc::channel::<StreamChunk>(100);
 

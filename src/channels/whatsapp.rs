@@ -382,6 +382,7 @@ pub async fn start(config: WhatsAppConfig, runner: Arc<AgentRunner>) -> anyhow::
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text_utils::split_message;
 
     #[test]
     fn test_split_message() {

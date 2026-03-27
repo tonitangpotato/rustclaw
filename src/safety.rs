@@ -1618,7 +1618,7 @@ impl Hook for PromptInjectionHook {
         10 // Run early
     }
 
-    async fn execute(&self, ctx: &HookContext) -> anyhow::Result<HookOutcome> {
+    async fn execute(&self, ctx: &mut HookContext) -> anyhow::Result<HookOutcome> {
         // Use the full sanitizer for comprehensive detection
         let sanitizer = Sanitizer::new();
         let result = sanitizer.sanitize(&ctx.content);
@@ -1656,7 +1656,7 @@ impl Hook for SensitiveLeakHook {
         10 // Run early
     }
 
-    async fn execute(&self, ctx: &HookContext) -> anyhow::Result<HookOutcome> {
+    async fn execute(&self, ctx: &mut HookContext) -> anyhow::Result<HookOutcome> {
         // Use the full leak detector
         let detector = LeakDetector::new();
         let result = detector.scan(&ctx.content);

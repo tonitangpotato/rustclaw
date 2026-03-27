@@ -595,6 +595,7 @@ mod tests {
     fn test_sandbox_exec_denied() {
         let config = SandboxConfig {
             enabled: true,
+            mode: SandboxMode::default(),
             default_timeout_ms: 30_000,
             tools: HashMap::new(), // No tools configured = all denied
         };
@@ -616,6 +617,7 @@ mod tests {
 
         let config = SandboxConfig {
             enabled: true,
+            mode: SandboxMode::default(),
             default_timeout_ms: 30_000,
             tools,
         };
@@ -637,6 +639,7 @@ mod tests {
 
         let config = SandboxConfig {
             enabled: true,
+            mode: SandboxMode::default(),
             default_timeout_ms: 30_000,
             tools,
         };

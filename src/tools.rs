@@ -73,7 +73,8 @@ impl ToolRegistry {
     pub fn with_defaults_and_memory(workspace_root: &str, memory: Arc<MemoryManager>) -> Self {
         let mut registry = Self::with_defaults(workspace_root);
         registry.register(Box::new(EngramRecallTool::new(memory.clone())));
-        registry.register(Box::new(EngramStoreTool::new(memory)));
+        registry.register(Box::new(EngramStoreTool::new(memory.clone())));
+        registry.register(Box::new(EngramRecallAssociatedTool::new(memory)));
         registry
     }
 
@@ -947,6 +948,88 @@ impl Tool for EngramStoreTool {
             }),
             Err(e) => Ok(ToolResult {
                 output: format!("Failed to store memory: {}", e),
+                is_error: true,
+            }),
+        }
+    }
+}
+
+// ─── Engram Recall Associated Tool ───────────────────────────
+
+/// Recall associated memories using Hebbian links.
+pub struct EngramRecallAssociatedTool {
+    memory: Arc<MemoryManager>,
+}
+
+impl EngramRecallAssociatedTool {
+    pub fn new(memory: Arc<MemoryManager>) -> Self {
+        Self { memory }
+    }
+}
+
+#[async_trait]
+impl Tool for EngramRecallAssociatedTool {
+    fn name(&self) -> &str {
+        "engram_recall_associated"
+    }
+
+    fn description(&self) -> &str {
+        "Recall associated/causal memories — memories about cause→effect relationships or things that frequently co-occur. Use this to find related patterns, consequences, or correlated events."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Optional search query to find relevant associated memories. If omitted, returns all causal memories sorted by importance."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of memories to return (default: 5)"
+                },
+                "min_confidence": {
+                    "type": "number",
+                    "description": "Minimum confidence threshold 0.0-1.0 (default: 0.0)"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let query = input["query"].as_str();
+        let limit = input["limit"].as_u64().unwrap_or(5) as usize;
+        let min_confidence = input["min_confidence"].as_f64().unwrap_or(0.0);
+
+        match self.memory.recall_associated(query, limit, min_confidence) {
+            Ok(memories) => {
+                if memories.is_empty() {
+                    return Ok(ToolResult {
+                        output: "No associated memories found.".to_string(),
+                        is_error: false,
+                    });
+                }
+
+                let mut output = format!("Found {} associated memories:\n\n", memories.len());
+                for (i, mem) in memories.iter().enumerate() {
+                    let label = mem.confidence_label.as_deref().unwrap_or("likely");
+                    output.push_str(&format!(
+                        "{}. [{}] (confidence: {:.2})\n   {}\n\n",
+                        i + 1,
+                        label,
+                        mem.confidence,
+                        mem.content
+                    ));
+                }
+
+                Ok(ToolResult {
+                    output,
+                    is_error: false,
+                })
+            }
+            Err(e) => Ok(ToolResult {
+                output: format!("Failed to recall associated memories: {}", e),
                 is_error: true,
             }),
         }

@@ -126,11 +126,13 @@ fn diff_config(old: &Config, new: &Config) -> Vec<String> {
         ));
     }
 
-    if old.cron.len() != new.cron.len() {
+    if old.cron.jobs.len() != new.cron.jobs.len() || old.cron.timezone != new.cron.timezone {
         changes.push(format!(
-            "cron jobs: {} → {}",
-            old.cron.len(),
-            new.cron.len()
+            "cron: {} jobs ({}) → {} jobs ({})",
+            old.cron.jobs.len(),
+            old.cron.timezone,
+            new.cron.jobs.len(),
+            new.cron.timezone
         ));
     }
 

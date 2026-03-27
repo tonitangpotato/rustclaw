@@ -1,13 +1,16 @@
 #![allow(dead_code)]
 
 mod agent;
+mod auth_profiles;
 mod browser;
 mod channels;
 mod config;
 mod credential;
 mod cron;
+mod daemon;
 mod dashboard;
 mod distributed;
+mod engram_hooks;
 mod export;
 mod heartbeat;
 mod hooks;
@@ -65,6 +68,55 @@ enum Commands {
     },
     /// Run setup wizard
     Setup,
+    /// Manage the RustClaw daemon service
+    #[command(subcommand)]
+    Daemon(DaemonCommands),
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum DaemonCommands {
+    /// Start the daemon (registers and loads launchd service)
+    Start {
+        /// Path to config file
+        #[arg(short, long, default_value = "rustclaw.yaml")]
+        config: String,
+        /// Workspace directory
+        #[arg(short, long)]
+        workspace: Option<String>,
+    },
+    /// Stop the daemon
+    Stop,
+    /// Show daemon status
+    Status,
+    /// Restart the daemon
+    Restart {
+        /// Path to config file
+        #[arg(short, long, default_value = "rustclaw.yaml")]
+        config: String,
+        /// Workspace directory
+        #[arg(short, long)]
+        workspace: Option<String>,
+    },
+    /// View daemon logs
+    Logs {
+        /// Follow log output (like tail -f)
+        #[arg(short, long)]
+        follow: bool,
+        /// Number of lines to show
+        #[arg(short = 'n', long, default_value = "50")]
+        lines: usize,
+    },
+    /// Install the daemon service (without starting)
+    Install {
+        /// Path to config file
+        #[arg(short, long, default_value = "rustclaw.yaml")]
+        config: String,
+        /// Workspace directory
+        #[arg(short, long)]
+        workspace: Option<String>,
+    },
+    /// Uninstall the daemon service
+    Uninstall,
 }
 
 #[tokio::main]
@@ -98,6 +150,16 @@ async fn main() -> anyhow::Result<()> {
             let mut hook_registry = hooks::HookRegistry::new();
             hook_registry.register(Box::new(safety::PromptInjectionHook));
             hook_registry.register(Box::new(safety::SensitiveLeakHook));
+
+            // Register Engram memory hooks (auto-recall and auto-store)
+            if cfg.memory.auto_recall {
+                hook_registry.register(Box::new(engram_hooks::EngramRecallHook::new(mem.clone())));
+                tracing::info!("Engram auto-recall hook enabled");
+            }
+            if cfg.memory.auto_store {
+                hook_registry.register(Box::new(engram_hooks::EngramStoreHook::new(mem.clone())));
+                tracing::info!("Engram auto-store hook enabled");
+            }
             tracing::info!("Hook system ready ({} hooks)", hook_registry.count());
 
             // Initialize session manager
@@ -187,7 +249,11 @@ async fn main() -> anyhow::Result<()> {
             // Start cron jobs
             let cron_jobs = cron::parse_cron_jobs(&cfg.cron);
             if !cron_jobs.is_empty() {
-                tracing::info!("Starting {} cron job(s)...", cron_jobs.len());
+                tracing::info!(
+                    "Starting {} cron job(s) (timezone: {})...",
+                    cron_jobs.len(),
+                    cfg.cron.timezone
+                );
                 cron::start_cron(cron_jobs, runner.clone()).await?;
             }
 
@@ -219,6 +285,31 @@ async fn main() -> anyhow::Result<()> {
         Commands::Setup => {
             tracing::info!("Setup wizard (not yet implemented)");
             // TODO: Interactive setup
+        }
+        Commands::Daemon(cmd) => {
+            match cmd {
+                DaemonCommands::Start { config, workspace } => {
+                    daemon::daemon_start(&config, workspace.as_deref())?;
+                }
+                DaemonCommands::Stop => {
+                    daemon::daemon_stop()?;
+                }
+                DaemonCommands::Status => {
+                    daemon::daemon_status()?;
+                }
+                DaemonCommands::Restart { config, workspace } => {
+                    daemon::daemon_restart(&config, workspace.as_deref())?;
+                }
+                DaemonCommands::Logs { follow, lines } => {
+                    daemon::daemon_logs(follow, lines)?;
+                }
+                DaemonCommands::Install { config, workspace } => {
+                    daemon::daemon_install(&config, workspace.as_deref())?;
+                }
+                DaemonCommands::Uninstall => {
+                    daemon::daemon_uninstall()?;
+                }
+            }
         }
     }
 
