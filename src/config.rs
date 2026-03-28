@@ -399,6 +399,14 @@ pub struct SpecialistConfig {
 
     /// Token budget for this agent (None = unlimited).
     pub budget_tokens: Option<u64>,
+
+    /// Maximum iterations for the agentic loop (default: 25).
+    #[serde(default = "default_max_iterations")]
+    pub max_iterations: u32,
+}
+
+fn default_max_iterations() -> u32 {
+    25
 }
 
 /// Load config from a YAML file.

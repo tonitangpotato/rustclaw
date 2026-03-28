@@ -63,6 +63,8 @@ pub struct SpecialistAgent {
     pub budget_used: u64,
     /// Current status.
     pub status: AgentStatus,
+    /// Maximum iterations for the agentic loop.
+    pub max_iterations: u32,
 }
 
 impl SpecialistAgent {
@@ -77,6 +79,7 @@ impl SpecialistAgent {
             budget_tokens: cfg.budget_tokens,
             budget_used: 0,
             status: AgentStatus::Idle,
+            max_iterations: cfg.max_iterations,
         }
     }
 
@@ -415,14 +418,14 @@ impl Orchestrator {
                     .map(|t| t.description.clone())
                     .unwrap_or_default();
 
-                let agent_config = self
+                let (agent_config, max_iterations) = self
                     .agents
                     .get(&agent_id)
-                    .map(|a| a.to_agent_config())
+                    .map(|a| (a.to_agent_config(), a.max_iterations))
                     .unwrap();
 
                 let result = self
-                    .execute_task(runner, &agent_config, &task_id, &task_description)
+                    .execute_task(runner, &agent_config, &task_id, &task_description, max_iterations)
                     .await;
 
                 results.push(result);
@@ -439,20 +442,22 @@ impl Orchestrator {
         agent_config: &AgentConfig,
         task_id: &str,
         description: &str,
+        max_iterations: u32,
     ) -> TaskResult {
         let start = std::time::Instant::now();
         let agent_id = agent_config.id.clone();
 
         tracing::info!(
-            "Executing task {} with agent {} (workspace: {:?}, model: {:?})",
+            "Executing task {} with agent {} (workspace: {:?}, model: {:?}, max_iterations: {})",
             task_id,
             agent_id,
             agent_config.workspace,
-            agent_config.model
+            agent_config.model,
+            max_iterations
         );
 
-        // Spawn sub-agent and process
-        let result = match runner.spawn_agent(agent_config) {
+        // Spawn sub-agent with max_iterations and process
+        let result = match runner.spawn_agent_with_options(agent_config, max_iterations) {
             Ok(subagent) => {
                 match runner
                     .process_with_subagent(&subagent, description, Some(task_id))
@@ -642,6 +647,7 @@ mod tests {
             budget_tokens: Some(1000),
             budget_used: 0,
             status: AgentStatus::Idle,
+            max_iterations: 25,
         };
 
         assert!(agent.is_within_budget());

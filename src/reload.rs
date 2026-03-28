@@ -5,6 +5,7 @@
 //! - Cron jobs
 //! - Safety/hook settings
 //! - Telegram allowed_users, group_policy, dm_policy
+//! - Orchestrator specialists (add/remove/modify)
 //!
 //! NOT reloaded (requires restart):
 //! - LLM provider/model/auth
@@ -151,6 +152,21 @@ fn diff_config(old: &Config, new: &Config) -> Vec<String> {
         changes.push(format!(
             "llm.max_tokens: {} → {}",
             old.llm.max_tokens, new.llm.max_tokens
+        ));
+    }
+
+    // Check orchestrator/specialist changes
+    if old.orchestrator.enabled != new.orchestrator.enabled {
+        changes.push(format!(
+            "orchestrator.enabled: {} → {}",
+            old.orchestrator.enabled, new.orchestrator.enabled
+        ));
+    }
+    if old.orchestrator.specialists.len() != new.orchestrator.specialists.len() {
+        changes.push(format!(
+            "orchestrator.specialists: {} → {}",
+            old.orchestrator.specialists.len(),
+            new.orchestrator.specialists.len()
         ));
     }
 

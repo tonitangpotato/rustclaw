@@ -20,8 +20,13 @@ use gid_core::{
     history::HistoryManager,
     refactor,
 };
+use crate::config::AgentConfig;
 use crate::memory::MemoryManager;
 use crate::orchestrator::{SharedOrchestrator, Task};
+
+/// Shared handle to AgentRunner for late-binding (used by SpawnSpecialistTool).
+/// Initially None, set after AgentRunner is created.
+pub type SharedAgentRunner = Arc<tokio::sync::RwLock<Option<Arc<crate::agent::AgentRunner>>>>;
 
 /// Result of a tool execution.
 #[derive(Debug, Clone, Serialize)]
@@ -68,6 +73,20 @@ impl ToolRegistry {
         registry.register(Box::new(SearchFilesTool::new(workspace_root)));
         registry
     }
+
+    /// Register core tools for sub-agents (no engram, no GID, no orchestrator tools).
+    /// Tools are scoped to the given workspace root.
+    pub fn for_subagent(workspace_root: &str) -> Self {
+        let mut registry = Self::new();
+        registry.register(Box::new(ExecTool));
+        registry.register(Box::new(ReadFileTool::new(workspace_root)));
+        registry.register(Box::new(WriteFileTool::new(workspace_root)));
+        registry.register(Box::new(ListDirTool::new(workspace_root)));
+        registry.register(Box::new(EditFileTool::new(workspace_root)));
+        registry.register(Box::new(SearchFilesTool::new(workspace_root)));
+        registry.register(Box::new(WebFetchTool));
+        registry
+    }
     
     /// Register all default tools including memory tools.
     pub fn with_defaults_and_memory(workspace_root: &str, memory: Arc<MemoryManager>) -> Self {
@@ -87,6 +106,13 @@ impl ToolRegistry {
         let mut registry = Self::with_defaults_and_memory(workspace_root, memory);
         registry.register(Box::new(DelegateTaskTool::new(orchestrator)));
         registry
+    }
+
+    /// Register the spawn_specialist tool with access to the agent runner.
+    /// The runner handle is initially empty and must be set after AgentRunner creation.
+    pub fn with_spawn_specialist(mut self, runner: SharedAgentRunner, orchestrator: Option<SharedOrchestrator>) -> Self {
+        self.register(Box::new(SpawnSpecialistTool::new(runner, orchestrator)));
+        self
     }
 
     /// Register GID (task graph) tools.
@@ -1039,6 +1065,7 @@ impl Tool for EngramRecallAssociatedTool {
 // ─── Delegate Task Tool ──────────────────────────────────────
 
 /// Delegate a task to a specialist agent via the orchestrator.
+/// Waits for task completion (with timeout) before returning the result.
 pub struct DelegateTaskTool {
     orchestrator: SharedOrchestrator,
 }
@@ -1056,7 +1083,7 @@ impl Tool for DelegateTaskTool {
     }
 
     fn description(&self) -> &str {
-        "Delegate a task to a specialist agent. The task will be queued and assigned to an appropriate agent based on role matching. Use this for complex or time-consuming tasks that can be handled by specialist agents (e.g., builder, visibility, trading)."
+        "Delegate a task to a specialist agent and wait for completion. The task will be assigned to an appropriate agent based on role matching. Returns the result when the specialist agent completes the task."
     }
 
     fn input_schema(&self) -> Value {
@@ -1079,6 +1106,14 @@ impl Tool for DelegateTaskTool {
                 "budget_tokens": {
                     "type": "integer",
                     "description": "Maximum tokens this task can use (optional)"
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": "Maximum seconds to wait for completion (default: 600 = 10 minutes)"
+                },
+                "wait": {
+                    "type": "boolean",
+                    "description": "Whether to wait for completion (default: true). Set to false for fire-and-forget."
                 }
             },
             "required": ["description"]
@@ -1100,8 +1135,9 @@ impl Tool for DelegateTaskTool {
             .unwrap_or_default();
 
         let priority = input["priority"].as_u64().unwrap_or(100) as u8;
-
         let budget_tokens = input["budget_tokens"].as_u64();
+        let timeout_secs = input["timeout_secs"].as_u64().unwrap_or(600);
+        let wait = input["wait"].as_bool().unwrap_or(true);
 
         // Generate task ID
         let task_id = format!("task_{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
@@ -1121,20 +1157,301 @@ impl Tool for DelegateTaskTool {
             orch.submit_task(task);
         }
 
-        Ok(ToolResult {
-            output: format!(
-                "Task '{}' submitted to orchestrator.\n- Description: {}\n- Roles: {:?}\n- Priority: {}\nThe task will be assigned to an appropriate specialist agent.",
-                task_id,
-                if description.chars().count() > 100 {
-                    format!("{}...", description.chars().take(100).collect::<String>())
-                } else {
-                    description.to_string()
+        if !wait {
+            // Fire-and-forget mode
+            return Ok(ToolResult {
+                output: format!(
+                    "Task '{}' submitted to orchestrator (fire-and-forget).\n- Description: {}\n- Roles: {:?}\n- Priority: {}",
+                    task_id,
+                    if description.chars().count() > 100 {
+                        format!("{}...", description.chars().take(100).collect::<String>())
+                    } else {
+                        description.to_string()
+                    },
+                    if roles.is_empty() { vec!["any".to_string()] } else { roles },
+                    priority
+                ),
+                is_error: false,
+            });
+        }
+
+        // Wait for task completion (polling)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        let poll_interval = std::time::Duration::from_millis(500);
+
+        loop {
+            // Check if timeout exceeded
+            if start.elapsed() > timeout {
+                return Ok(ToolResult {
+                    output: format!(
+                        "Task '{}' timed out after {} seconds. The task may still be running.",
+                        task_id, timeout_secs
+                    ),
+                    is_error: true,
+                });
+            }
+
+            // Check task status
+            let task_status = {
+                let orch = self.orchestrator.read().await;
+                orch.get_task(&task_id).map(|t| (t.status.clone(), t.result.clone(), t.error.clone()))
+            };
+
+            match task_status {
+                Some((crate::orchestrator::TaskStatus::Done, result, _)) => {
+                    let output = result.unwrap_or_else(|| "(no result)".to_string());
+                    return Ok(ToolResult {
+                        output: format!(
+                            "Task '{}' completed successfully.\n\n## Result:\n{}",
+                            task_id, output
+                        ),
+                        is_error: false,
+                    });
+                }
+                Some((crate::orchestrator::TaskStatus::Failed, _, error)) => {
+                    let err_msg = error.unwrap_or_else(|| "(unknown error)".to_string());
+                    return Ok(ToolResult {
+                        output: format!("Task '{}' failed: {}", task_id, err_msg),
+                        is_error: true,
+                    });
+                }
+                Some((crate::orchestrator::TaskStatus::Cancelled, _, _)) => {
+                    return Ok(ToolResult {
+                        output: format!("Task '{}' was cancelled.", task_id),
+                        is_error: true,
+                    });
+                }
+                Some((crate::orchestrator::TaskStatus::Pending, _, _)) |
+                Some((crate::orchestrator::TaskStatus::InProgress, _, _)) => {
+                    // Still running, continue polling
+                }
+                None => {
+                    return Ok(ToolResult {
+                        output: format!("Task '{}' not found in orchestrator.", task_id),
+                        is_error: true,
+                    });
+                }
+            }
+
+            // Wait before next poll
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+}
+
+// ─── Spawn Specialist Tool ───────────────────────────────────
+
+/// Spawn a sub-agent on-demand for a specific task.
+/// Works with or without orchestrator — uses orchestrator specialists if available,
+/// otherwise spawns an ad-hoc sub-agent directly.
+pub struct SpawnSpecialistTool {
+    runner: SharedAgentRunner,
+    orchestrator: Option<SharedOrchestrator>,
+}
+
+impl SpawnSpecialistTool {
+    pub fn new(runner: SharedAgentRunner, orchestrator: Option<SharedOrchestrator>) -> Self {
+        Self { runner, orchestrator }
+    }
+
+
+}
+
+#[async_trait]
+impl Tool for SpawnSpecialistTool {
+    fn name(&self) -> &str {
+        "spawn_specialist"
+    }
+
+    fn description(&self) -> &str {
+        "Spawn a sub-agent to handle a specific task. The sub-agent runs with its own agentic loop and tool access. Use this for delegating complex work that requires multiple tool calls."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "Task description/prompt for the sub-agent"
                 },
-                if roles.is_empty() { vec!["any".to_string()] } else { roles },
-                priority
-            ),
-            is_error: false,
+                "role": {
+                    "type": "string",
+                    "description": "Role to match (e.g., 'builder', 'research'). If matching specialist exists, uses its config."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Model override (e.g., 'claude-sonnet-4-5'). Default: use parent's model."
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": "Working directory for the sub-agent. Default: parent's workspace."
+                },
+                "max_iterations": {
+                    "type": "integer",
+                    "description": "Maximum tool loop iterations (default: 25)"
+                },
+                "wait": {
+                    "type": "boolean",
+                    "description": "Whether to wait for completion (default: true). If false, returns immediately with task ID."
+                }
+            },
+            "required": ["task"]
         })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        // Get runner from shared handle
+        let runner_guard = self.runner.read().await;
+        let runner = runner_guard.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Agent runner not initialized"))?;
+
+        // Parse input parameters
+        let task = input["task"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing 'task' parameter"))?;
+
+        let role = input["role"].as_str();
+        let model_override = input["model"].as_str();
+        let workspace_override = input["workspace"].as_str();
+        let max_iterations = input["max_iterations"].as_u64().unwrap_or(25) as u32;
+        let wait = input["wait"].as_bool().unwrap_or(true);
+
+        // Generate a unique task/session ID
+        let task_id = format!("spawn_{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
+
+        // Try to find matching specialist config from orchestrator or config
+        let agent_config = if let Some(role_name) = role {
+            // Check if orchestrator has a specialist with this ID
+            let from_orchestrator = if let Some(ref orch) = self.orchestrator {
+                let orch = orch.read().await;
+                orch.get_agent(role_name).map(|a| a.to_agent_config())
+            } else {
+                None
+            };
+
+            // If not found in orchestrator, check config directly by role or ID
+            from_orchestrator.or_else(|| {
+                runner.config().orchestrator.specialists.iter()
+                    .find(|s| s.role == role_name || s.id == role_name)
+                    .map(|spec| AgentConfig {
+                        id: spec.id.clone(),
+                        name: spec.name.clone(),
+                        workspace: spec.workspace.clone(),
+                        model: spec.model.clone(),
+                        default: false,
+                    })
+            })
+        } else {
+            None
+        };
+
+        // Build final agent config with overrides
+        let final_config = AgentConfig {
+            id: task_id.clone(),
+            name: agent_config.as_ref().and_then(|c| c.name.clone())
+                .or_else(|| role.map(String::from))
+                .or(Some(task_id.clone())),
+            workspace: workspace_override.map(String::from)
+                .or_else(|| agent_config.as_ref().and_then(|c| c.workspace.clone())),
+            model: model_override.map(String::from)
+                .or_else(|| agent_config.as_ref().and_then(|c| c.model.clone())),
+            default: false,
+        };
+
+        // Use max_iterations from specialist config if available, otherwise use parameter
+        let effective_max_iterations = if agent_config.is_some() && role.is_some() {
+            runner.config().orchestrator.specialists.iter()
+                .find(|s| s.role == role.unwrap() || s.id == role.unwrap())
+                .map(|s| s.max_iterations)
+                .unwrap_or(max_iterations)
+        } else {
+            max_iterations
+        };
+
+        tracing::info!(
+            "Spawning sub-agent: id={} role={:?} model={:?} workspace={:?} max_iterations={} wait={}",
+            task_id,
+            role,
+            final_config.model,
+            final_config.workspace,
+            effective_max_iterations,
+            wait
+        );
+
+        if !wait {
+            // Fire-and-forget mode: spawn task in background, return immediately
+            let runner_clone = runner.clone();
+            let task_owned = task.to_string();
+            let final_config_clone = final_config.clone();
+            
+            tokio::spawn(async move {
+                match runner_clone.spawn_agent_with_options(&final_config_clone, effective_max_iterations) {
+                    Ok(subagent) => {
+                        match runner_clone.process_with_subagent(&subagent, &task_owned, Some(&final_config_clone.id)).await {
+                            Ok(result) => {
+                                tracing::info!("Background sub-agent {} completed: {} chars", final_config_clone.id, result.len());
+                            }
+                            Err(e) => {
+                                tracing::error!("Background sub-agent {} failed: {}", final_config_clone.id, e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to spawn background sub-agent {}: {}", final_config_clone.id, e);
+                    }
+                }
+            });
+
+            return Ok(ToolResult {
+                output: format!(
+                    "Sub-agent '{}' spawned in background (fire-and-forget).\n- Task: {}\n- Role: {:?}\n- Model: {:?}\n- Max iterations: {}",
+                    task_id,
+                    if task.chars().count() > 100 {
+                        format!("{}...", task.chars().take(100).collect::<String>())
+                    } else {
+                        task.to_string()
+                    },
+                    role,
+                    final_config.model,
+                    effective_max_iterations
+                ),
+                is_error: false,
+            });
+        }
+
+        // Wait mode: spawn and wait for result
+        match runner.spawn_agent_with_options(&final_config, effective_max_iterations) {
+            Ok(subagent) => {
+                match runner.process_with_subagent(&subagent, task, Some(&task_id)).await {
+                    Ok(result) => {
+                        tracing::info!("Sub-agent {} completed: {} chars", task_id, result.len());
+                        Ok(ToolResult {
+                            output: format!(
+                                "## Sub-agent '{}' completed\n\n### Result:\n{}",
+                                task_id, result
+                            ),
+                            is_error: false,
+                        })
+                    }
+                    Err(e) => {
+                        tracing::error!("Sub-agent {} failed: {}", task_id, e);
+                        Ok(ToolResult {
+                            output: format!("Sub-agent '{}' failed: {}", task_id, e),
+                            is_error: true,
+                        })
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to spawn sub-agent {}: {}", task_id, e);
+                Ok(ToolResult {
+                    output: format!("Failed to spawn sub-agent: {}", e),
+                    is_error: true,
+                })
+            }
+        }
     }
 }
 

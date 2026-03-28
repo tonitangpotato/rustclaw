@@ -179,6 +179,10 @@ async fn main() -> anyhow::Result<()> {
                 None
             };
 
+            // Create shared runner handle for spawn_specialist tool (late-binding)
+            let runner_handle: tools::SharedAgentRunner = 
+                std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
             // Initialize tools with memory and orchestrator access
             let mut tools = if let Some(ref orch_ref) = orch {
                 tools::ToolRegistry::with_defaults_and_orchestrator(
@@ -186,8 +190,10 @@ async fn main() -> anyhow::Result<()> {
                     mem.clone(),
                     orch_ref.clone(),
                 )
+                .with_spawn_specialist(runner_handle.clone(), Some(orch_ref.clone()))
             } else {
                 tools::ToolRegistry::with_defaults_and_memory(&workspace_dir, mem.clone())
+                    .with_spawn_specialist(runner_handle.clone(), None)
             };
 
             // Register GID tools if enabled
@@ -229,6 +235,13 @@ async fn main() -> anyhow::Result<()> {
 
             // Start channels (wraps runner in Arc)
             let runner = std::sync::Arc::new(runner);
+
+            // Set the runner handle for spawn_specialist tool (late-binding)
+            {
+                let mut handle = runner_handle.write().await;
+                *handle = Some(runner.clone());
+            }
+            tracing::info!("spawn_specialist tool ready");
 
             // Start config hot-reload watcher
             let (config_tx, config_rx, _watcher) =

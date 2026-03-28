@@ -25,13 +25,17 @@ use crate::session::{summarize_old_messages, SessionManager};
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
-/// A spawned sub-agent with its own workspace and session namespace.
+/// A spawned sub-agent with its own workspace, tools, and session namespace.
 pub struct SubAgent {
     pub id: String,
     pub name: String,
     pub workspace: Workspace,
     pub session_prefix: String,
     pub llm_client: Box<dyn LlmClient>,
+    /// Sub-agent's own tool registry (scoped to its workspace).
+    pub tools: ToolRegistry,
+    /// Maximum iterations for the agentic loop.
+    pub max_iterations: u32,
 }
 
 /// The core agent runner.
@@ -488,6 +492,15 @@ impl AgentRunner {
     /// Spawn a sub-agent with a different workspace and optional model override.
     /// Returns a SubAgent that can be used to process messages in isolation.
     pub fn spawn_agent(&self, agent_config: &AgentConfig) -> anyhow::Result<SubAgent> {
+        self.spawn_agent_with_options(agent_config, 25)
+    }
+
+    /// Spawn a sub-agent with custom max_iterations.
+    pub fn spawn_agent_with_options(
+        &self,
+        agent_config: &AgentConfig,
+        max_iterations: u32,
+    ) -> anyhow::Result<SubAgent> {
         // Load workspace from agent config or use default
         let workspace_dir = agent_config
             .workspace
@@ -504,6 +517,9 @@ impl AgentRunner {
         }
         let llm_client = llm::create_client(&llm_config)?;
 
+        // Create sub-agent's own tool registry scoped to its workspace
+        let tools = ToolRegistry::for_subagent(workspace_dir);
+
         let session_prefix = format!("agent:{}:", agent_config.id);
         let name = agent_config
             .name
@@ -511,10 +527,11 @@ impl AgentRunner {
             .unwrap_or_else(|| agent_config.id.clone());
 
         tracing::info!(
-            "Spawned sub-agent '{}' (workspace: {}, model: {})",
+            "Spawned sub-agent '{}' (workspace: {}, model: {}, max_iterations: {})",
             name,
             workspace_dir,
-            llm_config.model
+            llm_config.model,
+            max_iterations
         );
 
         Ok(SubAgent {
@@ -523,10 +540,12 @@ impl AgentRunner {
             workspace,
             session_prefix,
             llm_client,
+            tools,
+            max_iterations,
         })
     }
 
-    /// Process a message using a sub-agent.
+    /// Process a message using a sub-agent with full agentic loop.
     pub async fn process_with_subagent(
         &self,
         subagent: &SubAgent,
@@ -540,8 +559,9 @@ impl AgentRunner {
         );
 
         tracing::info!(
-            "Sub-agent '{}' processing: {}",
+            "Sub-agent '{}' processing (max_iterations={}): {}",
             subagent.name,
+            subagent.max_iterations,
             { let _end = user_message.len().min(50); let _end = user_message.floor_char_boundary(_end); &user_message[.._end] }
         );
 
@@ -557,20 +577,112 @@ impl AgentRunner {
         // Trim messages
         session.trim_messages(self.config.max_session_messages);
 
-        // Get tool definitions (shared tools for now)
-        let tool_defs = self.tools.definitions();
+        // Get tool definitions from sub-agent's own registry
+        let tool_defs = subagent.tools.definitions();
 
-        // Simple one-shot completion (no tool loop for sub-agents for now)
-        let response = subagent
-            .llm_client
-            .chat(&system_prompt, &session.messages, &tool_defs)
-            .await?;
+        // Full agentic loop (same pattern as main agent)
+        let max_turns = subagent.max_iterations as usize;
+        let mut response_text = String::new();
 
-        let response_text = response.text.clone().unwrap_or_default();
+        for turn in 0..max_turns {
+            let response = subagent
+                .llm_client
+                .chat(&system_prompt, &session.messages, &tool_defs)
+                .await?;
 
-        // Add response to session
-        if !response_text.is_empty() {
-            session.messages.push(Message::text("assistant", &response_text));
+            session.total_tokens +=
+                (response.usage.input_tokens + response.usage.output_tokens) as u64;
+
+            tracing::info!(
+                "Sub-agent '{}' turn {}: tokens={}/{} stop={:?} tool_calls={} text_len={}",
+                subagent.name,
+                turn,
+                response.usage.input_tokens,
+                response.usage.output_tokens,
+                response.stop_reason,
+                response.tool_calls.len(),
+                response.text.as_ref().map(|t| t.len()).unwrap_or(0)
+            );
+
+            if let Some(text) = &response.text {
+                response_text = text.clone();
+            }
+
+            if response.tool_calls.is_empty() {
+                // No tool calls — add final assistant message and break
+                if !response_text.is_empty() {
+                    tracing::info!(
+                        "Sub-agent '{}' final response ({} chars): {}...",
+                        subagent.name,
+                        response_text.len(),
+                        {
+                            let end = response_text.len().min(100);
+                            let end = response_text.floor_char_boundary(end);
+                            &response_text[..end]
+                        }
+                    );
+                    session
+                        .messages
+                        .push(Message::text("assistant", &response_text));
+                }
+                break;
+            }
+
+            // Add assistant message with tool calls
+            tracing::info!(
+                "Sub-agent '{}' turn {}: {} tool call(s)",
+                subagent.name,
+                turn,
+                response.tool_calls.len()
+            );
+            session.messages.push(Message::assistant_with_tools(
+                response.text.as_deref(),
+                response.tool_calls.clone(),
+            ));
+
+            // Execute each tool using sub-agent's tool registry
+            let mut tool_results = Vec::new();
+            for tc in &response.tool_calls {
+                let result = subagent.tools.execute(&tc.name, tc.input.clone()).await;
+                match result {
+                    Ok(tool_result) => {
+                        tracing::info!(
+                            "Sub-agent '{}' tool {} → {} chars, error={}",
+                            subagent.name,
+                            tc.name,
+                            tool_result.output.len(),
+                            tool_result.is_error
+                        );
+                        tool_results.push((tc.id.clone(), tool_result.output, tool_result.is_error));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Sub-agent '{}' tool {} error: {}",
+                            subagent.name,
+                            tc.name,
+                            e
+                        );
+                        tool_results.push((tc.id.clone(), format!("Tool error: {}", e), true));
+                    }
+                }
+            }
+
+            // Add tool results as user message
+            session.messages.push(Message::tool_results(tool_results));
+        }
+
+        // If we hit max iterations without a final response, note it
+        if response_text.is_empty() {
+            tracing::warn!(
+                "Sub-agent '{}' reached max iterations ({}) without final response",
+                subagent.name,
+                max_turns
+            );
+            response_text = format!(
+                "[Sub-agent '{}' reached maximum iterations ({}) without completing]",
+                subagent.name,
+                max_turns
+            );
         }
 
         // Update session
