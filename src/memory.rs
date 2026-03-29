@@ -12,16 +12,32 @@
 //! - Auto-suggestions for SOUL.md and HEARTBEAT.md updates
 
 use engramai::{
-    Memory, MemoryConfig, MemoryType, MemoryLayer, AnthropicExtractor,
+    Memory, MemoryConfig, MemoryType, MemoryLayer, AnthropicExtractor, AnthropicExtractorConfig, TokenProvider,
     SessionWorkingMemory, BaselineTracker,
     EmotionalBus, EmotionalTrend, ActionStats, SoulUpdate, HeartbeatUpdate,
     bus::{mod_io::{parse_soul, Drive}, accumulator::EmotionalAccumulator, feedback::BehaviorFeedback},
 };
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::config::Config;
 use crate::oauth::OAuthTokenManager;
+
+/// Token provider that delegates to RustClaw's OAuthTokenManager.
+/// Automatically refreshes expired tokens on each call.
+struct ManagedTokenProvider {
+    manager: Arc<OAuthTokenManager>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl TokenProvider for ManagedTokenProvider {
+    fn get_token(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        // OAuthTokenManager.get_token() is async — bridge to sync via the runtime handle.
+        // extractor runs in a blocking context so this is safe.
+        self.runtime.block_on(self.manager.get_token())
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })
+    }
+}
 
 /// Working memory decay in seconds (30 minutes for longer topic continuity).
 const WORKING_MEMORY_DECAY_SECS: u64 = 1800;
@@ -62,18 +78,20 @@ impl MemoryManager {
         let mut engram = Memory::new(&db_path, Some(engram_config))
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        // Set up LLM extraction using OAuth token from Keychain (Claude Max plan)
+        // Set up LLM extraction using managed OAuth (Claude Max plan).
+        // TokenProvider refreshes automatically — no more expired token errors.
         if let Ok(oauth_mgr) = OAuthTokenManager::from_keychain() {
-            // get_token is async but we're in async context via new()
-            // Use blocking approach: read token directly from the manager's initial state
-            if let Ok(token) = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(oauth_mgr.get_token())
-            }) {
-                engram.set_extractor(Box::new(AnthropicExtractor::new(&token, true)));
-                tracing::info!("Engram extractor: Anthropic Haiku (OAuth from Keychain)");
-            } else {
-                tracing::debug!("OAuth token unavailable, extractor disabled");
-            }
+            let provider = Box::new(ManagedTokenProvider {
+                manager: Arc::new(oauth_mgr),
+                runtime: tokio::runtime::Handle::current(),
+            });
+            let extractor = AnthropicExtractor::with_token_provider(
+                provider,
+                true, // is_oauth
+                AnthropicExtractorConfig::default(),
+            );
+            engram.set_extractor(Box::new(extractor));
+            tracing::info!("Engram extractor: Anthropic Haiku (managed OAuth, auto-refresh)");
         } else {
             // Fallback: auto_configure_extractor checks env vars and config file
             tracing::debug!("No Keychain OAuth, relying on engram auto-config");
