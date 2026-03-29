@@ -164,6 +164,19 @@ impl Hook for EngramStoreHook {
             Err(e) => tracing::warn!("Engram auto-store failed: {}", e),
         }
 
+        // Track emotional valence per domain (EmotionalAccumulator)
+        let emotion = MemoryManager::detect_emotion(user_msg);
+        let domain = MemoryManager::detect_domain(&store_content);
+        
+        if let Err(e) = self.memory.process_interaction(&store_content, emotion, domain) {
+            tracing::debug!("Engram emotion tracking failed (non-fatal): {}", e);
+        } else if emotion != 0.0 {
+            tracing::debug!(
+                "Engram emotion tracked: {:.2} for domain '{}'",
+                emotion, domain
+            );
+        }
+
         Ok(HookOutcome::Continue(None))
     }
 }

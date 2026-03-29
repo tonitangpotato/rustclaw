@@ -389,6 +389,13 @@ impl AgentRunner {
                                 tc.name, sanitized.content.len(), tool_result.is_error
                             );
                         }
+                        
+                        // Log behavior feedback (BehaviorFeedback integration)
+                        let is_success = !tool_result.is_error;
+                        if let Err(e) = self.memory.log_behavior(&tc.name, is_success) {
+                            tracing::debug!("Behavior logging failed (non-fatal): {}", e);
+                        }
+                        
                         // Wrap web_fetch output as untrusted external content
                         let output = if tc.name == "web_fetch" {
                             wrap_external_content("web_fetch", &sanitized.content)
@@ -399,6 +406,12 @@ impl AgentRunner {
                     }
                     Err(e) => {
                         tracing::warn!("Tool {} sandbox error: {}", tc.name, e);
+                        
+                        // Log behavior failure
+                        if let Err(log_e) = self.memory.log_behavior(&tc.name, false) {
+                            tracing::debug!("Behavior logging failed (non-fatal): {}", log_e);
+                        }
+                        
                         tool_results.push((tc.id.clone(), format!("Sandbox error: {}", e), true));
                     }
                 }

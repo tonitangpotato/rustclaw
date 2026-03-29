@@ -95,7 +95,11 @@ impl ToolRegistry {
         let mut registry = Self::with_defaults(workspace_root);
         registry.register(Box::new(EngramRecallTool::new(memory.clone())));
         registry.register(Box::new(EngramStoreTool::new(memory.clone())));
-        registry.register(Box::new(EngramRecallAssociatedTool::new(memory)));
+        registry.register(Box::new(EngramRecallAssociatedTool::new(memory.clone())));
+        // EmotionBus tools for introspection
+        registry.register(Box::new(EngramTrendsTool::new(memory.clone())));
+        registry.register(Box::new(EngramBehaviorStatsTool::new(memory.clone())));
+        registry.register(Box::new(EngramSoulSuggestionsTool::new(memory)));
         registry
     }
 
@@ -1062,6 +1066,253 @@ impl Tool for EngramRecallAssociatedTool {
             }
             Err(e) => Ok(ToolResult {
                 output: format!("Failed to recall associated memories: {}", e),
+                is_error: true,
+            }),
+        }
+    }
+}
+
+// ─── Engram Trends Tool ──────────────────────────────────────
+
+/// Show emotional trends per domain.
+pub struct EngramTrendsTool {
+    memory: Arc<MemoryManager>,
+}
+
+impl EngramTrendsTool {
+    pub fn new(memory: Arc<MemoryManager>) -> Self {
+        Self { memory }
+    }
+}
+
+#[async_trait]
+impl Tool for EngramTrendsTool {
+    fn name(&self) -> &str {
+        "engram_trends"
+    }
+
+    fn description(&self) -> &str {
+        "Show emotional trends per domain. Tracks accumulated emotional valence (positive/negative) for different areas like coding, trading, research. Use this to understand which domains are going well or poorly."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {}
+        })
+    }
+
+    async fn execute(&self, _input: Value) -> anyhow::Result<ToolResult> {
+        match self.memory.get_emotional_trends() {
+            Ok(trends) => {
+                if trends.is_empty() {
+                    return Ok(ToolResult {
+                        output: "No emotional trends recorded yet.".to_string(),
+                        is_error: false,
+                    });
+                }
+
+                let mut output = format!("Emotional trends ({} domains):\n\n", trends.len());
+                for trend in &trends {
+                    let sentiment = if trend.valence > 0.3 {
+                        "😊 positive"
+                    } else if trend.valence < -0.3 {
+                        "😞 negative"
+                    } else {
+                        "😐 neutral"
+                    };
+                    let needs_attention = if trend.count >= 10 && trend.valence < -0.5 {
+                        " ⚠️ needs attention"
+                    } else {
+                        ""
+                    };
+                    output.push_str(&format!(
+                        "- **{}**: {} ({:.2} avg over {} events){}\n",
+                        trend.domain, sentiment, trend.valence, trend.count, needs_attention
+                    ));
+                }
+
+                Ok(ToolResult {
+                    output,
+                    is_error: false,
+                })
+            }
+            Err(e) => Ok(ToolResult {
+                output: format!("Failed to get emotional trends: {}", e),
+                is_error: true,
+            }),
+        }
+    }
+}
+
+// ─── Engram Behavior Stats Tool ──────────────────────────────
+
+/// Show action success/failure rates.
+pub struct EngramBehaviorStatsTool {
+    memory: Arc<MemoryManager>,
+}
+
+impl EngramBehaviorStatsTool {
+    pub fn new(memory: Arc<MemoryManager>) -> Self {
+        Self { memory }
+    }
+}
+
+#[async_trait]
+impl Tool for EngramBehaviorStatsTool {
+    fn name(&self) -> &str {
+        "engram_behavior_stats"
+    }
+
+    fn description(&self) -> &str {
+        "Show action/tool success and failure rates. Tracks which tools work well and which consistently fail. Use this to identify problematic patterns."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {}
+        })
+    }
+
+    async fn execute(&self, _input: Value) -> anyhow::Result<ToolResult> {
+        match self.memory.get_behavior_stats() {
+            Ok(stats) => {
+                if stats.is_empty() {
+                    return Ok(ToolResult {
+                        output: "No behavior stats recorded yet.".to_string(),
+                        is_error: false,
+                    });
+                }
+
+                let mut output = format!("Behavior stats ({} actions):\n\n", stats.len());
+                for stat in &stats {
+                    let rating = if stat.score >= 0.8 {
+                        "✅ excellent"
+                    } else if stat.score >= 0.5 {
+                        "⚠️ moderate"
+                    } else if stat.score >= 0.2 {
+                        "🔴 poor"
+                    } else {
+                        "❌ very poor"
+                    };
+                    let should_deprioritize = stat.total >= 10 && stat.score < 0.2;
+                    let flag = if should_deprioritize { " 🚫 consider deprioritizing" } else { "" };
+                    output.push_str(&format!(
+                        "- **{}**: {} ({:.0}% success, {}/{} positive){}\n",
+                        stat.action, rating, stat.score * 100.0, stat.positive, stat.total, flag
+                    ));
+                }
+
+                // Also show deprioritized actions
+                if let Ok(deprioritized) = self.memory.get_deprioritized_actions() {
+                    if !deprioritized.is_empty() {
+                        output.push_str(&format!(
+                            "\n**Actions to deprioritize ({}):**\n",
+                            deprioritized.len()
+                        ));
+                        for stat in &deprioritized {
+                            output.push_str(&format!(
+                                "- {} ({:.0}% success, {} attempts)\n",
+                                stat.action, stat.score * 100.0, stat.total
+                            ));
+                        }
+                    }
+                }
+
+                Ok(ToolResult {
+                    output,
+                    is_error: false,
+                })
+            }
+            Err(e) => Ok(ToolResult {
+                output: format!("Failed to get behavior stats: {}", e),
+                is_error: true,
+            }),
+        }
+    }
+}
+
+// ─── Engram Soul Suggestions Tool ────────────────────────────
+
+/// Get SOUL.md update suggestions based on emotional patterns.
+pub struct EngramSoulSuggestionsTool {
+    memory: Arc<MemoryManager>,
+}
+
+impl EngramSoulSuggestionsTool {
+    pub fn new(memory: Arc<MemoryManager>) -> Self {
+        Self { memory }
+    }
+}
+
+#[async_trait]
+impl Tool for EngramSoulSuggestionsTool {
+    fn name(&self) -> &str {
+        "engram_soul_suggestions"
+    }
+
+    fn description(&self) -> &str {
+        "Get SOUL.md update suggestions based on accumulated emotional patterns. When domains show persistent negative trends, suggests adding drives or notes to address them."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {}
+        })
+    }
+
+    async fn execute(&self, _input: Value) -> anyhow::Result<ToolResult> {
+        match self.memory.suggest_soul_updates() {
+            Ok(suggestions) => {
+                if suggestions.is_empty() {
+                    return Ok(ToolResult {
+                        output: "No SOUL.md update suggestions at this time. Emotional trends are within normal parameters.".to_string(),
+                        is_error: false,
+                    });
+                }
+
+                let mut output = format!("SOUL.md update suggestions ({}):\n\n", suggestions.len());
+                for (i, suggestion) in suggestions.iter().enumerate() {
+                    output.push_str(&format!(
+                        "{}. **[{}] {}**\n   {}\n   (Based on: {} domain, {:.2} valence over {} events)\n\n",
+                        i + 1,
+                        suggestion.action,
+                        suggestion.domain,
+                        suggestion.content,
+                        suggestion.trend.domain,
+                        suggestion.trend.valence,
+                        suggestion.trend.count
+                    ));
+                }
+
+                // Also check heartbeat suggestions
+                if let Ok(heartbeat_suggestions) = self.memory.suggest_heartbeat_updates() {
+                    if !heartbeat_suggestions.is_empty() {
+                        output.push_str(&format!(
+                            "\n**HEARTBEAT.md suggestions ({}):**\n",
+                            heartbeat_suggestions.len()
+                        ));
+                        for suggestion in &heartbeat_suggestions {
+                            output.push_str(&format!(
+                                "- {} '{}' ({:.0}% success rate, {} attempts)\n",
+                                suggestion.suggestion,
+                                suggestion.action,
+                                suggestion.stats.score * 100.0,
+                                suggestion.stats.total
+                            ));
+                        }
+                    }
+                }
+
+                Ok(ToolResult {
+                    output,
+                    is_error: false,
+                })
+            }
+            Err(e) => Ok(ToolResult {
+                output: format!("Failed to get soul suggestions: {}", e),
                 is_error: true,
             }),
         }

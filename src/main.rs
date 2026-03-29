@@ -287,6 +287,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             // Start auto-consolidation background task (every 6 hours)
+            let mem_for_reflection = mem_for_consolidation.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
                 loop {
@@ -298,6 +299,28 @@ async fn main() -> anyhow::Result<()> {
                 }
             });
             tracing::info!("Engram auto-consolidation scheduled (every 6 hours)");
+
+            // Start self-reflection background task (every 24 hours)
+            // Decays emotional trends, prunes old logs, logs suggestions
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+                loop {
+                    interval.tick().await;
+                    match mem_for_reflection.self_reflect() {
+                        Ok(result) => {
+                            tracing::info!(
+                                "Engram self-reflection completed: {} trends decayed, {} logs pruned, {} soul suggestions, {} deprioritized actions",
+                                result.trends_decayed,
+                                result.logs_pruned,
+                                result.soul_suggestions,
+                                result.deprioritized_actions
+                            );
+                        }
+                        Err(e) => tracing::warn!("Engram self-reflection failed: {}", e),
+                    }
+                }
+            });
+            tracing::info!("Engram self-reflection scheduled (every 24 hours)");
 
             // Start web dashboard (if enabled)
             dashboard::start_dashboard(cfg.dashboard.clone(), cfg.clone(), runner.clone()).await?;
