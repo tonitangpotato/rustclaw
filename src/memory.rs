@@ -81,8 +81,15 @@ impl MemoryManager {
 
         // Initialize EmotionalBus for drive alignment and emotional tracking
         let emotional_bus = match EmotionalBus::new(workspace_dir, engram.connection()) {
-            Ok(bus) => {
+            Ok(mut bus) => {
                 tracing::info!("EmotionalBus initialized with {} drives", bus.drives().len());
+                // Initialize embedding-based alignment if embedding provider is available
+                if let Some(ref emb) = engram.embedding_provider() {
+                    bus.init_embeddings(emb);
+                    if bus.has_embeddings() {
+                        tracing::info!("Drive embeddings enabled (multilingual alignment active)");
+                    }
+                }
                 Some(bus)
             }
             Err(e) => {
