@@ -44,11 +44,6 @@ fn stdout_log_path() -> Result<PathBuf> {
     Ok(log_dir()?.join("rustclaw.log"))
 }
 
-/// Get the stderr log path
-fn stderr_log_path() -> Result<PathBuf> {
-    Ok(log_dir()?.join("rustclaw.err"))
-}
-
 /// Resolve a path to its absolute form
 fn resolve_absolute_path(path: &str) -> Result<PathBuf> {
     let path = Path::new(path);

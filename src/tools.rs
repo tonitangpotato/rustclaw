@@ -76,7 +76,7 @@ impl ToolRegistry {
         registry
     }
 
-    /// Register core tools for sub-agents (no engram, no GID, no orchestrator tools).
+    /// Register core tools for sub-agents (no GID, no orchestrator tools).
     /// Tools are scoped to the given workspace root.
     pub fn for_subagent(workspace_root: &str) -> Self {
         let mut registry = Self::new();
@@ -87,6 +87,20 @@ impl ToolRegistry {
         registry.register(Box::new(EditFileTool::new(workspace_root)));
         registry.register(Box::new(SearchFilesTool::new(workspace_root)));
         registry.register(Box::new(WebFetchTool));
+        registry.register(Box::new(TtsTool));
+        registry.register(Box::new(SttTool));
+        registry
+    }
+    
+    /// Register core tools for sub-agents with shared memory (engram).
+    /// Sub-agents share the main memory manager for cross-agent memory access.
+    /// The agent_id parameter sets the namespace for engram operations.
+    pub fn for_subagent_with_memory(workspace_root: &str, memory: Arc<MemoryManager>) -> Self {
+        let mut registry = Self::for_subagent(workspace_root);
+        // Add engram tools with the shared memory manager
+        registry.register(Box::new(EngramRecallTool::new(memory.clone())));
+        registry.register(Box::new(EngramStoreTool::new(memory.clone())));
+        registry.register(Box::new(EngramRecallAssociatedTool::new(memory)));
         registry
     }
     
@@ -100,6 +114,9 @@ impl ToolRegistry {
         registry.register(Box::new(EngramTrendsTool::new(memory.clone())));
         registry.register(Box::new(EngramBehaviorStatsTool::new(memory.clone())));
         registry.register(Box::new(EngramSoulSuggestionsTool::new(memory)));
+        // TTS and STT tools
+        registry.register(Box::new(TtsTool));
+        registry.register(Box::new(SttTool));
         registry
     }
 
@@ -1538,6 +1555,111 @@ impl Tool for EngramSoulSuggestionsTool {
             }
             Err(e) => Ok(ToolResult {
                 output: format!("Failed to get soul suggestions: {}", e),
+                is_error: true,
+            }),
+        }
+    }
+}
+
+// ─── TTS (Text-to-Speech) Tool ───────────────────────────────
+
+/// Text-to-Speech tool using edge-tts.
+pub struct TtsTool;
+
+#[async_trait]
+impl Tool for TtsTool {
+    fn name(&self) -> &str {
+        "tts"
+    }
+
+    fn description(&self) -> &str {
+        "Convert text to speech using edge-tts. Returns the path to the generated OGG audio file (opus codec). Useful for creating voice messages or audio content."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "Text to convert to speech"
+                },
+                "voice": {
+                    "type": "string",
+                    "description": "Voice name (default: en-US-EmmaMultilingualNeural). Other options: zh-CN-YunyangNeural, zh-CN-XiaoxiaoNeural, en-GB-SoniaNeural"
+                }
+            },
+            "required": ["text"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let text = input["text"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing 'text' parameter"))?;
+        let voice = input["voice"]
+            .as_str()
+            .unwrap_or("en-US-EmmaMultilingualNeural");
+
+        // Use the TTS module
+        let config = crate::tts::TtsConfig {
+            voice: voice.to_string(),
+            ..Default::default()
+        };
+
+        match crate::tts::synthesize(text, &config).await {
+            Ok(path) => Ok(ToolResult {
+                output: format!("Audio generated: {}", path),
+                is_error: false,
+            }),
+            Err(e) => Ok(ToolResult {
+                output: format!("TTS failed: {}", e),
+                is_error: true,
+            }),
+        }
+    }
+}
+
+// ─── STT (Speech-to-Text) Tool ───────────────────────────────
+
+/// Speech-to-Text tool using Whisper.
+pub struct SttTool;
+
+#[async_trait]
+impl Tool for SttTool {
+    fn name(&self) -> &str {
+        "stt"
+    }
+
+    fn description(&self) -> &str {
+        "Transcribe audio to text using Whisper. Supports OGG, WAV, MP3, and other common audio formats. Returns the transcribed text."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the audio file to transcribe"
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let path = input["path"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing 'path' parameter"))?;
+
+        match crate::stt::transcribe(path).await {
+            Ok(text) => Ok(ToolResult {
+                output: text,
+                is_error: false,
+            }),
+            Err(e) => Ok(ToolResult {
+                output: format!("STT failed: {}", e),
                 is_error: true,
             }),
         }

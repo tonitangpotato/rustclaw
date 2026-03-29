@@ -182,6 +182,36 @@ struct ErrorResponse {
     error: String,
 }
 
+#[derive(Serialize)]
+struct TokensResponse {
+    total_input: u64,
+    total_output: u64,
+    total_requests: u64,
+    total_cache_read: u64,
+    total_cache_write: u64,
+    /// Total tokens (input + output)
+    total_tokens: u64,
+}
+
+#[derive(Serialize)]
+struct OrchestratorResponse {
+    enabled: bool,
+    specialists: Vec<SpecialistInfo>,
+    pending_tasks: usize,
+    completed_tasks: usize,
+    failed_tasks: usize,
+}
+
+#[derive(Serialize)]
+struct SpecialistInfo {
+    id: String,
+    name: String,
+    role: String,
+    status: String,
+    budget_tokens: Option<u64>,
+    budget_used: u64,
+}
+
 // ─── Auth Middleware ─────────────────────────────────────────
 
 async fn auth_middleware(
@@ -236,9 +266,12 @@ async fn get_status(State(state): State<Arc<DashboardState>>) -> impl IntoRespon
     // Get embedding status
     let embedding_status = state.runner.embedding_status();
 
+    // Read agent name from IDENTITY.md
+    let agent_name = read_agent_name(&state.config.workspace);
+
     Json(StatusResponse {
         status: "running".to_string(),
-        agent_name: None, // TODO: Get from workspace
+        agent_name,
         uptime_seconds: uptime,
         model: state.config.llm.model.clone(),
         memory: MemoryStats {
@@ -281,11 +314,86 @@ async fn get_sessions(State(state): State<Arc<DashboardState>>) -> impl IntoResp
 }
 
 async fn get_tasks(State(_state): State<Arc<DashboardState>>) -> impl IntoResponse {
-    // TODO: Integrate with orchestrator/GID when available
+    // Tasks are now available via /api/orchestrator endpoint
     Json(TasksResponse {
         tasks: vec![],
         total: 0,
     })
+}
+
+/// Get token usage statistics.
+async fn get_tokens(State(_state): State<Arc<DashboardState>>) -> impl IntoResponse {
+    let stats = crate::llm::token_tracker().snapshot();
+    Json(TokensResponse {
+        total_input: stats.total_input,
+        total_output: stats.total_output,
+        total_requests: stats.total_requests,
+        total_cache_read: stats.total_cache_read,
+        total_cache_write: stats.total_cache_write,
+        total_tokens: stats.total_input + stats.total_output,
+    })
+}
+
+/// Get orchestrator status.
+async fn get_orchestrator(State(state): State<Arc<DashboardState>>) -> impl IntoResponse {
+    if !state.config.orchestrator.enabled {
+        return Json(OrchestratorResponse {
+            enabled: false,
+            specialists: vec![],
+            pending_tasks: 0,
+            completed_tasks: 0,
+            failed_tasks: 0,
+        });
+    }
+
+    // Get specialist info from config (current state)
+    let specialists: Vec<SpecialistInfo> = state
+        .config
+        .orchestrator
+        .specialists
+        .iter()
+        .map(|s| SpecialistInfo {
+            id: s.id.clone(),
+            name: s.name.clone().unwrap_or_else(|| s.id.clone()),
+            role: s.role.clone(),
+            status: "idle".to_string(), // Would be dynamic with real orchestrator state
+            budget_tokens: s.budget_tokens,
+            budget_used: 0,
+        })
+        .collect();
+
+    Json(OrchestratorResponse {
+        enabled: true,
+        specialists,
+        pending_tasks: 0,
+        completed_tasks: 0,
+        failed_tasks: 0,
+    })
+}
+
+/// Read agent name from IDENTITY.md in workspace.
+fn read_agent_name(workspace: &Option<String>) -> Option<String> {
+    let workspace_dir = workspace.as_deref().unwrap_or(".");
+    let identity_path = std::path::Path::new(workspace_dir).join("IDENTITY.md");
+    
+    if !identity_path.exists() {
+        return None;
+    }
+
+    let content = std::fs::read_to_string(&identity_path).ok()?;
+    
+    // Look for "**Name:**" or "- **Name:**" pattern
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("- **Name:**") {
+            return Some(rest.trim().to_string());
+        }
+        if let Some(rest) = trimmed.strip_prefix("**Name:**") {
+            return Some(rest.trim().to_string());
+        }
+    }
+    
+    None
 }
 
 async fn get_agents(State(state): State<Arc<DashboardState>>) -> impl IntoResponse {
@@ -687,7 +795,9 @@ pub async fn start_dashboard(
         .route("/tasks", get(get_tasks))
         .route("/agents", get(get_agents))
         .route("/config", get(get_config))
-        .route("/message", post(post_message));
+        .route("/message", post(post_message))
+        .route("/tokens", get(get_tokens))
+        .route("/orchestrator", get(get_orchestrator));
 
     let app = Router::new()
         .route("/", get(get_dashboard_html))

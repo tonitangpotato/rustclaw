@@ -329,17 +329,14 @@ async fn main() -> anyhow::Result<()> {
             channels::start_gateway(cfg, runner).await?;
         }
         Commands::Chat { config } => {
-            tracing::info!("Interactive chat mode (not yet implemented)");
-            let _cfg = config::load_config(&config)?;
-            // TODO: Interactive CLI
+            interactive_chat(&config).await?;
         }
         Commands::Config { config } => {
             let cfg = config::load_config(&config)?;
             println!("{}", serde_yaml::to_string(&cfg)?);
         }
         Commands::Setup => {
-            tracing::info!("Setup wizard (not yet implemented)");
-            // TODO: Interactive setup
+            interactive_setup().await?;
         }
         Commands::Daemon(cmd) => {
             match cmd {
@@ -367,6 +364,244 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+
+    Ok(())
+}
+
+/// Interactive chat mode — REPL for talking to the agent.
+async fn interactive_chat(config_path: &str) -> anyhow::Result<()> {
+    use std::io::{BufRead, Write};
+
+    println!("🐾 RustClaw Interactive Chat");
+    println!("Loading config from {}...", config_path);
+
+    let cfg = config::load_config(config_path)?;
+
+    // Setup workspace
+    let workspace_dir = cfg.workspace.as_deref().unwrap_or(".");
+    let ws = workspace::Workspace::load(workspace_dir)?;
+
+    // Setup memory
+    let mem = memory::MemoryManager::new(&cfg, workspace_dir).await?;
+    let mem = std::sync::Arc::new(mem);
+
+    // Setup hooks
+    let hook_registry = hooks::HookRegistry::new();
+
+    // Setup sessions
+    let sessions = session::SessionManager::new(&cfg).await?;
+
+    // Setup tools
+    let tools = tools::ToolRegistry::with_defaults_and_memory(workspace_dir, mem.clone());
+
+    // Create agent runner
+    let runner = agent::AgentRunner::new(cfg.clone(), ws, mem, sessions, hook_registry, tools);
+    let runner = std::sync::Arc::new(runner);
+
+    println!("Model: {}", cfg.llm.model);
+    println!("Type 'exit' or 'quit' to leave, '/clear' to clear session.");
+    println!();
+
+    let session_key = "interactive:cli";
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+
+    loop {
+        print!("You: ");
+        stdout.flush()?;
+
+        let mut input = String::new();
+        if stdin.lock().read_line(&mut input)? == 0 {
+            // EOF
+            break;
+        }
+
+        let input = input.trim();
+        if input.is_empty() {
+            continue;
+        }
+
+        // Handle special commands
+        match input.to_lowercase().as_str() {
+            "exit" | "quit" | "/exit" | "/quit" => {
+                println!("Goodbye! 👋");
+                break;
+            }
+            "/clear" => {
+                runner.clear_session(session_key).await;
+                println!("Session cleared.");
+                continue;
+            }
+            "/model" => {
+                let model = runner.current_model().await;
+                println!("Current model: {}", model);
+                continue;
+            }
+            _ => {}
+        }
+
+        // Process with agent
+        match runner.process_message(session_key, input, None, Some("cli")).await {
+            Ok(response) => {
+                let trimmed = response.trim();
+                if !trimmed.is_empty() && trimmed != "NO_REPLY" && trimmed != "HEARTBEAT_OK" {
+                    println!();
+                    println!("Agent: {}", trimmed);
+                    println!();
+                }
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Interactive setup wizard — generates rustclaw.yaml.
+async fn interactive_setup() -> anyhow::Result<()> {
+    use std::io::{BufRead, Write};
+
+    println!("🐾 RustClaw Setup Wizard");
+    println!("This will help you create a rustclaw.yaml configuration file.");
+    println!();
+
+    fn prompt(question: &str, default: &str) -> String {
+        print!("{} [{}]: ", question, default);
+        std::io::stdout().flush().ok();
+        let mut input = String::new();
+        std::io::stdin().lock().read_line(&mut input).ok();
+        let input = input.trim();
+        if input.is_empty() {
+            default.to_string()
+        } else {
+            input.to_string()
+        }
+    }
+
+    fn prompt_secret(question: &str) -> String {
+        print!("{}: ", question);
+        std::io::stdout().flush().ok();
+        let mut input = String::new();
+        std::io::stdin().lock().read_line(&mut input).ok();
+        input.trim().to_string()
+    }
+
+    // Workspace
+    let workspace = prompt("Workspace directory", ".");
+
+    // LLM Provider
+    println!();
+    println!("LLM Configuration:");
+    let provider = prompt("Provider (anthropic/openai/google)", "anthropic");
+    let model = match provider.as_str() {
+        "anthropic" => prompt("Model", "claude-sonnet-4-5-20250929"),
+        "openai" => prompt("Model", "gpt-4-turbo"),
+        "google" => prompt("Model", "gemini-pro"),
+        _ => prompt("Model", "claude-sonnet-4-5-20250929"),
+    };
+
+    // API Key / Auth Token
+    println!();
+    println!("Authentication:");
+    println!("  For Anthropic, you can use either an API key or OAuth token (Claude Max).");
+    let auth_mode = prompt("Auth mode (api_key/oauth)", "oauth");
+    let (api_key, auth_token) = if auth_mode == "oauth" {
+        let token = prompt_secret("OAuth token (from Claude CLI)");
+        (None, Some(token))
+    } else {
+        let key = prompt_secret("API key");
+        (Some(key), None)
+    };
+
+    // Telegram
+    println!();
+    println!("Telegram Configuration (optional):");
+    let tg_enabled = prompt("Enable Telegram bot? (y/n)", "y") == "y";
+    let (tg_token, tg_users) = if tg_enabled {
+        let token = prompt_secret("Telegram bot token (from @BotFather)");
+        let users = prompt("Allowed user IDs (comma-separated, empty for all)", "");
+        let user_ids: Vec<i64> = users
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        (Some(token), user_ids)
+    } else {
+        (None, vec![])
+    };
+
+    // Generate config
+    let mut config_yaml = format!(
+        r#"# RustClaw Configuration
+# Generated by setup wizard
+
+workspace: "{}"
+
+llm:
+  provider: "{}"
+  model: "{}"
+"#,
+        workspace, provider, model
+    );
+
+    if let Some(key) = api_key {
+        if !key.is_empty() {
+            config_yaml.push_str(&format!("  api_key: \"{}\"\n", key));
+        }
+    }
+    if let Some(token) = auth_token {
+        if !token.is_empty() {
+            config_yaml.push_str(&format!("  auth_token: \"{}\"\n", token));
+        }
+    }
+
+    config_yaml.push_str("  max_tokens: 8192\n  temperature: 0.7\n");
+
+    if tg_enabled {
+        if let Some(token) = tg_token {
+            if !token.is_empty() {
+                config_yaml.push_str(&format!(
+                    r#"
+channels:
+  telegram:
+    bot_token: "{}"
+    allowed_users: {:?}
+    dm_policy: "owner"
+    group_policy: "mention"
+"#,
+                    token, tg_users
+                ));
+            }
+        }
+    }
+
+    config_yaml.push_str(
+        r#"
+memory:
+  auto_recall: true
+  auto_store: true
+  recall_limit: 5
+
+heartbeat_interval: 1800
+max_session_messages: 40
+
+dashboard:
+  enabled: false
+  port: 8080
+"#,
+    );
+
+    // Write config
+    println!();
+    let output_path = prompt("Output file", "rustclaw.yaml");
+    std::fs::write(&output_path, &config_yaml)?;
+    println!("✅ Configuration written to {}", output_path);
+    println!();
+    println!("Next steps:");
+    println!("  1. Review and edit {} as needed", output_path);
+    println!("  2. Run: rustclaw daemon start");
+    println!("  3. Or:   rustclaw chat");
 
     Ok(())
 }

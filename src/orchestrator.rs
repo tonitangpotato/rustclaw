@@ -614,6 +614,104 @@ pub async fn start_orchestrator_loop(
     }
 }
 
+/// Start listening for config changes and hot-reload specialists.
+/// When the config changes, updates the specialist list without restart.
+pub async fn start_config_reload_listener(
+    orchestrator: SharedOrchestrator,
+    mut config_rx: crate::reload::ConfigReceiver,
+) {
+    tokio::spawn(async move {
+        // Skip the initial value (already applied at startup)
+        while config_rx.changed().await.is_ok() {
+            let new_config = config_rx.borrow_and_update().clone();
+
+            // Check if orchestrator config changed
+            if !new_config.orchestrator.enabled {
+                tracing::info!("Orchestrator disabled via config reload");
+                continue;
+            }
+
+            // Hot-reload specialists
+            let mut orch = orchestrator.write().await;
+            update_specialists(&mut orch, &new_config.orchestrator.specialists);
+        }
+        tracing::warn!("Orchestrator config reload listener exited");
+    });
+}
+
+/// Update specialists based on new config.
+/// - Adds new specialists
+/// - Removes specialists no longer in config (if idle)
+/// - Updates existing specialists (model, workspace, budget)
+fn update_specialists(orch: &mut Orchestrator, new_specs: &[SpecialistConfig]) {
+    let new_ids: std::collections::HashSet<_> = new_specs.iter().map(|s| &s.id).collect();
+    let current_ids: Vec<_> = orch.agents.keys().cloned().collect();
+
+    // Remove specialists no longer in config (only if idle)
+    for id in current_ids {
+        if !new_ids.contains(&id) {
+            if let Some(agent) = orch.agents.get(&id) {
+                if matches!(agent.status, AgentStatus::Idle) {
+                    tracing::info!("Removing specialist via hot-reload: {}", id);
+                    orch.agents.remove(&id);
+                } else {
+                    tracing::warn!(
+                        "Cannot remove specialist {} during hot-reload: agent is busy ({:?})",
+                        id,
+                        agent.status
+                    );
+                }
+            }
+        }
+    }
+
+    // Add or update specialists from new config
+    for spec in new_specs {
+        if let Some(agent) = orch.agents.get_mut(&spec.id) {
+            // Update existing specialist
+            let mut changed = false;
+            if agent.model != spec.model {
+                agent.model = spec.model.clone();
+                changed = true;
+            }
+            if agent.workspace != spec.workspace {
+                agent.workspace = spec.workspace.clone();
+                changed = true;
+            }
+            if agent.budget_tokens != spec.budget_tokens {
+                agent.budget_tokens = spec.budget_tokens;
+                changed = true;
+            }
+            if agent.max_iterations != spec.max_iterations {
+                agent.max_iterations = spec.max_iterations;
+                changed = true;
+            }
+            if agent.role != spec.role {
+                agent.role = spec.role.clone();
+                changed = true;
+            }
+            if let Some(name) = &spec.name {
+                if &agent.name != name {
+                    agent.name = name.clone();
+                    changed = true;
+                }
+            }
+            if changed {
+                tracing::info!("Updated specialist via hot-reload: {}", spec.id);
+            }
+        } else {
+            // Add new specialist
+            let agent = SpecialistAgent::from_config(spec);
+            tracing::info!(
+                "Adding specialist via hot-reload: {} (role: {})",
+                agent.id,
+                agent.role
+            );
+            orch.agents.insert(agent.id.clone(), agent);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -122,6 +122,112 @@ pub struct Usage {
     pub cache_write: u32,
 }
 
+/// Token tracking for cumulative usage across sessions.
+/// Thread-safe with atomic operations.
+pub struct TokenTracker {
+    /// Total input tokens across all requests
+    total_input: std::sync::atomic::AtomicU64,
+    /// Total output tokens across all requests
+    total_output: std::sync::atomic::AtomicU64,
+    /// Total requests made
+    total_requests: std::sync::atomic::AtomicU64,
+    /// Total cache read tokens
+    total_cache_read: std::sync::atomic::AtomicU64,
+    /// Total cache write tokens
+    total_cache_write: std::sync::atomic::AtomicU64,
+}
+
+impl TokenTracker {
+    /// Create a new token tracker.
+    pub fn new() -> Self {
+        Self {
+            total_input: std::sync::atomic::AtomicU64::new(0),
+            total_output: std::sync::atomic::AtomicU64::new(0),
+            total_requests: std::sync::atomic::AtomicU64::new(0),
+            total_cache_read: std::sync::atomic::AtomicU64::new(0),
+            total_cache_write: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Record token usage from a request.
+    pub fn record(&self, usage: &Usage) {
+        use std::sync::atomic::Ordering;
+        self.total_input.fetch_add(usage.input_tokens as u64, Ordering::Relaxed);
+        self.total_output.fetch_add(usage.output_tokens as u64, Ordering::Relaxed);
+        self.total_requests.fetch_add(1, Ordering::Relaxed);
+        self.total_cache_read.fetch_add(usage.cache_read as u64, Ordering::Relaxed);
+        self.total_cache_write.fetch_add(usage.cache_write as u64, Ordering::Relaxed);
+        
+        tracing::debug!(
+            "Token usage: input={} output={} cache_read={} cache_write={} (cumulative: {} requests, {} total tokens)",
+            usage.input_tokens, usage.output_tokens, usage.cache_read, usage.cache_write,
+            self.total_requests.load(Ordering::Relaxed),
+            self.total_input.load(Ordering::Relaxed) + self.total_output.load(Ordering::Relaxed)
+        );
+    }
+
+    /// Get total input tokens.
+    pub fn total_input(&self) -> u64 {
+        self.total_input.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Get total output tokens.
+    pub fn total_output(&self) -> u64 {
+        self.total_output.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Get total requests.
+    pub fn total_requests(&self) -> u64 {
+        self.total_requests.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Get total cache read tokens.
+    pub fn total_cache_read(&self) -> u64 {
+        self.total_cache_read.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Get total cache write tokens.
+    pub fn total_cache_write(&self) -> u64 {
+        self.total_cache_write.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Get snapshot of all stats.
+    pub fn snapshot(&self) -> TokenStats {
+        use std::sync::atomic::Ordering;
+        TokenStats {
+            total_input: self.total_input.load(Ordering::Relaxed),
+            total_output: self.total_output.load(Ordering::Relaxed),
+            total_requests: self.total_requests.load(Ordering::Relaxed),
+            total_cache_read: self.total_cache_read.load(Ordering::Relaxed),
+            total_cache_write: self.total_cache_write.load(Ordering::Relaxed),
+        }
+    }
+}
+
+impl Default for TokenTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Snapshot of token stats for serialization.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TokenStats {
+    pub total_input: u64,
+    pub total_output: u64,
+    pub total_requests: u64,
+    pub total_cache_read: u64,
+    pub total_cache_write: u64,
+}
+
+/// Global token tracker instance.
+static TOKEN_TRACKER: std::sync::OnceLock<TokenTracker> = std::sync::OnceLock::new();
+
+/// Get the global token tracker.
+pub fn token_tracker() -> &'static TokenTracker {
+    TOKEN_TRACKER.get_or_init(TokenTracker::new)
+}
+
 /// A chunk from streaming response.
 #[derive(Debug, Clone)]
 pub enum StreamChunk {
@@ -630,6 +736,9 @@ impl LlmClient for AnthropicClient {
                     .unwrap_or(0) as u32,
             };
 
+            // Track token usage
+            token_tracker().record(&usage);
+
             return Ok(LlmResponse {
                 text,
                 tool_calls,
@@ -978,6 +1087,9 @@ impl LlmClient for AnthropicClient {
                 }
             }
 
+            // Track token usage for streaming
+            token_tracker().record(&usage);
+
             // Send final Done chunk
             let _ = tx.send(StreamChunk::Done(usage, stop_reason)).await;
         });
@@ -1183,6 +1295,9 @@ impl LlmClient for OpenAIClient {
             cache_write: 0,
         };
 
+        // Track token usage
+        token_tracker().record(&usage);
+
         Ok(LlmResponse {
             text,
             tool_calls,
@@ -1201,6 +1316,7 @@ impl LlmClient for OpenAIClient {
         tools: &[ToolDefinition],
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<StreamChunk>> {
         // For now, just do non-streaming and convert to stream format
+        // Token tracking is done in chat() call
         let response = self.chat(system, messages, tools).await?;
 
         let (tx, rx) = tokio::sync::mpsc::channel(10);
@@ -1384,6 +1500,9 @@ impl LlmClient for GoogleClient {
             cache_write: 0,
         };
 
+        // Track token usage
+        token_tracker().record(&usage);
+
         Ok(LlmResponse {
             text,
             tool_calls,
@@ -1402,6 +1521,7 @@ impl LlmClient for GoogleClient {
         tools: &[ToolDefinition],
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<StreamChunk>> {
         // For now, just do non-streaming
+        // Token tracking is done in chat() call
         let response = self.chat(system, messages, tools).await?;
 
         let (tx, rx) = tokio::sync::mpsc::channel(10);
