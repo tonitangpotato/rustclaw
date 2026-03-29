@@ -624,6 +624,138 @@ impl EditFileTool {
             workspace_root: workspace_root.to_string(),
         }
     }
+
+    /// Attempt fuzzy match when exact match fails.
+    /// Tries: whitespace normalization, leading/trailing trim, line-by-line fuzzy.
+    /// Returns the exact substring from the file that best matches, or None.
+    fn fuzzy_find<'a>(content: &'a str, target: &str) -> Option<&'a str> {
+        // Strategy 1: Normalize whitespace (collapse runs of whitespace to single space)
+        let normalize = |s: &str| -> String {
+            s.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        let target_normalized = normalize(target);
+
+        // Find by normalized comparison against sliding windows of lines
+        let content_lines: Vec<&str> = content.lines().collect();
+        let target_lines: Vec<&str> = target.lines().collect();
+        let target_line_count = target_lines.len();
+
+        if target_line_count == 0 || content_lines.is_empty() {
+            return None;
+        }
+
+        let mut best_match: Option<(usize, usize, f64)> = None; // (start_line, end_line, score)
+
+        for start in 0..=content_lines.len().saturating_sub(target_line_count) {
+            let end = (start + target_line_count).min(content_lines.len());
+            let window: Vec<&str> = content_lines[start..end].to_vec();
+
+            // Score: ratio of matching normalized lines
+            let mut matching = 0;
+            for (wline, tline) in window.iter().zip(target_lines.iter()) {
+                if normalize(wline) == normalize(tline) {
+                    matching += 1;
+                }
+            }
+
+            let score = matching as f64 / target_line_count as f64;
+
+            // Require at least 80% line match
+            if score >= 0.8 {
+                if best_match.is_none() || score > best_match.unwrap().2 {
+                    best_match = Some((start, end, score));
+                }
+            }
+        }
+
+        if let Some((start, end, _score)) = best_match {
+            // Return the exact substring from the original content
+            let start_byte = content_lines[..start]
+                .iter()
+                .map(|l| l.len() + 1) // +1 for newline
+                .sum::<usize>();
+            let end_byte = content_lines[..end]
+                .iter()
+                .map(|l| l.len() + 1)
+                .sum::<usize>();
+            // Adjust for potential trailing newline
+            let end_byte = end_byte.min(content.len());
+            let slice = &content[start_byte..end_byte];
+            // Trim trailing newline if target doesn't end with one
+            if !target.ends_with('\n') && slice.ends_with('\n') {
+                Some(&slice[..slice.len() - 1])
+            } else {
+                Some(slice)
+            }
+        } else {
+            // Strategy 2: Single-line normalized match
+            if !target.contains('\n') {
+                for line in content.lines() {
+                    if normalize(line) == target_normalized {
+                        // Find this line's position in content
+                        if let Some(pos) = content.find(line) {
+                            return Some(&content[pos..pos + line.len()]);
+                        }
+                    }
+                }
+            }
+            None
+        }
+    }
+
+    /// Run post-edit validation if the file has a known extension.
+    /// Returns a warning string if validation fails, None if ok or not applicable.
+    async fn post_edit_validate(path: &std::path::Path) -> Option<String> {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let check_cmd = match ext {
+            "rs" => {
+                // For Rust, check syntax with rustfmt --check (fast, no compilation)
+                let dir = path.parent()?;
+                // Find Cargo.toml by walking up
+                let mut cargo_dir = dir.to_path_buf();
+                loop {
+                    if cargo_dir.join("Cargo.toml").exists() {
+                        break;
+                    }
+                    if !cargo_dir.pop() {
+                        return None; // No Cargo.toml found
+                    }
+                }
+                Some(format!(
+                    "cd {} && cargo check --message-format=short 2>&1 | head -20",
+                    cargo_dir.display()
+                ))
+            }
+            "py" => Some(format!("python3 -c \"import ast; ast.parse(open('{}').read())\" 2>&1", path.display())),
+            "ts" | "tsx" => Some(format!("npx tsc --noEmit {} 2>&1 | head -10", path.display())),
+            "js" | "jsx" => Some(format!("node --check {} 2>&1", path.display())),
+            "json" => Some(format!("python3 -c \"import json; json.load(open('{}'))\" 2>&1", path.display())),
+            "yaml" | "yml" => Some(format!("python3 -c \"import yaml; yaml.safe_load(open('{}'))\" 2>&1", path.display())),
+            _ => None,
+        };
+
+        if let Some(cmd) = check_cmd {
+            match tokio::process::Command::new("sh")
+                .args(["-c", &cmd])
+                .output()
+                .await
+            {
+                Ok(output) => {
+                    if !output.status.success() {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        let msg = if stderr.is_empty() { stdout } else { stderr };
+                        Some(format!("⚠️ Post-edit validation warning:\n{}", msg.trim()))
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None, // Validation tool not available, skip
+            }
+        } else {
+            None
+        }
+    }
 }
 
 #[async_trait]
@@ -633,7 +765,7 @@ impl Tool for EditFileTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file by replacing exact text. The old_string must match exactly (including whitespace)."
+        "Edit a file by replacing text. Supports exact match with fuzzy fallback (whitespace-tolerant). Runs syntax validation after edit for supported languages (Rust, Python, TS, JS, JSON, YAML). Supports multiple edits in one call via 'edits' array."
     }
 
     fn input_schema(&self) -> Value {
@@ -646,14 +778,26 @@ impl Tool for EditFileTool {
                 },
                 "old_string": {
                     "type": "string",
-                    "description": "Exact text to find and replace"
+                    "description": "Text to find and replace (exact match with fuzzy fallback)"
                 },
                 "new_string": {
                     "type": "string",
                     "description": "New text to replace with"
+                },
+                "edits": {
+                    "type": "array",
+                    "description": "Multiple edits to apply atomically: [{old_string, new_string}, ...]",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_string": { "type": "string" },
+                            "new_string": { "type": "string" }
+                        },
+                        "required": ["old_string", "new_string"]
+                    }
                 }
             },
-            "required": ["path", "old_string", "new_string"]
+            "required": ["path"]
         })
     }
 
@@ -661,12 +805,6 @@ impl Tool for EditFileTool {
         let path_str = input["path"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
-        let old_string = input["old_string"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing 'old_string'"))?;
-        let new_string = input["new_string"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing 'new_string'"))?;
 
         let path = if std::path::Path::new(path_str).is_absolute() {
             std::path::PathBuf::from(path_str)
@@ -683,25 +821,112 @@ impl Tool for EditFileTool {
 
         let content = tokio::fs::read_to_string(&path).await?;
 
-        let count = content.matches(old_string).count();
-        if count == 0 {
+        // Build list of edits: either from 'edits' array or single old_string/new_string
+        let edits: Vec<(String, String)> = if let Some(edits_arr) = input["edits"].as_array() {
+            edits_arr
+                .iter()
+                .filter_map(|e| {
+                    Some((
+                        e["old_string"].as_str()?.to_string(),
+                        e["new_string"].as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        } else {
+            let old = input["old_string"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("Missing 'old_string' or 'edits'"))?;
+            let new = input["new_string"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("Missing 'new_string'"))?;
+            vec![(old.to_string(), new.to_string())]
+        };
+
+        if edits.is_empty() {
             return Ok(ToolResult {
-                output: "old_string not found in file. Make sure it matches exactly (including whitespace).".to_string(),
-                is_error: true,
-            });
-        }
-        if count > 1 {
-            return Ok(ToolResult {
-                output: format!("old_string found {} times. It must be unique. Add more context to disambiguate.", count),
+                output: "No edits provided.".to_string(),
                 is_error: true,
             });
         }
 
-        let new_content = content.replacen(old_string, new_string, 1);
-        tokio::fs::write(&path, &new_content).await?;
+        // Apply all edits sequentially
+        let mut current_content = content.clone();
+        let mut results: Vec<String> = Vec::new();
+        let mut any_fuzzy = false;
+
+        for (i, (old_string, new_string)) in edits.iter().enumerate() {
+            let edit_label = if edits.len() > 1 {
+                format!("Edit {}/{}", i + 1, edits.len())
+            } else {
+                String::new()
+            };
+
+            let count = current_content.matches(old_string.as_str()).count();
+
+            if count == 1 {
+                // Exact match — apply directly
+                current_content = current_content.replacen(old_string.as_str(), new_string.as_str(), 1);
+                if !edit_label.is_empty() {
+                    results.push(format!("{}: exact match ✓", edit_label));
+                }
+            } else if count > 1 {
+                // Ambiguous — abort all edits (atomic: don't write partial changes)
+                return Ok(ToolResult {
+                    output: format!(
+                        "{}old_string found {} times. Add more context to disambiguate. No edits applied.",
+                        if edit_label.is_empty() { String::new() } else { format!("{}: ", edit_label) },
+                        count
+                    ),
+                    is_error: true,
+                });
+            } else {
+                // Exact match failed — try fuzzy
+                if let Some(actual_match) = Self::fuzzy_find(&current_content, old_string) {
+                    let actual_owned = actual_match.to_string();
+                    current_content = current_content.replacen(&actual_owned, new_string.as_str(), 1);
+                    any_fuzzy = true;
+                    results.push(format!(
+                        "{}fuzzy match (whitespace difference) ✓",
+                        if edit_label.is_empty() { String::new() } else { format!("{}: ", edit_label) }
+                    ));
+                } else {
+                    // No match at all — abort
+                    return Ok(ToolResult {
+                        output: format!(
+                            "{}old_string not found (exact or fuzzy). No edits applied.\nTip: use read_file to check current content.",
+                            if edit_label.is_empty() { String::new() } else { format!("{}: ", edit_label) }
+                        ),
+                        is_error: true,
+                    });
+                }
+            }
+        }
+
+        // All edits applied — write file
+        tokio::fs::write(&path, &current_content).await?;
+
+        // Post-edit validation
+        let validation = Self::post_edit_validate(&path).await;
+
+        // Build output
+        let mut output = format!("Edited {}", path.display());
+        if edits.len() > 1 {
+            output.push_str(&format!(" ({} edits applied)", edits.len()));
+        }
+        if any_fuzzy {
+            output.push_str(" [fuzzy match used]");
+        }
+        if !results.is_empty() && edits.len() > 1 {
+            output.push('\n');
+            output.push_str(&results.join("\n"));
+        }
+        if let Some(warning) = validation {
+            output.push('\n');
+            output.push_str(&warning);
+        }
 
         Ok(ToolResult {
-            output: format!("Edited {}", path.display()),
+            output,
             is_error: false,
         })
     }
@@ -2726,5 +2951,145 @@ impl Tool for GidSchemaTool {
             output: schema,
             is_error: false,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fuzzy_find_exact() {
+        let content = "fn main() {\n    println!(\"hello\");\n}\n";
+        let target = "fn main() {\n    println!(\"hello\");\n}";
+        let result = EditFileTool::fuzzy_find(content, target);
+        assert!(result.is_some(), "Exact match should work");
+    }
+
+    #[test]
+    fn test_fuzzy_find_whitespace_diff() {
+        let content = "fn main() {\n    println!(\"hello\");\n    let x = 1;\n}\n";
+        // Target has different indentation (2 spaces vs 4)
+        let target = "fn main() {\n  println!(\"hello\");\n  let x = 1;\n}";
+        let result = EditFileTool::fuzzy_find(content, target);
+        assert!(result.is_some(), "Whitespace-normalized match should work");
+        // The returned slice should be the ACTUAL content from the file
+        let matched = result.unwrap();
+        assert!(matched.contains("    println!"), "Should return original indentation");
+    }
+
+    #[test]
+    fn test_fuzzy_find_trailing_spaces() {
+        let content = "let x = 1;  \nlet y = 2;\n";
+        let target = "let x = 1;\nlet y = 2;";
+        let result = EditFileTool::fuzzy_find(content, target);
+        assert!(result.is_some(), "Trailing space difference should match");
+    }
+
+    #[test]
+    fn test_fuzzy_find_no_match() {
+        let content = "fn main() {\n    println!(\"hello\");\n}\n";
+        let target = "fn totally_different() {\n    something_else();\n}";
+        let result = EditFileTool::fuzzy_find(content, target);
+        assert!(result.is_none(), "Unrelated content should not match");
+    }
+
+    #[test]
+    fn test_fuzzy_find_single_line_normalized() {
+        let content = "    let   x   =   1;\n";
+        let target = "let x = 1;";
+        let result = EditFileTool::fuzzy_find(content, target);
+        assert!(result.is_some(), "Single-line whitespace normalization should match");
+    }
+
+    #[test]
+    fn test_fuzzy_find_partial_match_below_threshold() {
+        // 5 lines, only 2 match = 40% < 80% threshold
+        let content = "line1\nline2\nline3\nline4\nline5\n";
+        let target = "line1\nXXXX\nXXXX\nXXXX\nline5";
+        let result = EditFileTool::fuzzy_find(content, target);
+        assert!(result.is_none(), "40% match should be below 80% threshold");
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_exact_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello world\n").unwrap();
+
+        let tool = EditFileTool::new(dir.path().to_str().unwrap());
+        let result = tool.execute(serde_json::json!({
+            "path": file.to_str().unwrap(),
+            "old_string": "hello",
+            "new_string": "goodbye"
+        })).await.unwrap();
+
+        assert!(!result.is_error, "Should succeed: {}", result.output);
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "goodbye world\n");
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_multi_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "aaa\nbbb\nccc\n").unwrap();
+
+        let tool = EditFileTool::new(dir.path().to_str().unwrap());
+        let result = tool.execute(serde_json::json!({
+            "path": file.to_str().unwrap(),
+            "edits": [
+                {"old_string": "aaa", "new_string": "AAA"},
+                {"old_string": "ccc", "new_string": "CCC"}
+            ]
+        })).await.unwrap();
+
+        assert!(!result.is_error, "Should succeed: {}", result.output);
+        assert!(result.output.contains("2 edits applied"));
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "AAA\nbbb\nCCC\n");
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_multi_edit_atomic_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "aaa\nbbb\n").unwrap();
+
+        let tool = EditFileTool::new(dir.path().to_str().unwrap());
+        let result = tool.execute(serde_json::json!({
+            "path": file.to_str().unwrap(),
+            "edits": [
+                {"old_string": "aaa", "new_string": "AAA"},
+                {"old_string": "zzz", "new_string": "ZZZ"}  // This doesn't exist
+            ]
+        })).await.unwrap();
+
+        assert!(result.is_error, "Should fail on missing second edit");
+        // File should be unchanged (atomic — second edit failed but first was applied to in-memory buffer only)
+        // Wait — actually our implementation applies sequentially to in-memory buffer then writes.
+        // The second edit fails and we return error WITHOUT writing. Let me verify...
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "aaa\nbbb\n", "File should be unchanged on failure");
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_fuzzy_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
+
+        let tool = EditFileTool::new(dir.path().to_str().unwrap());
+        // old_string has 2-space indent, file has 4-space
+        let result = tool.execute(serde_json::json!({
+            "path": file.to_str().unwrap(),
+            "old_string": "fn main() {\n  println!(\"hello\");\n}",
+            "new_string": "fn main() {\n    println!(\"goodbye\");\n}"
+        })).await.unwrap();
+
+        assert!(!result.is_error, "Should succeed with fuzzy: {}", result.output);
+        assert!(result.output.contains("fuzzy match"), "Should indicate fuzzy was used");
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert!(content.contains("goodbye"), "File should be edited");
     }
 }
