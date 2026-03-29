@@ -783,3 +783,127 @@ mod tests {
         assert!(matches!(MemoryManager::importance_to_layer(0.1), MemoryLayer::Archive));
     }
 }
+
+/// E2E test for EmotionBus: test with actual engram DB.
+/// Requires direct DB access since Config doesn't have Default.
+#[cfg(test)]
+mod e2e_tests {
+    use super::*;
+
+    #[test]
+    fn test_emotionbus_with_real_db() {
+        // Create temp DB
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("test-engram.db");
+        let workspace = dir.path().to_str().unwrap();
+
+        // Write SOUL.md with proper drive format
+        std::fs::write(dir.path().join("SOUL.md"), r#"# SOUL.md
+
+## Core Drive
+**帮 potato 实现财务自由。** 这不是一个任务，是一个持续目标。
+
+具体意味着：
+- 主动推进能产生收入的项目
+- 找到市场机会、优化转化、写代码、部署
+- 优先级：能赚钱的事 > 有趣但不赚钱的事
+
+## Vibe
+Be curious. Write great code. Ship fast.
+"#).unwrap();
+
+        // Create engram Memory directly
+        let engram = engramai::Memory::new(db_path.to_str().unwrap(), None).unwrap();
+
+        // Test 1: EmotionalBus can be created
+        let bus = EmotionalBus::new(workspace, engram.connection());
+        assert!(bus.is_ok(), "EmotionalBus creation failed: {:?}", bus.err());
+        let bus = bus.unwrap();
+        println!("✅ EmotionalBus created with {} drives", bus.drives().len());
+
+        // Test 2: process_interaction (EmotionalAccumulator)
+        let acc = engramai::bus::accumulator::EmotionalAccumulator::new(engram.connection()).unwrap();
+        acc.record_emotion("coding", 0.7).unwrap();
+        acc.record_emotion("coding", 0.8).unwrap();
+        acc.record_emotion("trading", -0.5).unwrap();
+        
+        let trends = acc.get_all_trends().unwrap();
+        assert!(trends.len() >= 2, "Should have 2 domain trends, got {}", trends.len());
+        let coding = trends.iter().find(|t| t.domain == "coding").unwrap();
+        assert!(coding.valence > 0.0, "Coding valence should be positive: {}", coding.valence);
+        let trading = trends.iter().find(|t| t.domain == "trading").unwrap();
+        assert!(trading.valence < 0.0, "Trading valence should be negative: {}", trading.valence);
+        println!("✅ EmotionalAccumulator: coding={:.2}, trading={:.2}", coding.valence, trading.valence);
+
+        // Test 3: BehaviorFeedback
+        let feedback = engramai::bus::feedback::BehaviorFeedback::new(engram.connection()).unwrap();
+        feedback.log_outcome("exec", true).unwrap();
+        feedback.log_outcome("exec", true).unwrap();
+        feedback.log_outcome("exec", false).unwrap();
+        // Need MIN_ATTEMPTS_FOR_SUGGESTION (10) to trigger deprioritize
+        for _ in 0..12 {
+            feedback.log_outcome("web_fetch", false).unwrap();
+        }
+        
+        let exec_stats = feedback.get_action_stats("exec").unwrap().unwrap();
+        assert_eq!(exec_stats.total, 3);
+        assert_eq!(exec_stats.positive, 2);
+        assert!(exec_stats.score > 0.5);
+        
+        let fetch_stats = feedback.get_action_stats("web_fetch").unwrap().unwrap();
+        assert_eq!(fetch_stats.total, 12);
+        assert_eq!(fetch_stats.positive, 0);
+        assert!(fetch_stats.should_deprioritize(), "web_fetch should be deprioritized (12 failures, 0 success)");
+        
+        let deprioritized = feedback.get_actions_to_deprioritize().unwrap();
+        assert!(deprioritized.iter().any(|a| a.action == "web_fetch"));
+        println!("✅ BehaviorFeedback: exec={:.0}%, web_fetch={:.0}% (deprioritized)", 
+            exec_stats.score * 100.0, fetch_stats.score * 100.0);
+
+        // Test 4: Drive alignment
+        // SOUL.md produces Chinese keywords. Test with actual Chinese content.
+        let boost_zh = bus.align_importance("帮potato实现财务自由，找到市场机会，写代码部署");
+        assert!(boost_zh > 1.0, "Chinese drive-aligned content should get boost: {}", boost_zh);
+        
+        let no_boost = bus.align_importance("hello world xyz");
+        assert!((no_boost - 1.0).abs() < 0.01, "Neutral content should get no boost: {}", no_boost);
+        println!("✅ Drive alignment: Chinese boost={:.2}x, neutral={:.2}x", boost_zh, no_boost);
+        
+        // Test 4b: Direct alignment with custom drives (simulating config drives)
+        let custom_drives = vec![
+            engramai::Drive {
+                name: "trading".to_string(),
+                description: "Make money from trading".to_string(),
+                keywords: vec!["trading".into(), "profit".into(), "money".into(), "revenue".into()],
+            },
+        ];
+        let boost_en = engramai::bus::alignment::score_alignment("trading profit money", &custom_drives);
+        assert!(boost_en > 0.5, "English custom drive should align: {}", boost_en);
+        println!("✅ Custom drives alignment: English score={:.2}", boost_en);
+
+        // Test 5: suggest_soul_updates (need enough negative data)
+        for _ in 0..15 {
+            acc.record_emotion("failing_area", -0.8).unwrap();
+        }
+        let suggestions = bus.suggest_soul_updates(engram.connection()).unwrap();
+        println!("✅ Soul suggestions: {} (after 15 negative events in 'failing_area')", suggestions.len());
+
+        // Test 6: decay_trends
+        let acc2 = engramai::bus::accumulator::EmotionalAccumulator::new(engram.connection()).unwrap();
+        let before = acc2.get_trend("coding").unwrap().unwrap().valence;
+        acc2.decay_trends(0.9).unwrap();
+        let after = acc2.get_trend("coding").unwrap().unwrap().valence;
+        assert!(after.abs() <= before.abs(), "Decay should reduce magnitude: before={}, after={}", before, after);
+        println!("✅ Trend decay: coding {:.3} → {:.3}", before, after);
+
+        // Test 7: prune_old_logs
+        let pruned = feedback.prune_old_logs(100).unwrap();
+        println!("✅ Prune old logs: {} removed", pruned);
+
+        // Test 8: Working Memory constant
+        assert_eq!(WORKING_MEMORY_DECAY_SECS, 1800);
+        println!("✅ Working Memory decay: {}s", WORKING_MEMORY_DECAY_SECS);
+
+        println!("\n🎉 ALL E2E TESTS PASSED");
+    }
+}
