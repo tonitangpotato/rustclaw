@@ -124,24 +124,48 @@ Special `"access": "keychain"` profile uses dynamic OAuth from macOS Keychain (a
 
 Native [engramai](https://crates.io/crates/engramai) integration — neuroscience-grounded cognitive memory:
 
-- **ACT-R** activation model
+- **ACT-R** activation model (frequency × recency power law)
 - **Hebbian** learning (co-activation links)
 - **Ebbinghaus** forgetting curves
+- **Hybrid Search** — 15% FTS + 60% embedding + 25% ACT-R
+- **LLM Extraction** — Claude Haiku extracts key facts at store time
+- **EmotionBus** — drive alignment, behavior feedback, emotional trends
+- **Cross-language alignment** — Chinese SOUL drives align with English content via embeddings
 - **Auto-recall** before each LLM call (~5ms)
-- **Auto-consolidation** during heartbeats
+- **Auto-store** after each LLM response (with fact extraction)
+- **Auto-consolidation** every 6 hours
+- **Self-reflection** every 24 hours (prune, decay, soul/heartbeat suggestions)
+- **Anomaly detection** — monitors engram storage health (BaselineTracker)
+
+### Embedding Pipeline
+
+All embeddings use **nomic-embed-text** (768-dim) via local Ollama:
+
+| Stage | Embedding Use | Cost |
+|-------|--------------|------|
+| Store | Content → vector for future recall | Local, free |
+| Recall | Query → vector → cosine similarity | Local, free |
+| Drive Alignment | Content vector ↔ drive vectors → importance boost | Reuses store embedding, zero extra cost |
+
+Drive alignment is **multilingual by design** — embeddings capture semantic meaning across languages. A Chinese SOUL drive ("帮potato实现财务自由") naturally aligns with English content ("trading profit") because the embedding model maps related concepts to nearby vectors regardless of language.
 
 ## Roadmap
 
 - [x] Core agent loop with tool execution
 - [x] Telegram channel (long polling)
-- [x] Native Engram memory
+- [x] Native Engram memory (full EmotionBus integration)
 - [x] 6-point hook system
 - [x] Auth profile rotation (multi-token, cooldown tracking)
+- [x] Cron system (standard cron expressions + timezone)
+- [x] Multi-agent orchestration (orchestrator + specialist sub-agents)
+- [x] Safety layer (prompt injection detection, sensitive leak check)
+- [x] GID integration (30 tools — extract, schema, tasks, advise, etc.)
+- [x] EmotionBus (drive alignment, behavior feedback, emotional trends, self-reflection)
+- [x] Cross-language drive alignment (embedding-based)
 - [ ] SQLite session persistence
 - [ ] Voice I/O (STT + TTS)
-- [ ] Cron & heartbeat system
-- [ ] Multi-agent orchestration (planner → DAG → parallel workers)
-- [ ] Safety layer (prompt injection, leak detection)
+- [ ] Web dashboard enhancements (orchestrator view, agent name)
+- [ ] Hot-reload orchestrator config
 - [ ] WASM tool sandbox
 
 ## License
