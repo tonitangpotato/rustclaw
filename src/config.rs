@@ -278,6 +278,30 @@ pub struct MemoryConfig {
     /// Max memories to recall per turn
     #[serde(default = "default_recall_limit")]
     pub recall_limit: usize,
+
+    /// Optional drives for importance boosting (EmotionalBus integration).
+    /// Memories aligned with these drives get automatic importance boosts.
+    #[serde(default)]
+    pub drives: Vec<DriveConfig>,
+}
+
+/// Drive configuration for EmotionalBus integration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriveConfig {
+    /// Drive name (e.g., "financial_freedom", "technical_depth")
+    pub name: String,
+
+    /// Keywords that trigger alignment boost
+    #[serde(default)]
+    pub keywords: Vec<String>,
+
+    /// Weight for this drive (0.0 to 1.0, default 1.0)
+    #[serde(default = "default_drive_weight")]
+    pub weight: f64,
+}
+
+fn default_drive_weight() -> f64 {
+    1.0
 }
 
 fn default_true() -> bool {

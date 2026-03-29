@@ -230,6 +230,12 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!("Plugin system ready ({} plugins)", plugin_registry.count());
             }
 
+            // Clone memory Arc for auto-consolidation background task
+            let mem_for_consolidation = mem.clone();
+
+            // Log embedding status at startup
+            tracing::info!("Embedding status: {}", mem.embedding_status());
+
             // Build agent runner
             let runner = agent::AgentRunner::new(cfg.clone(), ws, mem, sessions, hook_registry, tools);
 
@@ -279,6 +285,19 @@ async fn main() -> anyhow::Result<()> {
                     orchestrator::start_orchestrator_loop(orch_clone, runner_clone, tick_interval).await;
                 });
             }
+
+            // Start auto-consolidation background task (every 6 hours)
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
+                loop {
+                    interval.tick().await;
+                    match mem_for_consolidation.consolidate() {
+                        Ok(()) => tracing::info!("Engram auto-consolidation completed"),
+                        Err(e) => tracing::warn!("Engram auto-consolidation failed: {}", e),
+                    }
+                }
+            });
+            tracing::info!("Engram auto-consolidation scheduled (every 6 hours)");
 
             // Start web dashboard (if enabled)
             dashboard::start_dashboard(cfg.dashboard.clone(), cfg.clone(), runner.clone()).await?;

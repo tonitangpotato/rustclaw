@@ -697,6 +697,11 @@ impl AgentRunner {
         &self.sessions
     }
 
+    /// Get embedding service status (for dashboard).
+    pub fn embedding_status(&self) -> String {
+        self.memory.embedding_status()
+    }
+
     pub fn agents(&self) -> &[AgentConfig] {
         &self.config.agents
     }

@@ -61,22 +61,35 @@ impl MemoryManager {
             tracing::debug!("No Keychain OAuth, relying on engram auto-config");
         }
 
-        // Load drives from SOUL.md for importance boosting
-        let soul_path = format!("{}/SOUL.md", workspace_dir);
-        let drives = if Path::new(&soul_path).exists() {
-            match std::fs::read_to_string(&soul_path) {
-                Ok(content) => {
-                    let drives = parse_soul(&content);
-                    tracing::info!("Loaded {} drives from SOUL.md", drives.len());
-                    drives
-                }
-                Err(e) => {
-                    tracing::debug!("Failed to read SOUL.md: {}", e);
-                    Vec::new()
-                }
-            }
+        // Load drives for importance boosting
+        // Priority: config drives > SOUL.md drives
+        let drives = if !config.memory.drives.is_empty() {
+            // Use drives from config (converted to engramai Drive type)
+            let drives: Vec<Drive> = config.memory.drives.iter().map(|d| Drive {
+                name: d.name.clone(),
+                description: format!("Config drive (weight: {})", d.weight),
+                keywords: d.keywords.clone(),
+            }).collect();
+            tracing::info!("Loaded {} drives from config", drives.len());
+            drives
         } else {
-            Vec::new()
+            // Fall back to SOUL.md
+            let soul_path = format!("{}/SOUL.md", workspace_dir);
+            if Path::new(&soul_path).exists() {
+                match std::fs::read_to_string(&soul_path) {
+                    Ok(content) => {
+                        let drives = parse_soul(&content);
+                        tracing::info!("Loaded {} drives from SOUL.md", drives.len());
+                        drives
+                    }
+                    Err(e) => {
+                        tracing::debug!("Failed to read SOUL.md: {}", e);
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            }
         };
 
         // Initialize session working memory (15 items, 5 minute decay)
@@ -278,6 +291,34 @@ impl MemoryManager {
             .stats()
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         Ok(serde_json::to_value(stats)?)
+    }
+
+    /// Check embedding service status (Ollama).
+    /// Returns a human-readable status string.
+    pub fn embedding_status(&self) -> String {
+        // Try to reach Ollama at default address
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build();
+
+        match client {
+            Ok(client) => {
+                match client.get("http://localhost:11434/api/tags").send() {
+                    Ok(resp) if resp.status().is_success() => {
+                        "Ollama: connected ✓".to_string()
+                    }
+                    Ok(resp) => {
+                        format!("Ollama: error (HTTP {})", resp.status())
+                    }
+                    Err(_) => {
+                        "Ollama: not reachable".to_string()
+                    }
+                }
+            }
+            Err(_) => {
+                "Ollama: client error".to_string()
+            }
+        }
     }
     
     /// Explicitly recall memories (for LLM tool use).

@@ -16,7 +16,7 @@ tokio = { version = "1", features = ["full"] }
 
 # HTTP
 axum = "0.8"
-reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
+reqwest = { version = "0.12", features = ["json", "multipart", "stream", "blocking"] }
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }

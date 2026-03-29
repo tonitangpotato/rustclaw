@@ -86,6 +86,7 @@ struct StatusResponse {
 #[derive(Serialize)]
 struct MemoryStats {
     engram_enabled: bool,
+    embedding_status: String,
 }
 
 #[derive(Serialize)]
@@ -232,6 +233,9 @@ async fn get_status(State(state): State<Arc<DashboardState>>) -> impl IntoRespon
     // Get session count from SessionManager
     let active_sessions = state.runner.sessions().count().await;
 
+    // Get embedding status
+    let embedding_status = state.runner.embedding_status();
+
     Json(StatusResponse {
         status: "running".to_string(),
         agent_name: None, // TODO: Get from workspace
@@ -239,6 +243,7 @@ async fn get_status(State(state): State<Arc<DashboardState>>) -> impl IntoRespon
         model: state.config.llm.model.clone(),
         memory: MemoryStats {
             engram_enabled: state.config.memory.auto_recall || state.config.memory.auto_store,
+            embedding_status,
         },
         active_sessions,
     })
@@ -418,7 +423,7 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
         </div>
 
         <!-- Stats Grid -->
-        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+        <div class="grid grid-cols-1 md:grid-cols-5 gap-4 mb-8">
             <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
                 <div class="text-sm text-gray-400 mb-1">Uptime</div>
                 <div id="uptime" class="text-2xl font-mono">--:--:--</div>
@@ -434,6 +439,10 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
             <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
                 <div class="text-sm text-gray-400 mb-1">Agents</div>
                 <div id="agents-count" class="text-2xl font-mono">0</div>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+                <div class="text-sm text-gray-400 mb-1">Embedding</div>
+                <div id="embedding-status" class="text-sm font-mono truncate">Loading...</div>
             </div>
         </div>
 
@@ -532,6 +541,16 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
                 document.getElementById('uptime').textContent = formatUptime(data.uptime_seconds);
                 document.getElementById('model').textContent = data.model;
                 document.getElementById('sessions-count').textContent = data.active_sessions;
+                if (data.memory && data.memory.embedding_status) {
+                    const embeddingEl = document.getElementById('embedding-status');
+                    embeddingEl.textContent = data.memory.embedding_status;
+                    // Color based on status
+                    if (data.memory.embedding_status.includes('✓')) {
+                        embeddingEl.className = 'text-sm font-mono truncate text-green-400';
+                    } else {
+                        embeddingEl.className = 'text-sm font-mono truncate text-yellow-400';
+                    }
+                }
             } catch (e) {
                 document.getElementById('status-text').textContent = 'Error';
                 document.querySelector('.status-dot').className = 'status-dot w-3 h-3 bg-red-500 rounded-full';

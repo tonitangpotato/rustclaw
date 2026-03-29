@@ -19,6 +19,8 @@ use gid_core::{
     advise::{analyze as advise_analyze},
     history::HistoryManager,
     refactor,
+    CodeGraph,
+    unified::build_unified_graph,
 };
 use crate::config::AgentConfig;
 use crate::memory::MemoryManager;
@@ -138,6 +140,10 @@ impl ToolRegistry {
         self.register(Box::new(GidVisualTool::new(graph.clone())));
         self.register(Box::new(GidHistoryTool::new(path.clone())));
         self.register(Box::new(GidRefactorTool::new(graph.clone(), path.clone())));
+
+        // Code graph extraction tools
+        self.register(Box::new(GidExtractTool::new(graph.clone(), path.clone())));
+        self.register(Box::new(GidSchemaTool));
 
         self
     }
@@ -2329,5 +2335,145 @@ impl Tool for GidRefactorTool {
                 is_error: true,
             }),
         }
+    }
+}
+
+// ── gid_extract: extract code graph and merge with task graph ──
+
+struct GidExtractTool {
+    graph: SharedGraph,
+    path: SharedPath,
+}
+
+impl GidExtractTool {
+    fn new(graph: SharedGraph, path: SharedPath) -> Self {
+        Self { graph, path }
+    }
+}
+
+#[async_trait]
+impl Tool for GidExtractTool {
+    fn name(&self) -> &str {
+        "gid_extract"
+    }
+
+    fn description(&self) -> &str {
+        "Extract code structure from a directory and merge into the task graph. Analyzes source files to create nodes for files, classes, and functions."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "dir": {
+                    "type": "string",
+                    "description": "Directory to analyze (default: workspace src/)"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let dir = input["dir"].as_str().unwrap_or("src");
+        let dir_path = std::path::Path::new(dir);
+
+        if !dir_path.exists() {
+            return Ok(ToolResult {
+                output: format!("Directory not found: {}", dir),
+                is_error: true,
+            });
+        }
+
+        // Extract code graph from directory
+        let code_graph = CodeGraph::extract_from_dir(dir_path);
+        let code_nodes = code_graph.nodes.len();
+        let code_edges = code_graph.edges.len();
+
+        // Load existing task graph
+        let mut graph = self.graph.write().await;
+        let existing_nodes = graph.nodes.len();
+        let existing_edges = graph.edges.len();
+
+        // Build unified graph (merges code + task graphs)
+        let unified = build_unified_graph(&code_graph, &graph);
+
+        // Replace the graph with unified version
+        *graph = unified;
+
+        // Save updated graph
+        save_gid_graph(&graph, &self.path)?;
+
+        let new_nodes = graph.nodes.len() - existing_nodes;
+        let new_edges = graph.edges.len() - existing_edges;
+
+        Ok(ToolResult {
+            output: format!(
+                "✅ Code extraction complete:\n  - Analyzed: {} (found {} code nodes, {} edges)\n  - Existing graph: {} nodes, {} edges\n  - New unified: {} nodes, {} edges\n  - Added: {} nodes, {} edges",
+                dir, code_nodes, code_edges,
+                existing_nodes, existing_edges,
+                graph.nodes.len(), graph.edges.len(),
+                new_nodes, new_edges
+            ),
+            is_error: false,
+        })
+    }
+}
+
+// ── gid_schema: get code schema (classes, functions, signatures) ──
+
+struct GidSchemaTool;
+
+#[async_trait]
+impl Tool for GidSchemaTool {
+    fn name(&self) -> &str {
+        "gid_schema"
+    }
+
+    fn description(&self) -> &str {
+        "Extract and return the code schema (classes, functions, signatures) from a directory."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "dir": {
+                    "type": "string",
+                    "description": "Directory to analyze (required)"
+                }
+            },
+            "required": ["dir"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let dir = input["dir"].as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing 'dir' parameter"))?;
+        let dir_path = std::path::Path::new(dir);
+
+        if !dir_path.exists() {
+            return Ok(ToolResult {
+                output: format!("Directory not found: {}", dir),
+                is_error: true,
+            });
+        }
+
+        // Extract code graph from directory
+        let code_graph = CodeGraph::extract_from_dir(dir_path);
+
+        // Get schema (formatted string of classes, functions, signatures)
+        let schema = code_graph.get_schema();
+
+        if schema.is_empty() {
+            return Ok(ToolResult {
+                output: format!("No code structure found in: {}", dir),
+                is_error: false,
+            });
+        }
+
+        Ok(ToolResult {
+            output: schema,
+            is_error: false,
+        })
     }
 }
