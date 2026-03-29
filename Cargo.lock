@@ -649,7 +649,9 @@ dependencies = [
 
 [[package]]
 name = "engramai"
-version = "0.2.1"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f30136c76cff3aa879270b0b346b0058f4c2afd27e05c5809f582f1c6c881f8"
 dependencies = [
  "anyhow",
  "chrono",
@@ -977,6 +979,8 @@ dependencies = [
 [[package]]
 name = "gid-core"
 version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c524f22dfefdcb98b9ef991c31b930c8fd2e03804eef5e08e3b4f91c75e4171"
 dependencies = [
  "anyhow",
  "chrono",

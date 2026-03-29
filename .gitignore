@@ -2,3 +2,11 @@
 rustclaw.yaml
 *.db
 .env
+
+# Runtime data (not source code)
+engram-memory.db*
+sessions.db
+target/
+*.ogg
+*.mp3
+hello.py
