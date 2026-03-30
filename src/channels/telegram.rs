@@ -24,6 +24,7 @@ struct TelegramBot {
     bot_username: String,
     /// Per-chat voice mode state
     voice_mode: Arc<Mutex<HashMap<i64, bool>>>,
+    voice_mode_path: std::path::PathBuf,
 }
 
 impl TelegramBot {
@@ -34,6 +35,18 @@ impl TelegramBot {
         // Fetch bot username via getMe
         let bot_username = Self::fetch_bot_username(&client, &token).await?;
         tracing::info!("Bot username: @{}", bot_username);
+
+        // Load persisted voice mode state
+        let voice_mode_path = std::path::Path::new(&std::env::var("HOME").unwrap_or_default())
+            .join(".rustclaw/voice-mode.json");
+        let voice_mode = if voice_mode_path.exists() {
+            match std::fs::read_to_string(&voice_mode_path) {
+                Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
+                Err(_) => HashMap::new(),
+            }
+        } else {
+            HashMap::new()
+        };
         
         Ok(Self {
             client,
@@ -41,7 +54,8 @@ impl TelegramBot {
             config,
             runner,
             bot_username,
-            voice_mode: Arc::new(Mutex::new(HashMap::new())),
+            voice_mode: Arc::new(Mutex::new(voice_mode)),
+            voice_mode_path,
         })
     }
     
@@ -899,11 +913,19 @@ impl TelegramBot {
         map.get(&chat_id).copied().unwrap_or(false)
     }
 
-    /// Set voice mode for a chat.
+    /// Set voice mode for a chat (persisted to disk).
     async fn set_voice_mode(&self, chat_id: i64, enabled: bool) {
         let mut map = self.voice_mode.lock().await;
-        map.insert(chat_id, enabled);
+        if enabled {
+            map.insert(chat_id, true);
+        } else {
+            map.remove(&chat_id);
+        }
         tracing::info!("Voice mode for chat {}: {}", chat_id, if enabled { "ON" } else { "OFF" });
+        // Persist to disk
+        if let Ok(data) = serde_json::to_string(&*map) {
+            let _ = std::fs::write(&self.voice_mode_path, data);
+        }
     }
 
     fn extract_voice_text(response: &str) -> Option<String> {
