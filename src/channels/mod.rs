@@ -42,15 +42,23 @@ pub async fn start_gateway(
     let mut handles = Vec::new();
     let mut any_channel = false;
 
-    // Start Telegram if configured
+    // Start Telegram if configured (auto-restart on failure)
     if let Some(tg_config) = &config.channels.telegram {
         tracing::info!("Starting Telegram channel...");
         any_channel = true;
         let tg_config = tg_config.clone();
         let runner = runner.clone();
         handles.push(tokio::spawn(async move {
-            if let Err(e) = telegram::start(tg_config, runner).await {
-                tracing::error!("Telegram channel error: {}", e);
+            loop {
+                match telegram::start(tg_config.clone(), runner.clone()).await {
+                    Ok(()) => {
+                        tracing::warn!("Telegram channel exited normally (unexpected). Restarting in 5s...");
+                    }
+                    Err(e) => {
+                        tracing::error!("Telegram channel error: {}. Restarting in 5s...", e);
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
         }));
     }

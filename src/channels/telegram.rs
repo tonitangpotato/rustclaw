@@ -1207,7 +1207,14 @@ impl TelegramBot {
 
             match resp {
                 Ok(r) => {
-                    let body: serde_json::Value = r.json().await?;
+                    let body: serde_json::Value = match r.json().await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            tracing::error!("Failed to parse Telegram response: {}. Retrying in 5s...", e);
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            continue;
+                        }
+                    };
                     if let Some(updates) = body["result"].as_array() {
                         for update in updates {
                             if let Some(id) = update["update_id"].as_i64() {
