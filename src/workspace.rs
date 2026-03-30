@@ -138,6 +138,13 @@ impl Workspace {
              When they ask to stop: call `set_voice_mode` with `enabled: false`.\n\
              When voice mode is ON, the framework converts your text to speech automatically.\n\
              Just reply with normal text — do NOT use tts tools, do NOT prefix with VOICE:.\n\n\
+             ## GID (Graph Indexed Development)\n\
+             GID tracks project architecture, code structure, and tasks as a dependency graph (.gid/graph.yml).\n\
+             - New project: Write DESIGN.md → `gid_design` → `gid_advise` → `gid_tasks`\n\
+             - Existing codebase: `gid_extract` → `gid_read` or `gid_schema`\n\
+             - During dev: `gid_tasks` (check), `gid_update_task` (progress), `gid_complete` (done), `gid_query_impact` (before changes)\n\
+             - Quality: `gid_validate`, `gid_advise`, `gid_visual`\n\
+             - Always use GID for task tracking, never raw markdown lists.\n\n\
              ## Memory Recall\n\
              Before answering questions about prior work, decisions, dates, people, preferences, or todos:\n\
              → Use engram_recall to search cognitive memory first.\n\
@@ -342,7 +349,41 @@ impl Workspace {
                 .to_string(),
         );
 
-        // 6. Memory recall rules
+        // 6. GID workflow guide
+        sections.push(
+            "## GID (Graph Indexed Development) — When & How\n\
+             GID tracks project architecture, code structure, and tasks as a dependency graph.\n\
+             Graph file: `.gid/graph.yml`. Use GID for ALL project/task tracking.\n\n\
+             ### Starting a new project:\n\
+             1. Write a DESIGN.md (architecture, components, dependencies)\n\
+             2. `gid_design` with the design file path → generates graph nodes + tasks\n\
+             3. `gid_advise` → review graph quality, fix issues\n\
+             4. `gid_tasks` → see the task breakdown, start working\n\n\
+             ### Joining an existing codebase:\n\
+             1. `gid_extract` on the source directory → builds code-level nodes (files, classes, functions)\n\
+             2. `gid_read` → understand the full graph structure\n\
+             3. `gid_schema` → quick overview of code architecture without full graph\n\n\
+             ### During development:\n\
+             - `gid_tasks` — check current tasks (filter by status: todo, in_progress, done)\n\
+             - `gid_update_task` — update task status as you work\n\
+             - `gid_complete` — mark done, see what's unblocked\n\
+             - `gid_add_task` / `gid_add_edge` — add new tasks or dependencies discovered during work\n\
+             - `gid_query_impact` — before changing something, check what else is affected\n\
+             - `gid_query_deps` — understand what a task depends on\n\n\
+             ### Quality & maintenance:\n\
+             - `gid_validate` — detect cycles, orphans, broken references\n\
+             - `gid_advise` — get improvement suggestions, recommended task order\n\
+             - `gid_visual` — render graph (ASCII/Mermaid) for overview\n\
+             - `gid_refactor` — rename, merge, or split nodes\n\
+             - `gid_history` — save/restore graph snapshots\n\n\
+             ### Key rules:\n\
+             - Always use GID for task tracking, never raw markdown task lists\n\
+             - After significant work, update task status via `gid_update_task`\n\
+             - Before starting implementation, check `gid_tasks` for ready tasks"
+                .to_string(),
+        );
+
+        // 7. Memory recall rules
         sections.push(
             "## Memory Recall\n\
              Before answering questions about prior work, decisions, dates, people, preferences, or todos:\n\
@@ -352,14 +393,14 @@ impl Workspace {
                 .to_string(),
         );
 
-        // 7. Skills notice
+        // 8. Skills notice
         sections.push(
             "## Skills\n\
              Active skills are loaded from `skills/` directory below. Follow their SKILL.md instructions when the task matches."
                 .to_string(),
         );
 
-        // 8. Workspace files
+        // 9. Workspace files
         let mut ws = String::new();
         if let Some(soul) = &self.soul {
             ws.push_str("\n### SOUL.md\n");
@@ -405,7 +446,7 @@ impl Workspace {
         }
         sections.push(ws);
 
-        // 9. Daily notes (today + yesterday)
+        // 10. Daily notes (today + yesterday)
         let mut daily = String::new();
         let today = Local::now().format("%Y-%m-%d").to_string();
         let yesterday = (Local::now() - chrono::Duration::days(1))
