@@ -32,7 +32,7 @@
 
 ### Dependencies (crates.io)
 - `engramai` v0.2.2 — neuroscience-grounded memory (ACT-R, Hebbian learning)
-- `gid-core` v0.2.1 — graph-indexed project management
+- `gid-core` v0.2.1 — graph-indexed code intelligence + task management
 
 ### Completed Features (all 13 TODOs done, 2026-03-28)
 - ✅ Token Tracking — TokenTracker atomic counters, all providers
@@ -62,7 +62,7 @@
 ## Core Rules
 
 - **NEVER simplify the architecture** — follow the design (potato's explicit rule)
-- Use GID for ALL project/task tracking
+- Use GID for code structure analysis, dependency tracking, impact queries, and task management
 - **NEVER fabricate numbers** — always compute from data
 - Double-write rule: MEMORY.md + daily log + engram for key learnings
 

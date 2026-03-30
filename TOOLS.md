@@ -68,7 +68,12 @@ RustClaw has **built-in voice support** via the `VOICE:` prefix. No external too
 ### GID (Graph Indexed Development)
 - **Built-in**: GID is integrated into RustClaw (gid-core crate)
 - Graph path: `.gid/graph.yml`
-- ALWAYS use GID for project/task tracking — never raw markdown task lists
+- **Core capabilities**:
+  - **Code intelligence**: dependency analysis, impact queries, architecture visualization
+  - **Task management**: status tracking, dependency DAGs, blockers
+  - **Design-to-code**: DESIGN.md → graph → tasks → implementation
+- Use GID for: understanding codebase structure, tracking what depends on what, finding impact of changes, managing tasks with dependencies
+- 39 commands: `gid tasks`, `gid query impact <node>`, `gid query deps <node>`, `gid visual`, `gid analyze`, etc.
 
 ### Dashboard
 - **URL**: http://localhost:8081

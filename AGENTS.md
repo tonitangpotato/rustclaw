@@ -45,7 +45,7 @@ Capture what matters. Decisions, context, things to remember. Skip the secrets u
 
 ### Memory Tools
 - **Engram** (cognitive memory) — SQLite + ACT-R activation. See `TOOLS.md` for commands.
-- **GID** (structured graphs) — Project task tracking.
+- **GID** (structured graphs) — Code intelligence + task tracking. Understands codebase architecture, dependencies, and impact.
 - Engram: fast semantic recall. Daily logs: human-readable timeline. MEMORY.md: curated wisdom.
 
 ### 🔍 Active Recall — USE YOUR MEMORY!
