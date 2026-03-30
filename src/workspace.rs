@@ -441,7 +441,9 @@ impl Workspace {
              → Just prefix your response with `VOICE:` — that's it. Example: `VOICE: Hello world!`\n\
              The framework AUTOMATICALLY converts your text to speech and sends it as a Telegram voice message.\n\
              Do NOT try to use edge-tts, exec, curl, or any tool. Just write `VOICE: your text here`.\n\
-             Only use VOICE: when the user explicitly asks. Otherwise reply with normal text."
+             Only use VOICE: when the user explicitly asks (e.g., '用语音回复', 'reply with voice').\n\
+             Receiving a voice message from the user does NOT mean they want a voice reply.\n\
+             Default to text replies. Never add VOICE: prefix unless explicitly requested."
                 .to_string(),
         );
 

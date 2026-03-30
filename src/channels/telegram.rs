@@ -1010,15 +1010,46 @@ impl TelegramBot {
         // Step 4: Process through agent with [Voice message] prefix
         let user_message = format!("[Voice message] {}", transcription);
         let session_key = format!("telegram:{}", chat_id);
-        let user_id_str = user_id.to_string();
+
+        let msg_ctx = crate::context::MessageContext {
+            sender_id: Some(user_id.to_string()),
+            chat_type: crate::context::ChatType::Direct,
+            ..Default::default()
+        };
 
         match self
             .runner
-            .process_message(&session_key, &user_message, Some(&user_id_str), Some("telegram"))
+            .process_message_with_context(&session_key, &user_message, &msg_ctx, false)
             .await
         {
             Ok(response) => {
-                self.send_response(chat_id, &response, reply_to).await?;
+                if response.is_silent {
+                    return Ok(());
+                }
+                // Only use voice if VOICE: prefix OR voice mode is ON
+                // Receiving a voice message does NOT auto-trigger voice reply
+                let use_voice = response.voice_text.is_some()
+                    || self.is_voice_mode(chat_id).await;
+                let effective_reply = response.reply_to.or(reply_to);
+
+                if use_voice {
+                    let voice_text = response.voice_text.as_ref().unwrap_or(&response.text);
+                    let tts_config = crate::tts::TtsConfig::default();
+                    match crate::tts::synthesize(voice_text, &tts_config).await {
+                        Ok(ogg_path) => {
+                            if let Err(e) = self.send_voice(chat_id, &ogg_path).await {
+                                tracing::error!("Voice send failed: {}", e);
+                                self.send_message(chat_id, &response.text, effective_reply).await?;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("TTS failed: {}", e);
+                            self.send_message(chat_id, &response.text, effective_reply).await?;
+                        }
+                    }
+                } else {
+                    self.send_message(chat_id, &response.text, effective_reply).await?;
+                }
             }
             Err(e) => {
                 tracing::error!("Agent error: {}", e);

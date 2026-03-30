@@ -52,12 +52,34 @@
 - Problem: SOUL.md in Chinese → keyword matching fails for English content
 - Solution: `score_alignment_hybrid()` = max(keyword, embedding) in engramai
 - DriveEmbeddings pre-computed at startup, threshold 0.3 for cross-language
-- Commits: engramai `50ceb93`, RustClaw `97e5e3e`
 
-### E2E Testing (2026-03-29)
-- Comprehensive e2e test in `src/memory.rs` mod `e2e_tests`
-- 8 sub-tests covering full memory pipeline
-- Total: 130→140 tests across development
+### Context System Refactor (2026-03-29, biggest change)
+- **src/context.rs** — 6 new types: MessageContext, ChatType, QuotedMessage, ChannelCapabilities, RuntimeContext, ProcessedResponse
+- **MessageContext** — LLM sees sender name/username, chat type (direct/group), quoted messages
+- **ChannelCapabilities** — channels declare what they support (voice, tables, markdown, etc.), LLM adapts output format
+- **RuntimeContext** — OS, arch, version, hostname injected into system prompt
+- **ProcessedResponse** — unified extraction of VOICE:, NO_REPLY, [[reply_to:N]] from raw LLM output
+- **Modular system prompt** — broke monolithic format! into 10 composable sections
+- **Yesterday's daily notes** — system prompt now loads yesterday's log too
+
+### Skill System (2026-03-29)
+- **Skills auto-loading** — scans `skills/*/SKILL.md`, injects into system prompt
+- **Dynamic trigger matching** — YAML frontmatter with triggers, priority, always_load
+- **Idea Intake Pipeline** — first skill: processes URLs/ideas into IDEAS.md + engram + GID
+
+### Bug Fixes (2026-03-29)
+- **fd leak** — notify kqueue→fsevent, config watcher watches file not directory
+- **FTS5 corruption** — rebuilt full-text search index in engram DB
+- **block_in_place** — OAuth token refresh in async context panic fix
+- **whisper.cpp** — Python whisper→whisper-cli, 3x faster STT (32s→11s)
+
+### Behavior Improvements (2026-03-29)
+- Persistent typing indicator (refresh every 4s)
+- Unified send_response (voice/text logic consolidated)
+- Voice mode toggle per chat
+- "Acknowledge before working" rule in system prompt + AGENTS.md
+
+### Test Count: 166 (up from 140)
 
 ## Core Rules
 
@@ -66,4 +88,9 @@
 - **NEVER fabricate numbers** — always compute from data
 - Double-write rule: MEMORY.md + daily log + engram for key learnings
 
-*Last updated: 2026-03-29*
+### Architecture Notes
+- **context.rs** is the new "structured metadata" layer between channels and the agent
+- System prompt is modular: context files → skills → channel caps → runtime → behavior rules
+- Skills are markdown-based workflows with YAML frontmatter triggers — no Rust code needed
+
+*Last updated: 2026-03-29 (evening refactor)*
