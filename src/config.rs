@@ -106,6 +106,16 @@ pub struct Config {
     /// Safety layer configuration.
     #[serde(default)]
     pub safety: crate::safety::SafetyConfig,
+
+    /// Web search configuration.
+    #[serde(default)]
+    pub web_search: WebSearchConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WebSearchConfig {
+    /// Brave Search API key (get from https://api.search.brave.com/)
+    pub brave_api_key: Option<String>,
 }
 
 fn default_max_session_messages() -> usize {

@@ -147,6 +147,10 @@ impl<'a> Matcher<'a> {
 
     /// Score a single skill against input.
     /// Returns (final_score, matched_triggers).
+    ///
+    /// Trigger types are OR-based: if ANY type matches, the skill is included.
+    /// The score is the average of matched trigger type scores (unmatched types
+    /// don't dilute the score).
     fn score_skill(
         &self,
         skill: &'a Skill,
@@ -155,19 +159,16 @@ impl<'a> Matcher<'a> {
     ) -> (f64, Vec<TriggerMatch>) {
         let triggers = &skill.metadata.triggers;
         let mut matches = Vec::new();
-        let mut raw_score = 0.0;
-        let mut max_possible = 0.0;
+        let mut type_scores: Vec<f64> = Vec::new();
 
-        // Pattern matching (0.0-0.3 per pattern)
+        // Pattern matching (score per type: 0.0-1.0)
         if !triggers.patterns.is_empty() {
-            max_possible += 0.3;
             let mut best_pattern_score = 0.0;
             for pattern in &triggers.patterns {
                 let pattern_lower = pattern.to_lowercase();
                 if input_lower.contains(&pattern_lower) {
-                    // Score based on how much of the input the pattern covers
                     let coverage = pattern.len() as f64 / input.len().max(1) as f64;
-                    let score = 0.3 * coverage.min(1.0).max(0.3); // minimum 0.09 for any match
+                    let score = coverage.min(1.0).max(0.3); // minimum 0.3 for any match
 
                     if score > best_pattern_score {
                         best_pattern_score = score;
@@ -180,12 +181,13 @@ impl<'a> Matcher<'a> {
                     });
                 }
             }
-            raw_score += best_pattern_score;
+            if best_pattern_score > 0.0 {
+                type_scores.push(best_pattern_score);
+            }
         }
 
-        // Keyword matching (0.0-0.4 per keyword set)
+        // Keyword matching (score per type: 0.0-1.0)
         if !triggers.keywords.is_empty() {
-            max_possible += 0.4;
             let mut keyword_matches = 0;
             for keyword in &triggers.keywords {
                 let keyword_lower = keyword.to_lowercase();
@@ -199,15 +201,13 @@ impl<'a> Matcher<'a> {
                 }
             }
             if keyword_matches > 0 {
-                // More keyword matches = higher score
                 let ratio = keyword_matches as f64 / triggers.keywords.len() as f64;
-                raw_score += 0.4 * ratio.min(1.0).max(0.2);
+                type_scores.push(ratio.min(1.0).max(0.2));
             }
         }
 
-        // Regex matching (0.0-0.3 per regex set)
+        // Regex matching (score per type: 0.0-1.0)
         if !triggers.regex.is_empty() {
-            max_possible += 0.3;
             let mut regex_matched = false;
             for pattern in &triggers.regex {
                 if let Some(re) = self.compiled_regex.get(pattern) {
@@ -222,17 +222,16 @@ impl<'a> Matcher<'a> {
                 }
             }
             if regex_matched {
-                raw_score += 0.3;
+                type_scores.push(1.0);
             }
         }
 
-        // Glob matching (0.0-0.2 per glob set)
+        // Glob matching (score per type: 0.0-1.0)
         if !triggers.globs.is_empty() {
-            max_possible += 0.2;
             for glob_pat in &triggers.globs {
                 if let Ok(pattern) = glob::Pattern::new(glob_pat) {
                     if pattern.matches(input) || pattern.matches(input_lower) {
-                        raw_score += 0.2;
+                        type_scores.push(1.0);
                         matches.push(TriggerMatch {
                             trigger_type: TriggerType::Glob,
                             trigger: glob_pat.clone(),
@@ -244,11 +243,11 @@ impl<'a> Matcher<'a> {
             }
         }
 
-        // Normalize raw score by what's possible
-        let normalized = if max_possible > 0.0 {
-            (raw_score / max_possible).min(1.0)
-        } else {
+        // Normalize: average of matched type scores (unmatched types don't dilute)
+        let normalized = if type_scores.is_empty() {
             0.0
+        } else {
+            type_scores.iter().sum::<f64>() / type_scores.len() as f64
         };
 
         // Apply priority weighting (priority 0-100 → 0.5-1.0 multiplier)
@@ -376,9 +375,7 @@ impl<'a> Matcher<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{SkillMetadata, SkillStatus, TriggerConfig};
     use std::fs;
-    use std::path::PathBuf;
     use tempfile::TempDir;
 
     fn create_test_skill(dir: &std::path::Path, name: &str, content: &str) {
@@ -582,7 +579,7 @@ mod tests {
 
         // High threshold
         let matcher = Matcher::new(&registry).with_min_score(0.9);
-        let results = matcher.match_input("something obscure here");
+        let _results = matcher.match_input("something obscure here");
         // Might not meet the high threshold
         // (depends on exact scoring, but low priority + single keyword = low score)
     }

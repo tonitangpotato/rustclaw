@@ -11,113 +11,18 @@
 //! - BOOTSTRAP.md — first-run setup
 
 use chrono::Local;
+use skills_manager::{Matcher as SkillMatcher, SkillRegistry};
 use std::path::{Path, PathBuf};
 
-/// Metadata parsed from SKILL.md frontmatter.
+/// A matched skill ready for system prompt injection.
 #[derive(Debug, Clone)]
-pub struct SkillMetadata {
-    pub name: String,
-    pub description: String,
-    pub triggers: Vec<String>,
-    pub priority: u8,
-    pub always_load: bool,
+pub struct MatchedSkill {
+    /// Directory name (or skill name if no source path).
+    pub dir_name: String,
+    /// Prompt content (markdown body without frontmatter).
+    pub content: String,
+    /// Maximum bytes to inject into prompt.
     pub max_context_bytes: usize,
-}
-
-impl Default for SkillMetadata {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            description: String::new(),
-            triggers: Vec::new(),
-            priority: 100,
-            always_load: false,
-            max_context_bytes: 4096,
-        }
-    }
-}
-
-/// Parse YAML frontmatter from a SKILL.md file.
-///
-/// Frontmatter is delimited by `---` at the start of the file.
-/// Returns (metadata, content_without_frontmatter).
-/// If no frontmatter is found, returns defaults and the full content.
-pub fn parse_skill_frontmatter(content: &str, fallback_name: &str) -> (SkillMetadata, String) {
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
-        return (
-            SkillMetadata {
-                name: fallback_name.to_string(),
-                ..Default::default()
-            },
-            content.to_string(),
-        );
-    }
-
-    // Find the closing ---
-    let after_first = &trimmed[3..];
-    // Skip the newline after the opening ---
-    let after_first = after_first.strip_prefix('\n').or_else(|| after_first.strip_prefix("\r\n")).unwrap_or(after_first);
-
-    let Some(end_idx) = after_first.find("\n---") else {
-        // No closing delimiter — treat entire content as body (no frontmatter)
-        return (
-            SkillMetadata {
-                name: fallback_name.to_string(),
-                ..Default::default()
-            },
-            content.to_string(),
-        );
-    };
-
-    let yaml_str = &after_first[..end_idx];
-    let rest_start = end_idx + 4; // skip \n---
-    let body = if rest_start < after_first.len() {
-        let rest = &after_first[rest_start..];
-        // Strip leading newline from body
-        rest.strip_prefix('\n')
-            .or_else(|| rest.strip_prefix("\r\n"))
-            .unwrap_or(rest)
-    } else {
-        ""
-    };
-
-    let mut meta = SkillMetadata {
-        name: fallback_name.to_string(),
-        ..Default::default()
-    };
-
-    // Simple YAML parsing — no serde_yaml dependency needed
-    for line in yaml_str.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        if let Some(val) = line.strip_prefix("name:") {
-            meta.name = val.trim().to_string();
-        } else if let Some(val) = line.strip_prefix("description:") {
-            meta.description = val.trim().to_string();
-        } else if let Some(val) = line.strip_prefix("priority:") {
-            if let Ok(p) = val.trim().parse::<u8>() {
-                meta.priority = p;
-            }
-        } else if let Some(val) = line.strip_prefix("always_load:") {
-            meta.always_load = val.trim() == "true";
-        } else if let Some(val) = line.strip_prefix("max_context_bytes:") {
-            if let Ok(n) = val.trim().parse::<usize>() {
-                meta.max_context_bytes = n;
-            }
-        } else if line.starts_with("triggers:") {
-            // triggers is a YAML list — parsed from subsequent `  - value` lines
-            // handled below
-        } else if let Some(val) = line.strip_prefix("- ") {
-            // This is a list item — belongs to the last list key (triggers)
-            meta.triggers.push(val.trim().to_string());
-        }
-    }
-
-    (meta, body.to_string())
 }
 
 /// Workspace context loaded from markdown files.
@@ -134,8 +39,8 @@ pub struct Workspace {
     pub bootstrap: Option<String>,
     /// Current LLM model name (set after construction).
     pub model: Option<String>,
-    /// Loaded skills from skills/*/SKILL.md: (dir_name, content_without_frontmatter, metadata)
-    pub skills: Vec<(String, String, SkillMetadata)>,
+    /// Skill registry loaded from skills/ directory.
+    pub skill_registry: SkillRegistry,
 }
 
 impl Workspace {
@@ -143,25 +48,16 @@ impl Workspace {
     pub fn load(dir: &str) -> anyhow::Result<Self> {
         let root = Path::new(dir).to_path_buf();
 
-        // Load skills from skills/ directory, parsing frontmatter metadata
-        let mut skills = Vec::new();
+        // Load skills from skills/ directory using skills-manager registry
         let skills_dir = root.join("skills");
-        if skills_dir.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&skills_dir) {
-                let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-                entries.sort_by_key(|e| e.file_name());
-                for entry in entries {
-                    if entry.path().is_dir() {
-                        let skill_file = entry.path().join("SKILL.md");
-                        if let Ok(content) = std::fs::read_to_string(&skill_file) {
-                            let dir_name = entry.file_name().to_string_lossy().to_string();
-                            let (metadata, body) = parse_skill_frontmatter(&content, &dir_name);
-                            skills.push((dir_name, body, metadata));
-                        }
-                    }
-                }
-            }
-        }
+        let skill_registry = if skills_dir.is_dir() {
+            SkillRegistry::load(&skills_dir).unwrap_or_else(|e| {
+                tracing::warn!("Failed to load skills registry: {}", e);
+                SkillRegistry::empty()
+            })
+        } else {
+            SkillRegistry::empty()
+        };
 
         Ok(Self {
             soul: Self::read_optional(&root, "SOUL.md"),
@@ -173,7 +69,7 @@ impl Workspace {
             identity: Self::read_optional(&root, "IDENTITY.md"),
             bootstrap: Self::read_optional(&root, "BOOTSTRAP.md"),
             model: None,
-            skills,
+            skill_registry,
             root,
         })
     }
@@ -321,14 +217,14 @@ impl Workspace {
         if !matched_skills.is_empty() {
             output.push_str("\n## Active Skills\n");
             output.push_str("These skills define automated workflows. Follow them when trigger conditions match.\n\n");
-            for (name, content, meta) in &matched_skills {
-                output.push_str(&format!("### skills/{}/SKILL.md\n", name));
-                let max_bytes = meta.max_context_bytes;
-                if content.len() > max_bytes {
-                    output.push_str(crate::text_utils::truncate_bytes(content, max_bytes));
+            for skill in &matched_skills {
+                output.push_str(&format!("### skills/{}/SKILL.md\n", skill.dir_name));
+                let max_bytes = skill.max_context_bytes;
+                if skill.content.len() > max_bytes {
+                    output.push_str(crate::text_utils::truncate_bytes(&skill.content, max_bytes));
                     output.push_str("\n...(truncated)...\n");
                 } else {
-                    output.push_str(content);
+                    output.push_str(&skill.content);
                 }
                 output.push_str("\n\n");
             }
@@ -337,34 +233,37 @@ impl Workspace {
         output
     }
 
-    /// Match skills against a user message. Returns matched skills sorted by priority.
+    /// Match skills against a user message using skills-manager's Matcher.
     ///
     /// - Skills with `always_load: true` are always included.
-    /// - Otherwise, checks if any trigger keyword appears in the message (case-insensitive substring).
-    /// - Results are sorted by priority (lower = higher priority).
-    /// - Returns at most `max_skills` results.
-    pub fn match_skills(&self, user_message: &str, max_skills: usize) -> Vec<(String, String, SkillMetadata)> {
-        let msg_lower = user_message.to_lowercase();
+    /// - Trigger matching supports patterns, keywords, regex, and globs.
+    /// - Results are sorted by score (highest first), then truncated to `max_skills`.
+    pub fn match_skills(&self, user_message: &str, max_skills: usize) -> Vec<MatchedSkill> {
+        let matcher = SkillMatcher::new(&self.skill_registry);
+        let (matched, always) = matcher.match_with_always_load(user_message);
 
-        let mut matched: Vec<(String, String, SkillMetadata)> = self
-            .skills
-            .iter()
-            .filter(|(_, _, meta)| {
-                if meta.always_load {
-                    return true;
-                }
-                meta.triggers.iter().any(|trigger| {
-                    msg_lower.contains(&trigger.to_lowercase())
-                })
-            })
-            .cloned()
-            .collect();
+        let mut results: Vec<MatchedSkill> = Vec::new();
 
-        // Sort by priority (lower number = higher priority)
-        matched.sort_by_key(|(_, _, meta)| meta.priority);
+        // Add always-load skills first (sorted by priority descending in skills-manager)
+        for skill in &always {
+            results.push(MatchedSkill {
+                dir_name: skill.dir_name().unwrap_or(skill.name()).to_string(),
+                content: skill.prompt_content().to_string(),
+                max_context_bytes: skill.metadata.max_body_size,
+            });
+        }
 
-        matched.truncate(max_skills);
-        matched
+        // Add matched skills (already sorted by score descending from Matcher)
+        for m in &matched {
+            results.push(MatchedSkill {
+                dir_name: m.skill.dir_name().unwrap_or(m.skill.name()).to_string(),
+                content: m.skill.prompt_content().to_string(),
+                max_context_bytes: m.skill.metadata.max_body_size,
+            });
+        }
+
+        results.truncate(max_skills);
+        results
     }
 
     /// Build system prompt with full context (runtime, channel, etc.).
@@ -530,15 +429,15 @@ impl Workspace {
         let matched_skills = self.match_skills(user_message.unwrap_or(""), 5);
         if !matched_skills.is_empty() {
             let mut skills_section = "## Active Skills\nThese skills define automated workflows. Follow them when trigger conditions match.\n\n".to_string();
-            for (name, content, meta) in &matched_skills {
-                skills_section.push_str(&format!("### skills/{}/SKILL.md\n", name));
-                let max_bytes = meta.max_context_bytes;
-                if content.len() > max_bytes {
+            for skill in &matched_skills {
+                skills_section.push_str(&format!("### skills/{}/SKILL.md\n", skill.dir_name));
+                let max_bytes = skill.max_context_bytes;
+                if skill.content.len() > max_bytes {
                     skills_section
-                        .push_str(crate::text_utils::truncate_bytes(content, max_bytes));
+                        .push_str(crate::text_utils::truncate_bytes(&skill.content, max_bytes));
                     skills_section.push_str("\n...(truncated)...\n");
                 } else {
-                    skills_section.push_str(content);
+                    skills_section.push_str(&skill.content);
                 }
                 skills_section.push_str("\n\n");
             }
@@ -563,104 +462,49 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
-    // ── parse_skill_frontmatter tests ──────────────────────────────
+    // ── Helper: create a skill directory with a SKILL.md ───────────
 
-    #[test]
-    fn test_parse_frontmatter_valid() {
-        let content = r#"---
-name: Test Skill
-description: A test skill for unit testing
-triggers:
-  - hello
-  - world
-  - https://
-priority: 42
-always_load: false
-max_context_bytes: 2048
----
-# Body Content
-
-This is the skill body.
-"#;
-        let (meta, body) = parse_skill_frontmatter(content, "fallback");
-        assert_eq!(meta.name, "Test Skill");
-        assert_eq!(meta.description, "A test skill for unit testing");
-        assert_eq!(meta.triggers, vec!["hello", "world", "https://"]);
-        assert_eq!(meta.priority, 42);
-        assert!(!meta.always_load);
-        assert_eq!(meta.max_context_bytes, 2048);
-        assert!(body.starts_with("# Body Content"));
-        assert!(body.contains("This is the skill body."));
+    fn create_skill_file(skills_dir: &Path, dir_name: &str, content: &str) {
+        let skill_dir = skills_dir.join(dir_name);
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), content).unwrap();
     }
 
-    #[test]
-    fn test_parse_frontmatter_none() {
-        let content = "# Just a Skill\n\nNo frontmatter here.\n";
-        let (meta, body) = parse_skill_frontmatter(content, "my-skill");
-        assert_eq!(meta.name, "my-skill");
-        assert!(meta.description.is_empty());
-        assert!(meta.triggers.is_empty());
-        assert_eq!(meta.priority, 100);
-        assert!(!meta.always_load);
-        assert_eq!(meta.max_context_bytes, 4096);
-        assert_eq!(body, content);
+    fn make_skill_content(
+        name: &str,
+        patterns: &[&str],
+        priority: u8,
+        always_load: bool,
+    ) -> String {
+        let patterns_yaml = if patterns.is_empty() {
+            String::new()
+        } else {
+            let items: Vec<String> = patterns
+                .iter()
+                .map(|p| format!("    - \"{}\"", p))
+                .collect();
+            format!("triggers:\n  patterns:\n{}\n", items.join("\n"))
+        };
+
+        format!(
+            "---\nname: {name}\ndescription: Desc for {name}\n{patterns_yaml}priority: {priority}\nalways_load: {always_load}\n---\n\n# Skill: {name}\n",
+        )
     }
 
-    #[test]
-    fn test_parse_frontmatter_partial() {
-        let content = r#"---
-name: Partial Skill
-priority: 10
----
-Body here.
-"#;
-        let (meta, body) = parse_skill_frontmatter(content, "fallback");
-        assert_eq!(meta.name, "Partial Skill");
-        assert!(meta.description.is_empty());
-        assert!(meta.triggers.is_empty());
-        assert_eq!(meta.priority, 10);
-        assert!(!meta.always_load);
-        assert_eq!(meta.max_context_bytes, 4096);
-        assert_eq!(body.trim(), "Body here.");
-    }
+    fn make_workspace_with_skills(skills: Vec<(&str, &[&str], u8, bool)>) -> (tempfile::TempDir, Workspace) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let skills_dir = tmp.path().join("skills");
+        fs::create_dir_all(&skills_dir).unwrap();
 
-    #[test]
-    fn test_parse_frontmatter_always_load() {
-        let content = r#"---
-name: Always On
-always_load: true
----
-Content.
-"#;
-        let (meta, body) = parse_skill_frontmatter(content, "fallback");
-        assert_eq!(meta.name, "Always On");
-        assert!(meta.always_load);
-        assert_eq!(body.trim(), "Content.");
-    }
+        for (name, patterns, priority, always_load) in &skills {
+            let content = make_skill_content(name, patterns, *priority, *always_load);
+            create_skill_file(&skills_dir, name, &content);
+        }
 
-    #[test]
-    fn test_parse_frontmatter_no_closing_delimiter() {
-        let content = "---\nname: Broken\npriority: 5\n";
-        let (meta, body) = parse_skill_frontmatter(content, "fallback");
-        // No closing --- → treated as no frontmatter
-        assert_eq!(meta.name, "fallback");
-        assert_eq!(body, content);
-    }
-
-    #[test]
-    fn test_parse_frontmatter_empty_body() {
-        let content = "---\nname: No Body\n---\n";
-        let (meta, body) = parse_skill_frontmatter(content, "fallback");
-        assert_eq!(meta.name, "No Body");
-        assert!(body.is_empty() || body.trim().is_empty());
-    }
-
-    // ── Helper: build a test Workspace with skills ─────────────────
-
-    fn make_workspace(skills: Vec<(String, String, SkillMetadata)>) -> Workspace {
-        Workspace {
-            root: PathBuf::from("/tmp/test-workspace"),
+        let ws = Workspace {
+            root: tmp.path().to_path_buf(),
             soul: None,
             agents: None,
             user: None,
@@ -670,44 +514,31 @@ Content.
             identity: None,
             bootstrap: None,
             model: None,
-            skills,
-        }
-    }
+            skill_registry: SkillRegistry::load(&skills_dir).unwrap(),
+        };
 
-    fn make_skill(name: &str, triggers: &[&str], priority: u8, always_load: bool) -> (String, String, SkillMetadata) {
-        (
-            name.to_string(),
-            format!("# Skill: {}", name),
-            SkillMetadata {
-                name: name.to_string(),
-                description: format!("Desc for {}", name),
-                triggers: triggers.iter().map(|s| s.to_string()).collect(),
-                priority,
-                always_load,
-                max_context_bytes: 4096,
-            },
-        )
+        (tmp, ws)
     }
 
     // ── match_skills tests ─────────────────────────────────────────
 
     #[test]
     fn test_match_skills_trigger_hit() {
-        let ws = make_workspace(vec![
-            make_skill("idea-intake", &["http://", "https://", "idea:"], 50, false),
-            make_skill("code-review", &["review", "pr", "diff"], 60, false),
+        let (_tmp, ws) = make_workspace_with_skills(vec![
+            ("idea-intake", &["http://", "https://", "idea:"], 50, false),
+            ("code-review", &["review", "pr", "diff"], 60, false),
         ]);
 
         let matched = ws.match_skills("check out https://example.com", 5);
         assert_eq!(matched.len(), 1);
-        assert_eq!(matched[0].2.name, "idea-intake");
+        assert_eq!(matched[0].dir_name, "idea-intake");
     }
 
     #[test]
     fn test_match_skills_no_match() {
-        let ws = make_workspace(vec![
-            make_skill("idea-intake", &["http://", "https://", "idea:"], 50, false),
-            make_skill("code-review", &["review", "pr", "diff"], 60, false),
+        let (_tmp, ws) = make_workspace_with_skills(vec![
+            ("idea-intake", &["http://", "https://", "idea:"], 50, false),
+            ("code-review", &["review", "pr", "diff"], 60, false),
         ]);
 
         let matched = ws.match_skills("what is the weather today?", 5);
@@ -716,67 +547,49 @@ Content.
 
     #[test]
     fn test_match_skills_always_load() {
-        let ws = make_workspace(vec![
-            make_skill("core-rules", &[], 10, true),
-            make_skill("idea-intake", &["http://"], 50, false),
+        let (_tmp, ws) = make_workspace_with_skills(vec![
+            ("core-rules", &[], 10, true),
+            ("idea-intake", &["http://"], 50, false),
         ]);
 
         // Even with no matching triggers, always_load skill is included
         let matched = ws.match_skills("random message", 5);
         assert_eq!(matched.len(), 1);
-        assert_eq!(matched[0].2.name, "core-rules");
+        assert_eq!(matched[0].dir_name, "core-rules");
     }
 
     #[test]
     fn test_match_skills_always_load_plus_trigger() {
-        let ws = make_workspace(vec![
-            make_skill("core-rules", &[], 10, true),
-            make_skill("idea-intake", &["http://"], 50, false),
+        let (_tmp, ws) = make_workspace_with_skills(vec![
+            ("core-rules", &[], 10, true),
+            ("idea-intake", &["http://"], 50, false),
         ]);
 
         let matched = ws.match_skills("look at http://example.com", 5);
         assert_eq!(matched.len(), 2);
-        // Sorted by priority: core-rules (10) before idea-intake (50)
-        assert_eq!(matched[0].2.name, "core-rules");
-        assert_eq!(matched[1].2.name, "idea-intake");
-    }
-
-    #[test]
-    fn test_match_skills_priority_sorting() {
-        let ws = make_workspace(vec![
-            make_skill("low-prio", &["test"], 200, false),
-            make_skill("high-prio", &["test"], 10, false),
-            make_skill("med-prio", &["test"], 100, false),
-        ]);
-
-        let matched = ws.match_skills("this is a test", 5);
-        assert_eq!(matched.len(), 3);
-        assert_eq!(matched[0].2.name, "high-prio");
-        assert_eq!(matched[1].2.name, "med-prio");
-        assert_eq!(matched[2].2.name, "low-prio");
+        // always-load comes first, then triggered
+        assert_eq!(matched[0].dir_name, "core-rules");
+        assert_eq!(matched[1].dir_name, "idea-intake");
     }
 
     #[test]
     fn test_match_skills_max_limit() {
-        let ws = make_workspace(vec![
-            make_skill("skill-a", &["test"], 10, false),
-            make_skill("skill-b", &["test"], 20, false),
-            make_skill("skill-c", &["test"], 30, false),
-            make_skill("skill-d", &["test"], 40, false),
-            make_skill("skill-e", &["test"], 50, false),
+        let (_tmp, ws) = make_workspace_with_skills(vec![
+            ("skill-a", &["test"], 80, false),
+            ("skill-b", &["test"], 70, false),
+            ("skill-c", &["test"], 60, false),
+            ("skill-d", &["test"], 50, false),
+            ("skill-e", &["test"], 40, false),
         ]);
 
         let matched = ws.match_skills("test message", 3);
         assert_eq!(matched.len(), 3);
-        assert_eq!(matched[0].2.name, "skill-a");
-        assert_eq!(matched[1].2.name, "skill-b");
-        assert_eq!(matched[2].2.name, "skill-c");
     }
 
     #[test]
     fn test_match_skills_case_insensitive() {
-        let ws = make_workspace(vec![
-            make_skill("idea-intake", &["HTTPS://", "Idea:"], 50, false),
+        let (_tmp, ws) = make_workspace_with_skills(vec![
+            ("idea-intake", &["HTTPS://", "Idea:"], 50, false),
         ]);
 
         let matched = ws.match_skills("check https://example.com", 5);
@@ -788,8 +601,8 @@ Content.
 
     #[test]
     fn test_match_skills_chinese_triggers() {
-        let ws = make_workspace(vec![
-            make_skill("idea-intake", &["想法:", "记录一下"], 50, false),
+        let (_tmp, ws) = make_workspace_with_skills(vec![
+            ("idea-intake", &["想法:", "记录一下"], 50, false),
         ]);
 
         let matched = ws.match_skills("想法: 做一个新项目", 5);
@@ -801,13 +614,76 @@ Content.
 
     #[test]
     fn test_match_skills_empty_message() {
-        let ws = make_workspace(vec![
-            make_skill("always", &[], 10, true),
-            make_skill("triggered", &["hello"], 50, false),
+        let (_tmp, ws) = make_workspace_with_skills(vec![
+            ("always", &[], 10, true),
+            ("triggered", &["hello"], 50, false),
         ]);
 
         let matched = ws.match_skills("", 5);
         assert_eq!(matched.len(), 1);
-        assert_eq!(matched[0].2.name, "always");
+        assert_eq!(matched[0].dir_name, "always");
+    }
+
+    #[test]
+    fn test_match_skills_empty_registry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = Workspace {
+            root: tmp.path().to_path_buf(),
+            soul: None,
+            agents: None,
+            user: None,
+            tools: None,
+            heartbeat: None,
+            memory: None,
+            identity: None,
+            bootstrap: None,
+            model: None,
+            skill_registry: SkillRegistry::empty(),
+        };
+
+        let matched = ws.match_skills("anything", 5);
+        assert!(matched.is_empty());
+    }
+
+    #[test]
+    fn test_match_skills_content_included() {
+        let (_tmp, ws) = make_workspace_with_skills(vec![
+            ("my-skill", &["trigger"], 50, false),
+        ]);
+
+        let matched = ws.match_skills("trigger this", 5);
+        assert_eq!(matched.len(), 1);
+        assert!(matched[0].content.contains("# Skill: my-skill"));
+    }
+
+    #[test]
+    fn test_match_skills_regex_triggers() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let skills_dir = tmp.path().join("skills");
+        fs::create_dir_all(&skills_dir).unwrap();
+
+        create_skill_file(
+            &skills_dir,
+            "url-detect",
+            "---\nname: url-detect\ndescription: Detect URLs\ntriggers:\n  regex:\n    - \"https?://[^\\\\s]+\"\npriority: 80\n---\n\n# URL Detection\n",
+        );
+
+        let ws = Workspace {
+            root: tmp.path().to_path_buf(),
+            soul: None,
+            agents: None,
+            user: None,
+            tools: None,
+            heartbeat: None,
+            memory: None,
+            identity: None,
+            bootstrap: None,
+            model: None,
+            skill_registry: SkillRegistry::load(&skills_dir).unwrap(),
+        };
+
+        let matched = ws.match_skills("visit http://example.com/path?q=1", 5);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].dir_name, "url-detect");
     }
 }

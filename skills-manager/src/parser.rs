@@ -103,6 +103,7 @@ impl Parser {
             metadata,
             body,
             source_path: None,
+            is_legacy: false,
         })
     }
 
@@ -149,6 +150,7 @@ impl Parser {
             },
             body: content.to_string(),
             source_path: None,
+            is_legacy: true,
         }
     }
 

@@ -1,6 +1,6 @@
 //! Integration tests for skills-manager.
 
-use skills_manager::{Matcher, Parser, Skill, SkillRegistry};
+use skills_manager::{Matcher, Parser, SkillRegistry};
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;

@@ -18,6 +18,9 @@ pub struct Skill {
     /// Source file path (if loaded from disk).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_path: Option<PathBuf>,
+    /// Whether this skill was parsed from legacy format (no frontmatter).
+    #[serde(skip)]
+    pub is_legacy: bool,
 }
 
 impl Skill {
@@ -449,6 +452,7 @@ max_body_size: 8192
             },
             body: "# Test Skill\nSome content.".to_string(),
             source_path: Some(PathBuf::from("/skills/test-skill/SKILL.md")),
+            is_legacy: false,
         };
 
         assert_eq!(skill.name(), "test-skill");

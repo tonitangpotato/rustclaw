@@ -64,7 +64,7 @@ impl ToolRegistry {
     }
 
     /// Register all default tools.
-    pub fn with_defaults(workspace_root: &str) -> Self {
+    pub fn with_defaults(workspace_root: &str, config: &crate::config::Config) -> Self {
         let mut registry = Self::new();
         registry.register(Box::new(ExecTool));
         registry.register(Box::new(ReadFileTool::new(workspace_root)));
@@ -73,6 +73,10 @@ impl ToolRegistry {
         registry.register(Box::new(WebFetchTool));
         registry.register(Box::new(EditFileTool::new(workspace_root)));
         registry.register(Box::new(SearchFilesTool::new(workspace_root)));
+        // Web search (requires Brave API key)
+        if let Some(key) = &config.web_search.brave_api_key {
+            registry.register(Box::new(WebSearchTool::new(key.clone())));
+        }
         registry
     }
 
@@ -105,8 +109,8 @@ impl ToolRegistry {
     }
     
     /// Register all default tools including memory tools.
-    pub fn with_defaults_and_memory(workspace_root: &str, memory: Arc<MemoryManager>) -> Self {
-        let mut registry = Self::with_defaults(workspace_root);
+    pub fn with_defaults_and_memory(workspace_root: &str, memory: Arc<MemoryManager>, config: &crate::config::Config) -> Self {
+        let mut registry = Self::with_defaults(workspace_root, config);
         registry.register(Box::new(EngramRecallTool::new(memory.clone())));
         registry.register(Box::new(EngramStoreTool::new(memory.clone())));
         registry.register(Box::new(EngramRecallAssociatedTool::new(memory.clone())));
@@ -125,8 +129,9 @@ impl ToolRegistry {
         workspace_root: &str,
         memory: Arc<MemoryManager>,
         orchestrator: SharedOrchestrator,
+        config: &crate::config::Config,
     ) -> Self {
-        let mut registry = Self::with_defaults_and_memory(workspace_root, memory);
+        let mut registry = Self::with_defaults_and_memory(workspace_root, memory, config);
         registry.register(Box::new(DelegateTaskTool::new(orchestrator)));
         registry
     }
@@ -626,6 +631,111 @@ fn strip_html_basic(html: &str) -> String {
     }
 
     result.trim().to_string()
+}
+
+// ─── Web Search Tool ─────────────────────────────────────────
+
+/// Web search via Brave Search API.
+pub struct WebSearchTool {
+    api_key: String,
+}
+
+impl WebSearchTool {
+    pub fn new(api_key: String) -> Self {
+        Self { api_key }
+    }
+}
+
+#[async_trait]
+impl Tool for WebSearchTool {
+    fn name(&self) -> &str {
+        "web_search"
+    }
+
+    fn description(&self) -> &str {
+        "Search the web using Brave Search. Returns titles, URLs, and snippets."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query string"
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "Number of results (1-10, default: 5)"
+                },
+                "freshness": {
+                    "type": "string",
+                    "description": "Time filter: 'day', 'week', 'month', or 'year'"
+                }
+            },
+            "required": ["query"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let query = input["query"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing 'query' parameter"))?;
+        let count = input["count"].as_u64().unwrap_or(5).min(10).max(1);
+        let freshness = input["freshness"].as_str();
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()?;
+
+        let mut req = client
+            .get("https://api.search.brave.com/res/v1/web/search")
+            .header("Accept", "application/json")
+            .header("Accept-Encoding", "gzip")
+            .header("X-Subscription-Token", &self.api_key)
+            .query(&[("q", query), ("count", &count.to_string())]);
+
+        if let Some(f) = freshness {
+            req = req.query(&[("freshness", f)]);
+        }
+
+        let resp = req.send().await?;
+        let status = resp.status();
+
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Ok(ToolResult {
+                output: format!("Brave API error {}: {}", status, body),
+                is_error: true,
+            });
+        }
+
+        let body: Value = resp.json().await?;
+
+        let mut results = Vec::new();
+        if let Some(web) = body["web"].as_object() {
+            if let Some(items) = web["results"].as_array() {
+                for item in items.iter().take(count as usize) {
+                    let title = item["title"].as_str().unwrap_or("");
+                    let url = item["url"].as_str().unwrap_or("");
+                    let desc = item["description"].as_str().unwrap_or("");
+                    results.push(format!("**{}**\n{}\n{}", title, url, desc));
+                }
+            }
+        }
+
+        if results.is_empty() {
+            Ok(ToolResult {
+                output: "No results found.".to_string(),
+                is_error: false,
+            })
+        } else {
+            Ok(ToolResult {
+                output: results.join("\n\n"),
+                is_error: false,
+            })
+        }
+    }
 }
 
 // ─── Edit File Tool ──────────────────────────────────────────

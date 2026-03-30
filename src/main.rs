@@ -190,10 +190,11 @@ async fn main() -> anyhow::Result<()> {
                     &workspace_dir,
                     mem.clone(),
                     orch_ref.clone(),
+                    &cfg,
                 )
                 .with_spawn_specialist(runner_handle.clone(), Some(orch_ref.clone()))
             } else {
-                tools::ToolRegistry::with_defaults_and_memory(&workspace_dir, mem.clone())
+                tools::ToolRegistry::with_defaults_and_memory(&workspace_dir, mem.clone(), &cfg)
                     .with_spawn_specialist(runner_handle.clone(), None)
             };
 
@@ -393,7 +394,7 @@ async fn interactive_chat(config_path: &str) -> anyhow::Result<()> {
     let sessions = session::SessionManager::new(&cfg).await?;
 
     // Setup tools
-    let tools = tools::ToolRegistry::with_defaults_and_memory(workspace_dir, mem.clone());
+    let tools = tools::ToolRegistry::with_defaults_and_memory(workspace_dir, mem.clone(), &cfg);
 
     // Create agent runner
     let runner = agent::AgentRunner::new(cfg.clone(), ws, mem, sessions, hook_registry, tools);

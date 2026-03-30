@@ -87,11 +87,9 @@ impl SkillRegistry {
 
             match parser.parse_file(&skill_file) {
                 Ok(mut skill) => {
-                    // If the parsed name is a legacy auto-generated one, use dir name instead
+                    // If legacy skill (no frontmatter), use dir name instead of auto-generated name
                     let dir_name = entry.file_name().to_string_lossy().to_string();
-                    if skill.metadata.name.starts_with("skill-")
-                        || skill.metadata.name == "unnamed-skill"
-                    {
+                    if skill.is_legacy {
                         skill.metadata.name = dir_name.clone();
                     }
                     skills.insert(skill.metadata.name.clone(), skill);
@@ -286,6 +284,7 @@ impl SkillRegistry {
                 name, description
             ),
             source_path: Some(skill_file.clone()),
+            is_legacy: false,
         };
 
         // Write to disk

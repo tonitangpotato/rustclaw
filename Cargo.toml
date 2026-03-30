@@ -32,6 +32,9 @@ engramai = "0.2.2"
 # GID (task graph)
 gid-core = "0.2.1"
 
+# Skills management
+skills-manager = { path = "skills-manager" }
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 

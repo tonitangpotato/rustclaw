@@ -1,30 +1,24 @@
 ---
-name: Idea Intake Pipeline
+name: idea-intake
 description: Process incoming ideas, links, and media into structured knowledge
-version: 1.0.0
+version: "1.0.0"
 author: potato
 triggers:
-  - pattern: "https?://"
-    type: regex
-  - pattern: "idea:"
-    type: contains
-  - pattern: "想法:"
-    type: contains
-  - pattern: "intake"
-    type: contains
-  - pattern: "记录一下"
-    type: contains
-  - pattern: "voice message"
-    type: contains
-  - pattern: "语音"
-    type: contains
+  patterns:
+    - "idea:"
+    - "想法:"
+    - "intake"
+    - "记录一下"
+    - "voice message"
+    - "语音"
+  regex:
+    - "https?://"
 tags:
   - productivity
   - knowledge-management
 priority: 50
-enabled: true
 always_load: false
-max_context_bytes: 4096
+max_body_size: 4096
 ---
 # SKILL: Idea Intake Pipeline
 
