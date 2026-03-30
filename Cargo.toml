@@ -32,8 +32,9 @@ engramai = "0.2.2"
 # GID (task graph)
 gid-core = "0.2.1"
 
-# Skills management
-skills-manager = { path = "skills-manager" }
+# Skills management (using SKM - Agent Skill Engine)
+skm-core = { path = "../clawd/projects/skm/crates/skm-core" }
+skm-select = { path = "../clawd/projects/skm/crates/skm-select", default-features = false }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -69,6 +70,9 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 
 # Glob pattern matching (for sandbox path restrictions)
 glob = "0.3"
+
+# Hashing
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
 # HTTP middleware for dashboard
 tower = "0.5"

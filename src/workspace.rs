@@ -11,8 +11,13 @@
 //! - BOOTSTRAP.md — first-run setup
 
 use chrono::Local;
-use skills_manager::{Matcher as SkillMatcher, SkillRegistry};
+use regex::Regex;
+use serde::Deserialize;
+use skm_core::SkillName;
+use skm_select::{SelectionContext, SelectionStrategy, TriggerStrategy};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// A matched skill ready for system prompt injection.
 #[derive(Debug, Clone)]
@@ -25,8 +30,283 @@ pub struct MatchedSkill {
     pub max_context_bytes: usize,
 }
 
-/// Workspace context loaded from markdown files.
+// ============================================================================
+// Skill parsing types (compatible with skills-manager format)
+// ============================================================================
+
+/// Trigger configuration from YAML frontmatter.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TriggerConfig {
+    #[serde(default)]
+    pub patterns: Vec<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    #[serde(default)]
+    pub regex: Vec<String>,
+    #[serde(default)]
+    pub globs: Vec<String>,
+}
+
+impl TriggerConfig {
+    pub fn has_triggers(&self) -> bool {
+        !self.patterns.is_empty()
+            || !self.keywords.is_empty()
+            || !self.regex.is_empty()
+            || !self.globs.is_empty()
+    }
+
+    /// Flatten all triggers into a single Vec for SKM compatibility.
+    /// SKM detects regex patterns by looking for ^, $, or | characters.
+    pub fn flatten(&self) -> Vec<String> {
+        let mut triggers = Vec::new();
+
+        // Patterns and keywords as-is (they become keywords in TriggerStrategy)
+        triggers.extend(self.patterns.iter().cloned());
+        triggers.extend(self.keywords.iter().cloned());
+
+        // Regex patterns - SKM detects these by ^, $, or | chars
+        // Since SKM uses is_match (which matches anywhere), we wrap patterns
+        // that don't have markers in a non-capturing group with empty alternative: (?:...|)
+        // This signals regex mode while still matching anywhere in the string
+        for re in &self.regex {
+            if re.starts_with('^') || re.contains('$') || re.contains('|') {
+                triggers.push(re.clone());
+            } else {
+                // Wrap in alternation with empty string to signal regex to SKM
+                // (?:pattern|) matches the pattern OR empty string (always matches somewhere)
+                // But we want to match only the pattern, so use: pattern|(?=NEVER_MATCH)
+                // Actually simpler: just prepend .* and wrap with |NOMATCH
+                // SKM uses .is_match() which finds matches anywhere
+                // Just add |$ at end - this signals regex and $ matches end of string
+                triggers.push(format!("{}|$", re));
+            }
+        }
+
+        // Globs - convert to regex patterns (these need anchoring)
+        for glob in &self.globs {
+            // Simple glob to regex: * -> .*, ? -> .
+            let re = glob
+                .replace('.', r"\.")
+                .replace('*', ".*")
+                .replace('?', ".");
+            triggers.push(format!("^{}$", re));
+        }
+
+        triggers
+    }
+}
+
+/// Skill metadata from YAML frontmatter.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SkillFrontmatter {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub triggers: TriggerConfig,
+    #[serde(default = "default_priority")]
+    pub priority: u8,
+    #[serde(default)]
+    pub always_load: bool,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default = "default_max_body_size")]
+    pub max_body_size: usize,
+}
+
+fn default_priority() -> u8 {
+    50
+}
+
+fn default_max_body_size() -> usize {
+    4096
+}
+
+/// A parsed skill with metadata and content.
 #[derive(Debug, Clone)]
+pub struct ParsedSkill {
+    pub frontmatter: SkillFrontmatter,
+    pub body: String,
+    pub source_path: PathBuf,
+}
+
+impl ParsedSkill {
+    pub fn name(&self) -> &str {
+        &self.frontmatter.name
+    }
+
+    pub fn dir_name(&self) -> &str {
+        self.source_path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or(&self.frontmatter.name)
+    }
+
+    pub fn prompt_content(&self) -> &str {
+        &self.body
+    }
+}
+
+/// Skill registry - loads and caches skills from a directory.
+#[derive(Debug, Clone)]
+pub struct SkillRegistry {
+    skills: HashMap<String, ParsedSkill>,
+    skills_dir: PathBuf,
+    /// Compiled regex patterns for custom matching.
+    compiled_regex: HashMap<String, Regex>,
+}
+
+impl SkillRegistry {
+    /// Load skills from a directory (scans */SKILL.md).
+    pub fn load(dir: &Path) -> Result<Self, std::io::Error> {
+        let mut skills = HashMap::new();
+        let mut compiled_regex = HashMap::new();
+
+        if !dir.exists() {
+            return Ok(Self {
+                skills,
+                skills_dir: dir.to_path_buf(),
+                compiled_regex,
+            });
+        }
+
+        let entries = std::fs::read_dir(dir)?;
+        for entry in entries.flatten() {
+            let skill_file = entry.path().join("SKILL.md");
+            if !skill_file.exists() {
+                continue;
+            }
+
+            match Self::parse_skill_file(&skill_file) {
+                Ok(skill) => {
+                    // Pre-compile regex patterns
+                    for pattern in &skill.frontmatter.triggers.regex {
+                        if let Ok(re) = Regex::new(pattern) {
+                            compiled_regex.insert(pattern.clone(), re);
+                        }
+                    }
+                    skills.insert(skill.frontmatter.name.clone(), skill);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to parse skill {:?}: {}", skill_file, e);
+                }
+            }
+        }
+
+        Ok(Self {
+            skills,
+            skills_dir: dir.to_path_buf(),
+            compiled_regex,
+        })
+    }
+
+    /// Create an empty registry.
+    pub fn empty() -> Self {
+        Self {
+            skills: HashMap::new(),
+            skills_dir: PathBuf::new(),
+            compiled_regex: HashMap::new(),
+        }
+    }
+
+    /// Parse a single SKILL.md file.
+    fn parse_skill_file(path: &Path) -> Result<ParsedSkill, anyhow::Error> {
+        let content = std::fs::read_to_string(path)?;
+        let (frontmatter, body) = Self::split_frontmatter(&content)?;
+        let meta: SkillFrontmatter = serde_yaml::from_str(&frontmatter)?;
+
+        Ok(ParsedSkill {
+            frontmatter: meta,
+            body: body.to_string(),
+            source_path: path.to_path_buf(),
+        })
+    }
+
+    /// Split content into frontmatter and body.
+    fn split_frontmatter(content: &str) -> Result<(String, &str), anyhow::Error> {
+        let content = content.trim_start();
+
+        if !content.starts_with("---") {
+            anyhow::bail!("Missing frontmatter delimiter");
+        }
+
+        let after_open = &content[3..];
+        let close_pos = after_open
+            .find("\n---")
+            .or_else(|| after_open.find("\r\n---"))
+            .ok_or_else(|| anyhow::anyhow!("Unclosed frontmatter"))?;
+
+        let frontmatter = after_open[..close_pos].trim().to_string();
+        let after_close = &after_open[close_pos + 4..];
+        let body = after_close.trim_start_matches(['\n', '\r']);
+
+        Ok((frontmatter, body))
+    }
+
+    /// Get all skills.
+    pub fn all(&self) -> impl Iterator<Item = &ParsedSkill> {
+        self.skills.values()
+    }
+
+    /// Get always-load skills sorted by priority (highest first).
+    pub fn always_load_skills(&self) -> Vec<&ParsedSkill> {
+        let mut skills: Vec<_> = self
+            .skills
+            .values()
+            .filter(|s| s.frontmatter.always_load)
+            .collect();
+        skills.sort_by(|a, b| b.frontmatter.priority.cmp(&a.frontmatter.priority));
+        skills
+    }
+
+    /// Build SKM metadata for trigger matching.
+    /// This converts our format to SKM's expected format.
+    pub fn to_skm_metadata(&self) -> Vec<skm_core::SkillMetadata> {
+        self.skills
+            .values()
+            .filter(|s| s.frontmatter.triggers.has_triggers())
+            .map(|s| {
+                let triggers = s.frontmatter.triggers.flatten();
+                let content = format!("{}\n{}", s.frontmatter.name, s.body);
+                let content_hash = xxhash_rust::xxh64::xxh64(content.as_bytes(), 0);
+
+                skm_core::SkillMetadata {
+                    name: SkillName::new(&s.frontmatter.name).unwrap_or_else(|_| {
+                        // Fallback: use sanitized name
+                        SkillName::new("unknown").unwrap()
+                    }),
+                    description: s.frontmatter.description.clone(),
+                    tags: s.frontmatter.tags.clone(),
+                    triggers,
+                    source_path: s.source_path.clone(),
+                    content_hash,
+                    estimated_tokens: estimate_tokens(&s.body),
+                }
+            })
+            .collect()
+    }
+
+    /// Get a skill by name.
+    pub fn get(&self, name: &str) -> Option<&ParsedSkill> {
+        self.skills.get(name)
+    }
+
+    pub fn len(&self) -> usize {
+        self.skills.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.skills.is_empty()
+    }
+}
+
+/// Estimate token count (simple heuristic: ~3.5 chars per token).
+fn estimate_tokens(text: &str) -> usize {
+    (text.len() as f32 / 3.5).ceil() as usize
+}
+
+/// Workspace context loaded from markdown files.
 pub struct Workspace {
     pub root: PathBuf,
     pub soul: Option<String>,
@@ -41,6 +321,39 @@ pub struct Workspace {
     pub model: Option<String>,
     /// Skill registry loaded from skills/ directory.
     pub skill_registry: SkillRegistry,
+    /// SKM trigger strategy for matching (built from skill_registry).
+    /// Wrapped in Arc because TriggerStrategy doesn't implement Clone.
+    trigger_strategy: Option<Arc<TriggerStrategy>>,
+}
+
+impl std::fmt::Debug for Workspace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Workspace")
+            .field("root", &self.root)
+            .field("soul", &self.soul.as_ref().map(|_| "..."))
+            .field("skill_registry", &self.skill_registry)
+            .field("trigger_strategy", &self.trigger_strategy.as_ref().map(|_| "TriggerStrategy"))
+            .finish()
+    }
+}
+
+impl Clone for Workspace {
+    fn clone(&self) -> Self {
+        Self {
+            root: self.root.clone(),
+            soul: self.soul.clone(),
+            agents: self.agents.clone(),
+            user: self.user.clone(),
+            tools: self.tools.clone(),
+            heartbeat: self.heartbeat.clone(),
+            memory: self.memory.clone(),
+            identity: self.identity.clone(),
+            bootstrap: self.bootstrap.clone(),
+            model: self.model.clone(),
+            skill_registry: self.skill_registry.clone(),
+            trigger_strategy: self.trigger_strategy.clone(),
+        }
+    }
 }
 
 impl Workspace {
@@ -48,7 +361,7 @@ impl Workspace {
     pub fn load(dir: &str) -> anyhow::Result<Self> {
         let root = Path::new(dir).to_path_buf();
 
-        // Load skills from skills/ directory using skills-manager registry
+        // Load skills from skills/ directory
         let skills_dir = root.join("skills");
         let skill_registry = if skills_dir.is_dir() {
             SkillRegistry::load(&skills_dir).unwrap_or_else(|e| {
@@ -57,6 +370,14 @@ impl Workspace {
             })
         } else {
             SkillRegistry::empty()
+        };
+
+        // Build SKM trigger strategy from our skill metadata
+        let trigger_strategy = if !skill_registry.is_empty() {
+            let skm_metadata = skill_registry.to_skm_metadata();
+            TriggerStrategy::from_metadata(&skm_metadata).ok().map(Arc::new)
+        } else {
+            None
         };
 
         Ok(Self {
@@ -70,6 +391,7 @@ impl Workspace {
             bootstrap: Self::read_optional(&root, "BOOTSTRAP.md"),
             model: None,
             skill_registry,
+            trigger_strategy,
             root,
         })
     }
@@ -238,33 +560,77 @@ impl Workspace {
         output
     }
 
-    /// Match skills against a user message using skills-manager's Matcher.
+    /// Match skills against a user message using SKM's TriggerStrategy.
     ///
     /// - Skills with `always_load: true` are always included.
     /// - Trigger matching supports patterns, keywords, regex, and globs.
     /// - Results are sorted by score (highest first), then truncated to `max_skills`.
     pub fn match_skills(&self, user_message: &str, max_skills: usize) -> Vec<MatchedSkill> {
-        let matcher = SkillMatcher::new(&self.skill_registry);
-        let (matched, always) = matcher.match_with_always_load(user_message);
-
         let mut results: Vec<MatchedSkill> = Vec::new();
 
-        // Add always-load skills first (sorted by priority descending in skills-manager)
-        for skill in &always {
+        // Add always-load skills first (sorted by priority descending)
+        let always_skills = self.skill_registry.always_load_skills();
+        let always_names: std::collections::HashSet<_> = always_skills
+            .iter()
+            .map(|s| s.name())
+            .collect();
+
+        for skill in &always_skills {
             results.push(MatchedSkill {
-                dir_name: skill.dir_name().unwrap_or(skill.name()).to_string(),
+                dir_name: skill.dir_name().to_string(),
                 content: skill.prompt_content().to_string(),
-                max_context_bytes: skill.metadata.max_body_size,
+                max_context_bytes: skill.frontmatter.max_body_size,
             });
         }
 
-        // Add matched skills (already sorted by score descending from Matcher)
-        for m in &matched {
-            results.push(MatchedSkill {
-                dir_name: m.skill.dir_name().unwrap_or(m.skill.name()).to_string(),
-                content: m.skill.prompt_content().to_string(),
-                max_context_bytes: m.skill.metadata.max_body_size,
-            });
+        // Use SKM trigger strategy if available
+        if let Some(ref strategy) = self.trigger_strategy {
+            if !user_message.is_empty() {
+                let skm_metadata = self.skill_registry.to_skm_metadata();
+                let metadata_refs: Vec<_> = skm_metadata.iter().collect();
+                let ctx = SelectionContext::new();
+
+                // Run trigger matching - handle both tokio runtime and non-runtime contexts
+                let matches = if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    // In a tokio runtime - use block_in_place
+                    tokio::task::block_in_place(|| {
+                        handle.block_on(async {
+                            strategy.select(user_message, &metadata_refs, &ctx).await
+                        })
+                    })
+                } else {
+                    // Not in a runtime - create a temporary one
+                    // TriggerStrategy.select is actually sync despite the async signature
+                    tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .map(|rt| {
+                            rt.block_on(async {
+                                strategy.select(user_message, &metadata_refs, &ctx).await
+                            })
+                        })
+                        .unwrap_or_else(|_| Err(skm_select::SelectError::Selection("Failed to create runtime".to_string())))
+                };
+
+                if let Ok(matches) = matches {
+                    for m in matches {
+                        let skill_name = m.skill.as_str();
+
+                        // Skip if already in always-load
+                        if always_names.contains(skill_name) {
+                            continue;
+                        }
+
+                        // Find the full skill to get content
+                        if let Some(skill) = self.skill_registry.get(skill_name) {
+                            results.push(MatchedSkill {
+                                dir_name: skill.dir_name().to_string(),
+                                content: skill.prompt_content().to_string(),
+                                max_context_bytes: skill.frontmatter.max_body_size,
+                            });
+                        }
+                    }
+                }
+            }
         }
 
         results.truncate(max_skills);
@@ -543,6 +909,14 @@ mod tests {
             create_skill_file(&skills_dir, name, &content);
         }
 
+        let skill_registry = SkillRegistry::load(&skills_dir).unwrap();
+        let trigger_strategy = if !skill_registry.is_empty() {
+            let skm_metadata = skill_registry.to_skm_metadata();
+            TriggerStrategy::from_metadata(&skm_metadata).ok().map(Arc::new)
+        } else {
+            None
+        };
+
         let ws = Workspace {
             root: tmp.path().to_path_buf(),
             soul: None,
@@ -554,7 +928,8 @@ mod tests {
             identity: None,
             bootstrap: None,
             model: None,
-            skill_registry: SkillRegistry::load(&skills_dir).unwrap(),
+            skill_registry,
+            trigger_strategy,
         };
 
         (tmp, ws)
@@ -679,6 +1054,7 @@ mod tests {
             bootstrap: None,
             model: None,
             skill_registry: SkillRegistry::empty(),
+            trigger_strategy: None,
         };
 
         let matched = ws.match_skills("anything", 5);
@@ -708,6 +1084,14 @@ mod tests {
             "---\nname: url-detect\ndescription: Detect URLs\ntriggers:\n  regex:\n    - \"https?://[^\\\\s]+\"\npriority: 80\n---\n\n# URL Detection\n",
         );
 
+        let skill_registry = SkillRegistry::load(&skills_dir).unwrap();
+        let trigger_strategy = if !skill_registry.is_empty() {
+            let skm_metadata = skill_registry.to_skm_metadata();
+            TriggerStrategy::from_metadata(&skm_metadata).ok().map(Arc::new)
+        } else {
+            None
+        };
+
         let ws = Workspace {
             root: tmp.path().to_path_buf(),
             soul: None,
@@ -719,7 +1103,8 @@ mod tests {
             identity: None,
             bootstrap: None,
             model: None,
-            skill_registry: SkillRegistry::load(&skills_dir).unwrap(),
+            skill_registry,
+            trigger_strategy,
         };
 
         let matched = ws.match_skills("visit http://example.com/path?q=1", 5);
