@@ -1701,7 +1701,7 @@ impl Tool for TtsTool {
     }
 
     fn description(&self) -> &str {
-        "Convert text to speech using edge-tts. Returns the path to the generated OGG audio file (opus codec). Useful for creating voice messages or audio content."
+        "Convert text to speech (generates OGG audio file). For generating audio files on demand. Do NOT use for voice mode replies — voice mode is handled automatically by the framework via set_voice_mode tool."
     }
 
     fn input_schema(&self) -> Value {

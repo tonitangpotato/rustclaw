@@ -8,7 +8,7 @@ use crate::agent::AgentRunner;
 use crate::config::TelegramConfig;
 use crate::stt;
 use crate::text_utils;
-use crate::tts::{synthesize, TtsConfig};
+
 
 const TELEGRAM_API: &str = "https://api.telegram.org";
 
@@ -816,47 +816,11 @@ impl TelegramBot {
             return Ok(());
         }
 
-        // Determine if we should send as voice:
-        // 1. Explicit VOICE: prefix in response
-        // 2. Voice mode is active for this chat
-        let voice_text = if let Some(vt) = Self::extract_voice_text(trimmed) {
-            Some(vt)
-        } else if self.runner.voice_mode.is_enabled(chat_id).await {
-            // Strip any VOICE: prefix that might be partial, otherwise use full text
-            Some(trimmed.to_string())
+        if self.runner.voice_mode.is_enabled(chat_id).await {
+            self.send_as_voice(chat_id, trimmed, reply_to).await
         } else {
-            None
-        };
-
-        if let Some(text_to_speak) = voice_text {
-            // Send "recording voice" indicator
-            let _ = self.client
-                .post(self.api_url("sendChatAction"))
-                .json(&serde_json::json!({
-                    "chat_id": chat_id,
-                    "action": "record_voice",
-                }))
-                .send()
-                .await;
-
-            let tts_config = TtsConfig::default();
-            match synthesize(&text_to_speak, &tts_config).await {
-                Ok(ogg_path) => {
-                    if let Err(e) = self.send_voice(chat_id, &ogg_path).await {
-                        tracing::error!("Failed to send voice: {}", e);
-                        self.send_message(chat_id, trimmed, reply_to).await?;
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("TTS synthesis failed: {}", e);
-                    self.send_message(chat_id, trimmed, reply_to).await?;
-                }
-            }
-        } else {
-            self.send_message(chat_id, trimmed, reply_to).await?;
+            self.send_message(chat_id, trimmed, reply_to).await
         }
-
-        Ok(())
     }
 
     /// Check if user message is toggling voice mode. Returns Some(true/false) if toggling.
@@ -865,16 +829,12 @@ impl TelegramBot {
         let normalized = lower.trim();
 
         // Enable patterns
+        // Fast-path patterns (exact phrases only). LLM tool handles everything else.
         let enable_patterns = [
-            "voice mode", "开启voice", "语音模式", "用语音回复", "语音回复我",
-            "enable voice", "turn on voice", "start voice mode",
-            "语音mode", "开启语音", "voice模式",
+            "voice mode", "语音模式",
         ];
-        // Disable patterns
         let disable_patterns = [
-            "关闭voice", "关闭语音", "文字模式", "用文字回复", "text mode",
-            "disable voice", "turn off voice", "stop voice mode",
-            "关闭语音mode", "关闭voice mode", "停止语音",
+            "text mode", "文字模式",
         ];
 
         for p in &disable_patterns {
@@ -886,23 +846,6 @@ impl TelegramBot {
             if normalized.contains(p) {
                 return Some(true);
             }
-        }
-        None
-    }
-
-        fn extract_voice_text(response: &str) -> Option<String> {
-        // Check for VOICE: prefix at start
-        if let Some(rest) = response.strip_prefix("VOICE:") {
-            return Some(rest.trim().to_string());
-        }
-        // Check for 🔊 prefix at start
-        if let Some(rest) = response.strip_prefix("🔊") {
-            return Some(rest.trim().to_string());
-        }
-        // Check for VOICE: anywhere in response (LLM sometimes adds preamble)
-        if let Some(idx) = response.find("\nVOICE:") {
-            let rest = &response[idx + 7..]; // 7 = "\nVOICE:".len()
-            return Some(rest.trim().to_string());
         }
         None
     }
