@@ -887,11 +887,13 @@ impl TelegramBot {
         let enable_patterns = [
             "voice mode", "开启voice", "语音模式", "用语音回复", "语音回复我",
             "enable voice", "turn on voice", "start voice mode",
+            "语音mode", "开启语音", "voice模式",
         ];
         // Disable patterns
         let disable_patterns = [
             "关闭voice", "关闭语音", "文字模式", "用文字回复", "text mode",
             "disable voice", "turn off voice", "stop voice mode",
+            "关闭语音mode", "关闭voice mode", "停止语音",
         ];
 
         for p in &disable_patterns {

@@ -136,10 +136,10 @@ impl Workspace {
              ## Voice Replies (BUILT-IN — DO NOT USE TOOLS)\n\
              RustClaw has BUILT-IN voice support. You do NOT need any tools, APIs, or commands to send voice.\n\
              When the user asks for a voice reply (语音回复, voice message, say it, etc.):\n\
-             → Just prefix your response with `VOICE:` — that's it. Example: `VOICE: Hello world!`\n\
-             The framework AUTOMATICALLY converts your text to speech and sends it as a Telegram voice message.\n\
-             Do NOT try to use edge-tts, exec, curl, or any tool. Just write `VOICE: your text here`.\n\
-             Only use VOICE: when the user explicitly asks. Otherwise reply with normal text.\n\n\
+             Voice replies are controlled by the user via voice mode toggle.\n\
+             When voice mode is ON, the framework automatically converts your text replies to speech.\n\
+             Just reply with normal text — do NOT prefix with VOICE:, do NOT use tts tools.\n\
+             The framework handles everything. Do NOT assume voice replies are needed just because user sent a voice message.\n\n\
              ## Memory Recall\n\
              Before answering questions about prior work, decisions, dates, people, preferences, or todos:\n\
              → Use engram_recall to search cognitive memory first.\n\
