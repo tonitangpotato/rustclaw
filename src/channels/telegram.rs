@@ -789,9 +789,10 @@ impl TelegramBot {
         }
         
         // Send text message first (if there's text left)
+        // Use send_response to handle voice mode / VOICE: prefix
         let clean_text = text_without_files.trim();
         if !clean_text.is_empty() {
-            self.send_message(chat_id, clean_text, reply_to).await?;
+            self.send_response(chat_id, clean_text, reply_to).await?;
         }
         
         // Send files
@@ -1003,7 +1004,23 @@ impl TelegramBot {
         // Clean up the input file
         let _ = tokio::fs::remove_file(ogg_path).await;
 
-        // Step 4: Process through agent with [Voice message] prefix
+        // Step 4: Check for voice mode toggle in transcription
+        if let Some(enabled) = Self::detect_voice_mode_toggle(&transcription) {
+            self.set_voice_mode(chat_id, enabled).await;
+            let msg = if enabled {
+                "🎙 Voice mode ON — 接下来我会用语音回复你"
+            } else {
+                "💬 Voice mode OFF — 切换回文字回复"
+            };
+            if enabled {
+                self.send_as_voice(chat_id, msg, reply_to).await?;
+            } else {
+                self.send_message(chat_id, msg, reply_to).await?;
+            }
+            return Ok(());
+        }
+
+        // Step 5: Process through agent with [Voice message] prefix
         let user_message = format!("[Voice message] {}", transcription);
         let session_key = format!("telegram:{}", chat_id);
 

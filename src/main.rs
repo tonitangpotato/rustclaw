@@ -122,6 +122,20 @@ enum DaemonCommands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Panic hook — log panics before process dies
+    std::panic::set_hook(Box::new(|info| {
+        eprintln!("PANIC: {}", info);
+        // Also try to write to log file directly
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .append(true)
+            .open(std::path::Path::new(&std::env::var("HOME").unwrap_or_default())
+                .join(".rustclaw/logs/rustclaw.err"))
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "PANIC at {}: {}", chrono::Local::now(), info);
+        }
+    }));
+
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
