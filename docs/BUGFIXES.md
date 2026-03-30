@@ -21,6 +21,27 @@ The `?` operator propagates JSON parse errors up through `run()` → `start()` �
 
 ---
 
+## 2026-03-30: Voice Mode Architecture (ROOT FIX)
+
+**Symptom**: Voice mode unreliable — toggle not recognized for varied phrasings ("语音mode", "开语音", "speak to me"), state lost on restart, LLM outputting `VOICE:/tmp/rustclaw_tts.ogg` as text.
+
+**Root Cause**: Three layered problems:
+1. Voice mode toggle was **pattern-matching only** — any phrasing not in the hardcoded list was missed
+2. Voice mode state was **in-memory HashMap** on TelegramBot — lost on every restart
+3. Old system prompt told LLM to use `VOICE:` prefix + `tts` tool — LLM complied, but framework no longer parsed VOICE: prefix, so file paths leaked as text
+
+**Root Fix** (commit `487f2f1`):
+1. **`set_voice_mode` virtual tool** — LLM understands any phrasing and calls the tool. Intercepted by AgentRunner (needs session context to resolve chat_id)
+2. **Shared `VoiceMode` manager** (`src/voice_mode.rs`) — lives on AgentRunner, accessible by both tools and channels. Persisted to `~/.rustclaw/voice-mode.json`
+3. **Pattern matching retained as fast path** — zero-latency for obvious phrases, LLM as fallback for everything else
+4. **System prompt updated** — tells LLM to use `set_voice_mode` tool, not VOICE: prefix or tts tools
+
+**Design Principle**: Voice mode is a **transport decision** (channel layer), not a **content decision** (LLM layer). LLM only toggles the state via tool; framework handles TTS conversion.
+
+**Supersedes**: All previous voice-related patches (VOICE: prefix, extract_voice_text, pattern list expansion).
+
+---
+
 ## 2026-03-30: Voice Mode Not Triggering from Voice Messages
 
 **Symptom**: User sends voice message saying "开启voice mode", RustClaw transcribes it correctly but doesn't toggle voice mode. Instead, sends the transcription to the LLM which responds with text "voice mode 已开启" (but doesn't actually enable it).
