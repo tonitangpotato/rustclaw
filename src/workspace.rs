@@ -356,3 +356,255 @@ impl Workspace {
         self.root.join("memory")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_skill_frontmatter tests ──────────────────────────────
+
+    #[test]
+    fn test_parse_frontmatter_valid() {
+        let content = r#"---
+name: Test Skill
+description: A test skill for unit testing
+triggers:
+  - hello
+  - world
+  - https://
+priority: 42
+always_load: false
+max_context_bytes: 2048
+---
+# Body Content
+
+This is the skill body.
+"#;
+        let (meta, body) = parse_skill_frontmatter(content, "fallback");
+        assert_eq!(meta.name, "Test Skill");
+        assert_eq!(meta.description, "A test skill for unit testing");
+        assert_eq!(meta.triggers, vec!["hello", "world", "https://"]);
+        assert_eq!(meta.priority, 42);
+        assert!(!meta.always_load);
+        assert_eq!(meta.max_context_bytes, 2048);
+        assert!(body.starts_with("# Body Content"));
+        assert!(body.contains("This is the skill body."));
+    }
+
+    #[test]
+    fn test_parse_frontmatter_none() {
+        let content = "# Just a Skill\n\nNo frontmatter here.\n";
+        let (meta, body) = parse_skill_frontmatter(content, "my-skill");
+        assert_eq!(meta.name, "my-skill");
+        assert!(meta.description.is_empty());
+        assert!(meta.triggers.is_empty());
+        assert_eq!(meta.priority, 100);
+        assert!(!meta.always_load);
+        assert_eq!(meta.max_context_bytes, 4096);
+        assert_eq!(body, content);
+    }
+
+    #[test]
+    fn test_parse_frontmatter_partial() {
+        let content = r#"---
+name: Partial Skill
+priority: 10
+---
+Body here.
+"#;
+        let (meta, body) = parse_skill_frontmatter(content, "fallback");
+        assert_eq!(meta.name, "Partial Skill");
+        assert!(meta.description.is_empty());
+        assert!(meta.triggers.is_empty());
+        assert_eq!(meta.priority, 10);
+        assert!(!meta.always_load);
+        assert_eq!(meta.max_context_bytes, 4096);
+        assert_eq!(body.trim(), "Body here.");
+    }
+
+    #[test]
+    fn test_parse_frontmatter_always_load() {
+        let content = r#"---
+name: Always On
+always_load: true
+---
+Content.
+"#;
+        let (meta, body) = parse_skill_frontmatter(content, "fallback");
+        assert_eq!(meta.name, "Always On");
+        assert!(meta.always_load);
+        assert_eq!(body.trim(), "Content.");
+    }
+
+    #[test]
+    fn test_parse_frontmatter_no_closing_delimiter() {
+        let content = "---\nname: Broken\npriority: 5\n";
+        let (meta, body) = parse_skill_frontmatter(content, "fallback");
+        // No closing --- → treated as no frontmatter
+        assert_eq!(meta.name, "fallback");
+        assert_eq!(body, content);
+    }
+
+    #[test]
+    fn test_parse_frontmatter_empty_body() {
+        let content = "---\nname: No Body\n---\n";
+        let (meta, body) = parse_skill_frontmatter(content, "fallback");
+        assert_eq!(meta.name, "No Body");
+        assert!(body.is_empty() || body.trim().is_empty());
+    }
+
+    // ── Helper: build a test Workspace with skills ─────────────────
+
+    fn make_workspace(skills: Vec<(String, String, SkillMetadata)>) -> Workspace {
+        Workspace {
+            root: PathBuf::from("/tmp/test-workspace"),
+            soul: None,
+            agents: None,
+            user: None,
+            tools: None,
+            heartbeat: None,
+            memory: None,
+            identity: None,
+            bootstrap: None,
+            model: None,
+            skills,
+        }
+    }
+
+    fn make_skill(name: &str, triggers: &[&str], priority: u8, always_load: bool) -> (String, String, SkillMetadata) {
+        (
+            name.to_string(),
+            format!("# Skill: {}", name),
+            SkillMetadata {
+                name: name.to_string(),
+                description: format!("Desc for {}", name),
+                triggers: triggers.iter().map(|s| s.to_string()).collect(),
+                priority,
+                always_load,
+                max_context_bytes: 4096,
+            },
+        )
+    }
+
+    // ── match_skills tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_match_skills_trigger_hit() {
+        let ws = make_workspace(vec![
+            make_skill("idea-intake", &["http://", "https://", "idea:"], 50, false),
+            make_skill("code-review", &["review", "pr", "diff"], 60, false),
+        ]);
+
+        let matched = ws.match_skills("check out https://example.com", 5);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].2.name, "idea-intake");
+    }
+
+    #[test]
+    fn test_match_skills_no_match() {
+        let ws = make_workspace(vec![
+            make_skill("idea-intake", &["http://", "https://", "idea:"], 50, false),
+            make_skill("code-review", &["review", "pr", "diff"], 60, false),
+        ]);
+
+        let matched = ws.match_skills("what is the weather today?", 5);
+        assert!(matched.is_empty());
+    }
+
+    #[test]
+    fn test_match_skills_always_load() {
+        let ws = make_workspace(vec![
+            make_skill("core-rules", &[], 10, true),
+            make_skill("idea-intake", &["http://"], 50, false),
+        ]);
+
+        // Even with no matching triggers, always_load skill is included
+        let matched = ws.match_skills("random message", 5);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].2.name, "core-rules");
+    }
+
+    #[test]
+    fn test_match_skills_always_load_plus_trigger() {
+        let ws = make_workspace(vec![
+            make_skill("core-rules", &[], 10, true),
+            make_skill("idea-intake", &["http://"], 50, false),
+        ]);
+
+        let matched = ws.match_skills("look at http://example.com", 5);
+        assert_eq!(matched.len(), 2);
+        // Sorted by priority: core-rules (10) before idea-intake (50)
+        assert_eq!(matched[0].2.name, "core-rules");
+        assert_eq!(matched[1].2.name, "idea-intake");
+    }
+
+    #[test]
+    fn test_match_skills_priority_sorting() {
+        let ws = make_workspace(vec![
+            make_skill("low-prio", &["test"], 200, false),
+            make_skill("high-prio", &["test"], 10, false),
+            make_skill("med-prio", &["test"], 100, false),
+        ]);
+
+        let matched = ws.match_skills("this is a test", 5);
+        assert_eq!(matched.len(), 3);
+        assert_eq!(matched[0].2.name, "high-prio");
+        assert_eq!(matched[1].2.name, "med-prio");
+        assert_eq!(matched[2].2.name, "low-prio");
+    }
+
+    #[test]
+    fn test_match_skills_max_limit() {
+        let ws = make_workspace(vec![
+            make_skill("skill-a", &["test"], 10, false),
+            make_skill("skill-b", &["test"], 20, false),
+            make_skill("skill-c", &["test"], 30, false),
+            make_skill("skill-d", &["test"], 40, false),
+            make_skill("skill-e", &["test"], 50, false),
+        ]);
+
+        let matched = ws.match_skills("test message", 3);
+        assert_eq!(matched.len(), 3);
+        assert_eq!(matched[0].2.name, "skill-a");
+        assert_eq!(matched[1].2.name, "skill-b");
+        assert_eq!(matched[2].2.name, "skill-c");
+    }
+
+    #[test]
+    fn test_match_skills_case_insensitive() {
+        let ws = make_workspace(vec![
+            make_skill("idea-intake", &["HTTPS://", "Idea:"], 50, false),
+        ]);
+
+        let matched = ws.match_skills("check https://example.com", 5);
+        assert_eq!(matched.len(), 1);
+
+        let matched2 = ws.match_skills("IDEA: something cool", 5);
+        assert_eq!(matched2.len(), 1);
+    }
+
+    #[test]
+    fn test_match_skills_chinese_triggers() {
+        let ws = make_workspace(vec![
+            make_skill("idea-intake", &["想法:", "记录一下"], 50, false),
+        ]);
+
+        let matched = ws.match_skills("想法: 做一个新项目", 5);
+        assert_eq!(matched.len(), 1);
+
+        let matched2 = ws.match_skills("帮我记录一下这个想法", 5);
+        assert_eq!(matched2.len(), 1);
+    }
+
+    #[test]
+    fn test_match_skills_empty_message() {
+        let ws = make_workspace(vec![
+            make_skill("always", &[], 10, true),
+            make_skill("triggered", &["hello"], 50, false),
+        ]);
+
+        let matched = ws.match_skills("", 5);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].2.name, "always");
+    }
+}

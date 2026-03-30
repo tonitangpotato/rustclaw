@@ -257,7 +257,8 @@ impl AgentRunner {
         }
 
         // 4. Build system prompt (include HEARTBEAT.md if this is a heartbeat poll)
-        let mut system_prompt = self.workspace.build_system_prompt_with_options(is_heartbeat);
+        //    Pass user_message for dynamic skill injection
+        let mut system_prompt = self.workspace.build_system_prompt_with_skills(is_heartbeat, Some(user_message));
         if !memory_context.is_empty() {
             system_prompt.push_str("\n\n## Relevant Memories\n");
             system_prompt.push_str(&memory_context);
@@ -581,8 +582,8 @@ impl AgentRunner {
         // Get or create session
         let mut session = self.sessions.get_or_create(&session_key).await;
 
-        // Build system prompt from sub-agent's workspace
-        let system_prompt = subagent.workspace.build_system_prompt();
+        // Build system prompt from sub-agent's workspace (pass user message for skill matching)
+        let system_prompt = subagent.workspace.build_system_prompt_with_skills(false, Some(user_message));
 
         // Add user message
         session.messages.push(Message::text("user", user_message));
@@ -789,8 +790,8 @@ impl AgentRunner {
             }
         };
 
-        // 4. Build system prompt
-        let mut system_prompt = self.workspace.build_system_prompt();
+        // 4. Build system prompt (pass user message for dynamic skill injection)
+        let mut system_prompt = self.workspace.build_system_prompt_with_skills(false, Some(&user_message));
         if !memory_context.is_empty() {
             system_prompt.push_str("\n\n## Relevant Memories\n");
             system_prompt.push_str(&memory_context);

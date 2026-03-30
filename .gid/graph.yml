@@ -12876,7 +12876,7 @@ nodes:
     file_path: channels/mod.rs
 - id: feat-skill-trigger-system
   title: Implement Skill Trigger System (Metadata + Dynamic Injection)
-  status: inprogress
+  status: done
   description: '方案 2: 解析 frontmatter metadata，根据 triggers 动态注入 skills 到 system prompt，避免 context 爆炸'
   tags:
   - feature
@@ -12884,55 +12884,55 @@ nodes:
   - workspace
 - id: task-parse-frontmatter
   title: Parse skill frontmatter metadata
-  status: todo
+  status: done
   description: 在 src/workspace.rs 添加 SkillMetadata struct + parse_skill_frontmatter() 函数，解析 YAML frontmatter（name, description, triggers, priority, always_load, max_turns）
   tags:
   - subtask
   - workspace
 - id: task-match-triggers
   title: Implement trigger matching logic
-  status: todo
+  status: done
   description: '在 src/workspace.rs 添加 match_skills(user_message: &str) 函数，根据 triggers + always_load + priority 匹配 skills，返回 top-5'
   tags:
   - subtask
   - workspace
 - id: task-inject-skills
   title: Dynamic skill injection in agent.rs
-  status: todo
+  status: done
   description: 在 src/agent.rs 的 call_llm() 里，每次调用前动态匹配 skills 并注入到 system prompt（调用 workspace.build_system_prompt_with_skills()）
   tags:
   - subtask
   - agent
 - id: task-unit-tests
   title: Unit tests for frontmatter parser and matching
-  status: todo
+  status: done
   description: 为 parse_skill_frontmatter() 和 match_skills() 编写单元测试（src/workspace.rs mod tests），覆盖边界情况（无 frontmatter、trigger 冲突、priority 排序）
   tags:
   - test
   - workspace
 - id: task-e2e-test
   title: E2E test for skill trigger system
-  status: todo
+  status: done
   description: 端到端测试：创建测试 skill（SKILL.md + frontmatter），发送匹配的消息，验证 skill 是否被注入到 system prompt
   tags:
   - test
   - integration
 - id: task-update-idea-intake-skill
   title: Update idea-intake skill with frontmatter
-  status: todo
+  status: done
   description: 更新 skills/idea-intake/SKILL.md，添加 frontmatter metadata（triggers, priority, always_load）
   tags:
   - docs
   - skills
 - id: task-update-docs
   title: Update documentation for skill trigger system
-  status: todo
+  status: done
   description: 更新 AGENTS.md 和 TOOLS.md，说明 skill trigger system 的工作原理（frontmatter format, matching rules, priority）
   tags:
   - docs
 - id: project-skills-manager
   title: Build skills-manager - Universal Skill Management CLI
-  status: todo
+  status: inprogress
   description: 'A cargo-style CLI tool for managing AI agent skills across any framework (RustClaw, Python agents, etc.). Features: list, enable/disable, test triggers, stats, template generation.'
   tags:
   - project
@@ -12940,7 +12940,7 @@ nodes:
   - universal
 - id: task-skill-schema
   title: Design universal skill schema and metadata format
-  status: todo
+  status: inprogress
   description: Define skill frontmatter schema (YAML), core data structures (Skill, Trigger, Metadata), and validation rules. Should be language-agnostic.
   tags:
   - design
