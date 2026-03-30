@@ -33,8 +33,8 @@ engramai = "0.2.2"
 gid-core = "0.2.1"
 
 # Skills management (using SKM - Agent Skill Engine)
-skm-core = { path = "../clawd/projects/skm/crates/skm-core" }
-skm-select = { path = "../clawd/projects/skm/crates/skm-select", default-features = false }
+skm-core = "0.1"
+skm-select = { version = "0.1", default-features = false }
 
 # CLI
 clap = { version = "4", features = ["derive"] }

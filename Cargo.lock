@@ -3017,7 +3017,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3775,6 +3775,8 @@ checksum = "b2aa850e253778c88a04c3d7323b043aeda9d3e30d5971937c1855769763678e"
 [[package]]
 name = "skm-core"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "514c125d319aa560b050248899c26cf646b553b0100535e3555b75952be4926c"
 dependencies = [
  "notify",
  "serde",
@@ -3789,6 +3791,8 @@ dependencies = [
 [[package]]
 name = "skm-disclose"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ce03aecc7ac47ec42d982064a05c64c539c75cddee57eaf370dfa297c97214e"
 dependencies = [
  "serde",
  "skm-core",
@@ -3800,6 +3804,8 @@ dependencies = [
 [[package]]
 name = "skm-embed"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44b576eddfa2ce0c1900d5b622afa92fef2e684660d52a272cb3bb080a836e2c"
 dependencies = [
  "async-trait",
  "bincode",
@@ -3817,6 +3823,8 @@ dependencies = [
 [[package]]
 name = "skm-select"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81d89bd4c8c392a89921fa3612a57cc98f4e3bb50e7f19861b7618dcec4a67b7"
 dependencies = [
  "async-trait",
  "glob",
