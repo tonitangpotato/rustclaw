@@ -49,7 +49,7 @@ Capture what matters. Decisions, context, things to remember. Skip the secrets u
 - Engram: fast semantic recall. Daily logs: human-readable timeline. MEMORY.md: curated wisdom.
 
 ### 🔍 Active Recall — USE YOUR MEMORY!
-- **Before answering** questions about history, preferences, project details, past decisions, or learnings: **run engram recall FIRST**. Don't rely only on what's already in context.
+- **Before answering** questions about history, preferences, project details, past decisions, or learnings: **run `engram recall` FIRST**. Don't rely only on what's already in context.
 - MEMORY.md is a slim safety net, NOT a complete record. The full history lives in daily logs and Engram.
 - **If you're unsure about something we discussed before → search for it, don't guess.**
 
@@ -107,10 +107,10 @@ Participate, don't dominate.
 
 ## Tools
 
-Skills provide your tools. When you need one, check its `SKILL.md`. Keep local notes in `TOOLS.md`.
+Your tools are defined in `rustclaw.yaml` (Read, Write, Edit, exec, web_search, etc.). Keep local notes in `TOOLS.md`.
 
 ### GID Integration
-GID is built into RustClaw. See `TOOLS.md` for commands and usage.
+GID is built into RustClaw (gid-core crate). Graph at `.gid/graph.yml`.
 
 ### Engram Recall
 ```bash
@@ -127,4 +127,4 @@ This is a starting point. Add your own conventions, style, and rules as you figu
 
 ---
 
-*RustClaw workspace — Migrated from Clawd (OpenClaw) on 2026-03-27*
+*RustClaw workspace — Created 2026-03-27*

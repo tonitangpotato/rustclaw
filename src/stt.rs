@@ -1,20 +1,23 @@
-//! Speech-to-Text via Whisper.
+//! Speech-to-Text via whisper.cpp (C++ implementation, ~3x faster than Python whisper).
 //!
-//! Converts audio files (OGG) to text using OpenAI Whisper CLI.
+//! Converts audio files (OGG) to text using whisper-cli with large-v3-turbo model.
 
 use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command;
 
-/// Transcribe an OGG audio file to text using Whisper.
+/// Default whisper.cpp model path.
+const DEFAULT_MODEL: &str = "/Users/potato/.local/share/whisper-cpp/models/ggml-large-v3-turbo.bin";
+
+/// Transcribe an OGG audio file to text using whisper.cpp.
 ///
 /// Process:
 /// 1. Convert OGG to WAV (16kHz mono) using ffmpeg
-/// 2. Run whisper CLI on the WAV file
+/// 2. Run whisper-cli on the WAV file
 /// 3. Read the output text file
 /// 4. Return transcription
 ///
-/// Falls back to a placeholder message if Whisper isn't available.
+/// Falls back to original whisper if whisper-cli is not available.
 pub async fn transcribe(ogg_path: &str) -> anyhow::Result<String> {
     let ogg_path = Path::new(ogg_path);
     if !ogg_path.exists() {
@@ -22,7 +25,7 @@ pub async fn transcribe(ogg_path: &str) -> anyhow::Result<String> {
     }
 
     let wav_path = "/tmp/rustclaw_stt.wav";
-    let txt_path = "/tmp/rustclaw_stt.txt";
+    let out_base = "/tmp/rustclaw_stt_out";
 
     // Step 1: Convert OGG to WAV using ffmpeg
     let ffmpeg_result = Command::new("ffmpeg")
@@ -52,37 +55,44 @@ pub async fn transcribe(ogg_path: &str) -> anyhow::Result<String> {
         }
     }
 
-    // Step 2: Run Whisper on the WAV file
-    // Try 'whisper' first, then 'whisper-cli'
-    let whisper_result = run_whisper(wav_path, "/tmp").await;
-
-    match whisper_result {
-        Ok(()) => {
-            tracing::debug!("Whisper transcription complete");
+    // Step 2: Try whisper-cli (whisper.cpp) first, then fall back to Python whisper
+    let model_path = DEFAULT_MODEL;
+    if Path::new(model_path).exists() {
+        match run_whisper_cpp(wav_path, model_path, out_base).await {
+            Ok(text) => {
+                let _ = tokio::fs::remove_file(wav_path).await;
+                return Ok(text);
+            }
+            Err(e) => {
+                tracing::warn!("whisper.cpp failed, falling back to Python whisper: {}", e);
+            }
         }
+    } else {
+        tracing::warn!("whisper.cpp model not found at {}, falling back to Python whisper", model_path);
+    }
+
+    // Fallback: Python whisper
+    match run_whisper_python(wav_path, "/tmp").await {
+        Ok(()) => {}
         Err(e) => {
-            tracing::warn!("Whisper failed: {}", e);
-            // Clean up
+            tracing::warn!("Python whisper also failed: {}", e);
             let _ = tokio::fs::remove_file(wav_path).await;
             return Ok("[Voice message received - STT not configured]".to_string());
         }
     }
 
-    // Step 3: Read the output text file
-    // Whisper outputs to /tmp/rustclaw_stt.txt (same base name as input + .txt)
-    let transcription = match tokio::fs::read_to_string(txt_path).await {
+    let python_txt = "/tmp/rustclaw_stt.txt";
+    let transcription = match tokio::fs::read_to_string(python_txt).await {
         Ok(text) => text.trim().to_string(),
         Err(e) => {
             tracing::warn!("Failed to read transcription: {}", e);
-            // Clean up
             let _ = tokio::fs::remove_file(wav_path).await;
             return Ok("[Voice message received - transcription failed]".to_string());
         }
     };
 
-    // Clean up temp files
     let _ = tokio::fs::remove_file(wav_path).await;
-    let _ = tokio::fs::remove_file(txt_path).await;
+    let _ = tokio::fs::remove_file(python_txt).await;
 
     if transcription.is_empty() {
         Ok("[Voice message received - no speech detected]".to_string())
@@ -91,13 +101,49 @@ pub async fn transcribe(ogg_path: &str) -> anyhow::Result<String> {
     }
 }
 
-/// Run Whisper CLI on a WAV file.
-async fn run_whisper(wav_path: &str, output_dir: &str) -> anyhow::Result<()> {
-    // Try 'whisper' command first (standard OpenAI Whisper)
+/// Run whisper.cpp (whisper-cli) on a WAV file. Returns transcription text directly.
+async fn run_whisper_cpp(wav_path: &str, model_path: &str, out_base: &str) -> anyhow::Result<String> {
+    let txt_path = format!("{}.txt", out_base);
+
+    // Clean up old output
+    let _ = tokio::fs::remove_file(&txt_path).await;
+
+    let output = Command::new("whisper-cli")
+        .args([
+            "-m", model_path,
+            "-l", "zh",
+            "-f", wav_path,
+            "-otxt",
+            "-of", out_base,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("whisper-cli failed: {}", stderr);
+    }
+
+    let text = tokio::fs::read_to_string(&txt_path).await?;
+    let _ = tokio::fs::remove_file(&txt_path).await;
+
+    let trimmed = text.trim().to_string();
+    if trimmed.is_empty() {
+        anyhow::bail!("whisper-cli produced empty output");
+    }
+
+    tracing::info!("whisper.cpp transcription ({} chars)", trimmed.len());
+    Ok(trimmed)
+}
+
+/// Fallback: Run Python whisper CLI on a WAV file.
+async fn run_whisper_python(wav_path: &str, output_dir: &str) -> anyhow::Result<()> {
     let result = Command::new("whisper")
         .args([
             wav_path,
-            "--model", "base",
+            "--model", "turbo",
             "--output_format", "txt",
             "--output_dir", output_dir,
             "--language", "zh",
@@ -108,37 +154,12 @@ async fn run_whisper(wav_path: &str, output_dir: &str) -> anyhow::Result<()> {
         .await;
 
     match result {
-        Ok(output) if output.status.success() => return Ok(()),
+        Ok(output) if output.status.success() => Ok(()),
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            tracing::warn!("whisper stderr: {}", stderr);
-            tracing::warn!("whisper stdout: {}", stdout);
-            tracing::warn!("whisper exit code: {:?}", output.status.code());
-            anyhow::bail!("whisper command failed (exit {}): {}", output.status, stderr);
+            anyhow::bail!("whisper command failed: {}", stderr);
         }
-        Err(_) => {
-            // whisper not found, try whisper-cli
-        }
-    }
-
-    // Try 'whisper-cli' as fallback
-    let result = Command::new("whisper-cli")
-        .args([
-            wav_path,
-            "--model", "base",
-            "--output_format", "txt",
-            "--output_dir", output_dir,
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .status()
-        .await;
-
-    match result {
-        Ok(status) if status.success() => Ok(()),
-        Ok(_) => anyhow::bail!("whisper-cli command failed"),
-        Err(e) => anyhow::bail!("Neither whisper nor whisper-cli available: {}", e),
+        Err(e) => anyhow::bail!("whisper not available: {}", e),
     }
 }
 

@@ -27,12 +27,33 @@ pub struct Workspace {
     pub bootstrap: Option<String>,
     /// Current LLM model name (set after construction).
     pub model: Option<String>,
+    /// Loaded skills from skills/*/SKILL.md
+    pub skills: Vec<(String, String)>,
 }
 
 impl Workspace {
     /// Load workspace files from a directory.
     pub fn load(dir: &str) -> anyhow::Result<Self> {
         let root = Path::new(dir).to_path_buf();
+
+        // Load skills from skills/ directory
+        let mut skills = Vec::new();
+        let skills_dir = root.join("skills");
+        if skills_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&skills_dir) {
+                let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+                entries.sort_by_key(|e| e.file_name());
+                for entry in entries {
+                    if entry.path().is_dir() {
+                        let skill_file = entry.path().join("SKILL.md");
+                        if let Ok(content) = std::fs::read_to_string(&skill_file) {
+                            let name = entry.file_name().to_string_lossy().to_string();
+                            skills.push((name, content));
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(Self {
             soul: Self::read_optional(&root, "SOUL.md"),
@@ -44,6 +65,7 @@ impl Workspace {
             identity: Self::read_optional(&root, "IDENTITY.md"),
             bootstrap: Self::read_optional(&root, "BOOTSTRAP.md"),
             model: None,
+            skills,
             root,
         })
     }
@@ -153,6 +175,23 @@ impl Workspace {
                 output.push_str(&daily);
             }
             output.push_str("\n");
+        }
+
+        // Include loaded skills
+        if !self.skills.is_empty() {
+            output.push_str("\n## Active Skills\n");
+            output.push_str("These skills define automated workflows. Follow them when trigger conditions match.\n\n");
+            for (name, content) in &self.skills {
+                output.push_str(&format!("### skills/{}/SKILL.md\n", name));
+                // Truncate individual skills to 4KB
+                if content.len() > 4096 {
+                    output.push_str(crate::text_utils::truncate_bytes(content, 4096));
+                    output.push_str("\n...(truncated)...\n");
+                } else {
+                    output.push_str(content);
+                }
+                output.push_str("\n\n");
+            }
         }
 
         output

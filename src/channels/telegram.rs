@@ -2,6 +2,7 @@
 //!
 //! Uses long polling (getUpdates) — simple, no webhook needed.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::agent::AgentRunner;
@@ -9,6 +10,7 @@ use crate::config::TelegramConfig;
 use crate::stt;
 use crate::text_utils;
 use crate::tts::{synthesize, TtsConfig};
+use tokio::sync::Mutex;
 
 const TELEGRAM_API: &str = "https://api.telegram.org";
 
@@ -20,6 +22,8 @@ struct TelegramBot {
     runner: Arc<AgentRunner>,
     /// Bot username (fetched via getMe on startup)
     bot_username: String,
+    /// Per-chat voice mode state
+    voice_mode: Arc<Mutex<HashMap<i64, bool>>>,
 }
 
 impl TelegramBot {
@@ -37,6 +41,7 @@ impl TelegramBot {
             config,
             runner,
             bot_username,
+            voice_mode: Arc::new(Mutex::new(HashMap::new())),
         })
     }
     
@@ -252,6 +257,18 @@ impl TelegramBot {
         tracing::info!("Message from user {} in chat {}: {}", user_id, chat_id, 
             text_utils::truncate_chars(&text, 50));
 
+        // Check for voice mode toggle
+        if let Some(enabled) = Self::detect_voice_mode_toggle(&text) {
+            self.set_voice_mode(chat_id, enabled).await;
+            let msg = if enabled {
+                "🎙 Voice mode ON — 接下来我会用语音回复你"
+            } else {
+                "💬 Voice mode OFF — 切换回文字回复"
+            };
+            self.send_message(chat_id, msg, reply_to).await?;
+            return Ok(());
+        }
+
         // Send "typing" indicator
         let _ = self
             .client
@@ -274,44 +291,7 @@ impl TelegramBot {
             .await
         {
             Ok(response) => {
-                let trimmed = response.trim();
-                if !trimmed.is_empty()
-                    && trimmed != "NO_REPLY"
-                    && trimmed != "HEARTBEAT_OK"
-                {
-                    // Check if response should be sent as voice
-                    if let Some(voice_text) = Self::extract_voice_text(trimmed) {
-                        // Send "recording voice" indicator
-                        let _ = self
-                            .client
-                            .post(self.api_url("sendChatAction"))
-                            .json(&serde_json::json!({
-                                "chat_id": chat_id,
-                                "action": "record_voice",
-                            }))
-                            .send()
-                            .await;
-
-                        // Synthesize TTS
-                        let tts_config = TtsConfig::default();
-                        match synthesize(&voice_text, &tts_config).await {
-                            Ok(ogg_path) => {
-                                if let Err(e) = self.send_voice(chat_id, &ogg_path).await {
-                                    tracing::error!("Failed to send voice: {}", e);
-                                    // Fallback to text
-                                    self.send_message(chat_id, trimmed, reply_to).await?;
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("TTS synthesis failed: {}", e);
-                                // Fallback to text
-                                self.send_message(chat_id, trimmed, reply_to).await?;
-                            }
-                        }
-                    } else {
-                        self.send_message(chat_id, trimmed, reply_to).await?;
-                    }
-                }
+                self.send_response(chat_id, &response, reply_to).await?;
             }
             Err(e) => {
                 tracing::error!("Agent error: {}", e);
@@ -744,13 +724,111 @@ impl TelegramBot {
 
     /// Extract voice text if response should be sent as voice.
     /// Returns None if not a voice response, Some(text) with prefix stripped otherwise.
+    /// Handles VOICE: at the start or after some preamble text.
+    /// Send a response, automatically using voice if voice mode is on or VOICE: prefix detected.
+    async fn send_response(&self, chat_id: i64, response: &str, reply_to: Option<i64>) -> anyhow::Result<()> {
+        let trimmed = response.trim();
+        if trimmed.is_empty() || trimmed == "NO_REPLY" || trimmed == "HEARTBEAT_OK" {
+            return Ok(());
+        }
+
+        // Determine if we should send as voice:
+        // 1. Explicit VOICE: prefix in response
+        // 2. Voice mode is active for this chat
+        let voice_text = if let Some(vt) = Self::extract_voice_text(trimmed) {
+            Some(vt)
+        } else if self.is_voice_mode(chat_id).await {
+            // Strip any VOICE: prefix that might be partial, otherwise use full text
+            Some(trimmed.to_string())
+        } else {
+            None
+        };
+
+        if let Some(text_to_speak) = voice_text {
+            // Send "recording voice" indicator
+            let _ = self.client
+                .post(self.api_url("sendChatAction"))
+                .json(&serde_json::json!({
+                    "chat_id": chat_id,
+                    "action": "record_voice",
+                }))
+                .send()
+                .await;
+
+            let tts_config = TtsConfig::default();
+            match synthesize(&text_to_speak, &tts_config).await {
+                Ok(ogg_path) => {
+                    if let Err(e) = self.send_voice(chat_id, &ogg_path).await {
+                        tracing::error!("Failed to send voice: {}", e);
+                        self.send_message(chat_id, trimmed, reply_to).await?;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("TTS synthesis failed: {}", e);
+                    self.send_message(chat_id, trimmed, reply_to).await?;
+                }
+            }
+        } else {
+            self.send_message(chat_id, trimmed, reply_to).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Check if user message is toggling voice mode. Returns Some(true/false) if toggling.
+    fn detect_voice_mode_toggle(text: &str) -> Option<bool> {
+        let lower = text.to_lowercase();
+        let normalized = lower.trim();
+
+        // Enable patterns
+        let enable_patterns = [
+            "voice mode", "开启voice", "语音模式", "用语音回复", "语音回复我",
+            "enable voice", "turn on voice", "start voice mode",
+        ];
+        // Disable patterns
+        let disable_patterns = [
+            "关闭voice", "关闭语音", "文字模式", "用文字回复", "text mode",
+            "disable voice", "turn off voice", "stop voice mode",
+        ];
+
+        for p in &disable_patterns {
+            if normalized.contains(p) {
+                return Some(false);
+            }
+        }
+        for p in &enable_patterns {
+            if normalized.contains(p) {
+                return Some(true);
+            }
+        }
+        None
+    }
+
+    /// Check if voice mode is active for a chat.
+    async fn is_voice_mode(&self, chat_id: i64) -> bool {
+        let map = self.voice_mode.lock().await;
+        map.get(&chat_id).copied().unwrap_or(false)
+    }
+
+    /// Set voice mode for a chat.
+    async fn set_voice_mode(&self, chat_id: i64, enabled: bool) {
+        let mut map = self.voice_mode.lock().await;
+        map.insert(chat_id, enabled);
+        tracing::info!("Voice mode for chat {}: {}", chat_id, if enabled { "ON" } else { "OFF" });
+    }
+
     fn extract_voice_text(response: &str) -> Option<String> {
-        // Check for VOICE: prefix
+        // Check for VOICE: prefix at start
         if let Some(rest) = response.strip_prefix("VOICE:") {
             return Some(rest.trim().to_string());
         }
-        // Check for 🔊 prefix
+        // Check for 🔊 prefix at start
         if let Some(rest) = response.strip_prefix("🔊") {
+            return Some(rest.trim().to_string());
+        }
+        // Check for VOICE: anywhere in response (LLM sometimes adds preamble)
+        if let Some(idx) = response.find("\nVOICE:") {
+            let rest = &response[idx + 7..]; // 7 = "\nVOICE:".len()
             return Some(rest.trim().to_string());
         }
         None
@@ -848,42 +926,7 @@ impl TelegramBot {
             .await
         {
             Ok(response) => {
-                let trimmed = response.trim();
-                if !trimmed.is_empty()
-                    && trimmed != "NO_REPLY"
-                    && trimmed != "HEARTBEAT_OK"
-                {
-                    // Check if response should be sent as voice
-                    if let Some(voice_text) = Self::extract_voice_text(trimmed) {
-                        // Send "recording voice" indicator
-                        let _ = self
-                            .client
-                            .post(self.api_url("sendChatAction"))
-                            .json(&serde_json::json!({
-                                "chat_id": chat_id,
-                                "action": "record_voice",
-                            }))
-                            .send()
-                            .await;
-
-                        // Synthesize TTS
-                        let tts_config = TtsConfig::default();
-                        match synthesize(&voice_text, &tts_config).await {
-                            Ok(ogg_path) => {
-                                if let Err(e) = self.send_voice(chat_id, &ogg_path).await {
-                                    tracing::error!("Failed to send voice: {}", e);
-                                    self.send_message(chat_id, trimmed, reply_to).await?;
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("TTS synthesis failed: {}", e);
-                                self.send_message(chat_id, trimmed, reply_to).await?;
-                            }
-                        }
-                    } else {
-                        self.send_message(chat_id, trimmed, reply_to).await?;
-                    }
-                }
+                self.send_response(chat_id, &response, reply_to).await?;
             }
             Err(e) => {
                 tracing::error!("Agent error: {}", e);

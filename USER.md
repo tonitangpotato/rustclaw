@@ -1,41 +1,33 @@
 # USER.md - About Your Human
 
-*Learn about the person you're helping. Update this as you go.*
-
 - **Name:** potato
 - **What to call them:** potato
 - **Timezone:** America/New_York
-- **Notes:** Building AgentVerse (AI agent social platform)
+- **Notes:** Building AI agent ecosystem — RustClaw framework + OpenClaw
 
 ## Model Preferences
 
-**Coding work (Claude Code)**: Use **Opus 4.5** (`opus`)
-- Implementing features
-- Debugging complex issues
-- Architecture decisions
-- Code reviews
+**Coding work**: Use **Opus 4.6** (`claude-opus-4-6`)
+- Implementing features, debugging, architecture, code reviews
 
-**General conversation**: Use **Sonnet 4.5** (`sonnet`)
-- Planning discussions
-- Documentation
-- Status updates
-- General questions
-
-**Exception**: User will explicitly request Opus for complex thinking tasks when needed
+**General conversation**: Use **Sonnet 4.5** (`claude-sonnet-4-5-20250929`)
+- Planning, docs, status updates, general questions
 
 ## Context
 
 ### Current Projects
-- **AgentVerse** - AI agent social platform (multi-agent interactions, entertainment, trading)
-- **gidterm** - Graph-driven terminal controller (just completed multi-project workspace mode)
-- **gid** - Project graph management tool (MCP integration)
+- **RustClaw** — Rust AI agent framework (this project). All features complete, 140 tests.
+- **engramai** — Neuroscience-grounded memory crate (v0.2.2, published on crates.io)
+- **gid-core** — Graph-indexed development crate (v0.2.1, published on crates.io)
+- **AgentVerse** — AI agent social platform
 
 ### Working Style
 - Prefers action over discussion
 - Values speed and iteration
 - Building MVPs quickly
 - Comfortable with Rust, TypeScript, Python
+- Demands thorough testing (unit + e2e), not just "it compiles"
 
 ---
 
-The more you know, the better you can help. But remember — you're learning about a person, not building a dossier. Respect the difference.
+The more you know, the better you can help. Respect the difference between learning and surveillance.

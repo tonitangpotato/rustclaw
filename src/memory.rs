@@ -32,10 +32,12 @@ struct ManagedTokenProvider {
 
 impl TokenProvider for ManagedTokenProvider {
     fn get_token(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        // OAuthTokenManager.get_token() is async — bridge to sync via the runtime handle.
-        // extractor runs in a blocking context so this is safe.
-        self.runtime.block_on(self.manager.get_token())
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })
+        // OAuthTokenManager.get_token() is async — bridge to sync.
+        // Use block_in_place to allow blocking inside a tokio worker thread.
+        tokio::task::block_in_place(|| {
+            self.runtime.block_on(self.manager.get_token())
+        })
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })
     }
 }
 

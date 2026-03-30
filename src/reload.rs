@@ -52,9 +52,9 @@ pub fn start_config_watcher(
     })?;
 
     let watch_path = Path::new(config_path);
-    // Watch the parent directory (some editors do atomic save = delete + create)
-    let watch_dir = watch_path.parent().unwrap_or(Path::new("."));
-    watcher.watch(watch_dir, RecursiveMode::NonRecursive)?;
+    // Watch the config file directly. On macOS, watching the parent directory
+    // can cause FSEvents to open fds for unrelated files in the workspace.
+    watcher.watch(watch_path, RecursiveMode::NonRecursive)?;
 
     info!(path = config_path, "Config hot-reload watcher started");
 
