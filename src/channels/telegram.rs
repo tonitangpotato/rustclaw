@@ -269,35 +269,49 @@ impl TelegramBot {
             return Ok(());
         }
 
-        // Send "typing" indicator
-        let _ = self
-            .client
-            .post(self.api_url("sendChatAction"))
-            .json(&serde_json::json!({
-                "chat_id": chat_id,
-                "action": "typing",
-            }))
-            .send()
-            .await;
+        // Send persistent "typing" indicator that repeats every 4 seconds
+        let typing_client = self.client.clone();
+        let typing_url = self.api_url("sendChatAction");
+        let typing_chat_id = chat_id;
+        let typing_handle = tokio::spawn(async move {
+            loop {
+                let _ = typing_client
+                    .post(&typing_url)
+                    .json(&serde_json::json!({
+                        "chat_id": typing_chat_id,
+                        "action": "typing",
+                    }))
+                    .send()
+                    .await;
+                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            }
+        });
 
         // Process with agent (streaming or regular)
-        if self.config.stream_mode {
-            return self.process_with_streaming(chat_id, &session_key, &text, user_id, reply_to).await;
-        }
-
-        match self
-            .runner
-            .process_message(&session_key, &text, Some(&user_id_str), Some("telegram"))
-            .await
-        {
-            Ok(response) => {
-                self.send_response(chat_id, &response, reply_to).await?;
+        let result = if self.config.stream_mode {
+            self.process_with_streaming(chat_id, &session_key, &text, user_id, reply_to).await
+        } else {
+            match self
+                .runner
+                .process_message(&session_key, &text, Some(&user_id_str), Some("telegram"))
+                .await
+            {
+                Ok(response) => {
+                    // Stop typing before sending response
+                    typing_handle.abort();
+                    self.send_response(chat_id, &response, reply_to).await
+                }
+                Err(e) => {
+                    typing_handle.abort();
+                    tracing::error!("Agent error: {}", e);
+                    self.send_message(chat_id, &format!("⚠️ Error: {}", e), reply_to).await
+                }
             }
-            Err(e) => {
-                tracing::error!("Agent error: {}", e);
-                self.send_message(chat_id, &format!("⚠️ Error: {}", e), reply_to).await?;
-            }
-        }
+        };
+        
+        // Ensure typing is stopped
+        typing_handle.abort();
+        result?;
 
         Ok(())
     }

@@ -13,6 +13,113 @@
 use chrono::Local;
 use std::path::{Path, PathBuf};
 
+/// Metadata parsed from SKILL.md frontmatter.
+#[derive(Debug, Clone)]
+pub struct SkillMetadata {
+    pub name: String,
+    pub description: String,
+    pub triggers: Vec<String>,
+    pub priority: u8,
+    pub always_load: bool,
+    pub max_context_bytes: usize,
+}
+
+impl Default for SkillMetadata {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: String::new(),
+            triggers: Vec::new(),
+            priority: 100,
+            always_load: false,
+            max_context_bytes: 4096,
+        }
+    }
+}
+
+/// Parse YAML frontmatter from a SKILL.md file.
+///
+/// Frontmatter is delimited by `---` at the start of the file.
+/// Returns (metadata, content_without_frontmatter).
+/// If no frontmatter is found, returns defaults and the full content.
+pub fn parse_skill_frontmatter(content: &str, fallback_name: &str) -> (SkillMetadata, String) {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return (
+            SkillMetadata {
+                name: fallback_name.to_string(),
+                ..Default::default()
+            },
+            content.to_string(),
+        );
+    }
+
+    // Find the closing ---
+    let after_first = &trimmed[3..];
+    // Skip the newline after the opening ---
+    let after_first = after_first.strip_prefix('\n').or_else(|| after_first.strip_prefix("\r\n")).unwrap_or(after_first);
+
+    let Some(end_idx) = after_first.find("\n---") else {
+        // No closing delimiter — treat entire content as body (no frontmatter)
+        return (
+            SkillMetadata {
+                name: fallback_name.to_string(),
+                ..Default::default()
+            },
+            content.to_string(),
+        );
+    };
+
+    let yaml_str = &after_first[..end_idx];
+    let rest_start = end_idx + 4; // skip \n---
+    let body = if rest_start < after_first.len() {
+        let rest = &after_first[rest_start..];
+        // Strip leading newline from body
+        rest.strip_prefix('\n')
+            .or_else(|| rest.strip_prefix("\r\n"))
+            .unwrap_or(rest)
+    } else {
+        ""
+    };
+
+    let mut meta = SkillMetadata {
+        name: fallback_name.to_string(),
+        ..Default::default()
+    };
+
+    // Simple YAML parsing — no serde_yaml dependency needed
+    for line in yaml_str.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        if let Some(val) = line.strip_prefix("name:") {
+            meta.name = val.trim().to_string();
+        } else if let Some(val) = line.strip_prefix("description:") {
+            meta.description = val.trim().to_string();
+        } else if let Some(val) = line.strip_prefix("priority:") {
+            if let Ok(p) = val.trim().parse::<u8>() {
+                meta.priority = p;
+            }
+        } else if let Some(val) = line.strip_prefix("always_load:") {
+            meta.always_load = val.trim() == "true";
+        } else if let Some(val) = line.strip_prefix("max_context_bytes:") {
+            if let Ok(n) = val.trim().parse::<usize>() {
+                meta.max_context_bytes = n;
+            }
+        } else if line.starts_with("triggers:") {
+            // triggers is a YAML list — parsed from subsequent `  - value` lines
+            // handled below
+        } else if let Some(val) = line.strip_prefix("- ") {
+            // This is a list item — belongs to the last list key (triggers)
+            meta.triggers.push(val.trim().to_string());
+        }
+    }
+
+    (meta, body.to_string())
+}
+
 /// Workspace context loaded from markdown files.
 #[derive(Debug, Clone)]
 pub struct Workspace {
@@ -27,8 +134,8 @@ pub struct Workspace {
     pub bootstrap: Option<String>,
     /// Current LLM model name (set after construction).
     pub model: Option<String>,
-    /// Loaded skills from skills/*/SKILL.md
-    pub skills: Vec<(String, String)>,
+    /// Loaded skills from skills/*/SKILL.md: (dir_name, content_without_frontmatter, metadata)
+    pub skills: Vec<(String, String, SkillMetadata)>,
 }
 
 impl Workspace {
@@ -36,7 +143,7 @@ impl Workspace {
     pub fn load(dir: &str) -> anyhow::Result<Self> {
         let root = Path::new(dir).to_path_buf();
 
-        // Load skills from skills/ directory
+        // Load skills from skills/ directory, parsing frontmatter metadata
         let mut skills = Vec::new();
         let skills_dir = root.join("skills");
         if skills_dir.is_dir() {
@@ -47,8 +154,9 @@ impl Workspace {
                     if entry.path().is_dir() {
                         let skill_file = entry.path().join("SKILL.md");
                         if let Ok(content) = std::fs::read_to_string(&skill_file) {
-                            let name = entry.file_name().to_string_lossy().to_string();
-                            skills.push((name, content));
+                            let dir_name = entry.file_name().to_string_lossy().to_string();
+                            let (metadata, body) = parse_skill_frontmatter(&content, &dir_name);
+                            skills.push((dir_name, body, metadata));
                         }
                     }
                 }
@@ -83,11 +191,20 @@ impl Workspace {
 
     /// Build the system prompt from workspace files.
     pub fn build_system_prompt(&self) -> String {
-        self.build_system_prompt_with_options(false)
+        self.build_system_prompt_with_skills(false, None)
     }
 
-    /// Build the system prompt with optional heartbeat context.
+    /// Build the system prompt with optional heartbeat context (backward compat).
     pub fn build_system_prompt_with_options(&self, is_heartbeat: bool) -> String {
+        self.build_system_prompt_with_skills(is_heartbeat, None)
+    }
+
+    /// Build the system prompt with dynamic skill injection based on user message.
+    ///
+    /// When `user_message` is Some, only skills matching the message triggers
+    /// (plus always_load skills) are injected. When None, only always_load skills
+    /// are injected (for sub-agents / contexts without a user message).
+    pub fn build_system_prompt_with_skills(&self, is_heartbeat: bool, user_message: Option<&str>) -> String {
         let current_time = Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
         let workspace_path = self.root.display().to_string();
 
@@ -177,15 +294,16 @@ impl Workspace {
             output.push_str("\n");
         }
 
-        // Include loaded skills
-        if !self.skills.is_empty() {
+        // Dynamically inject matching skills based on user message
+        let matched_skills = self.match_skills(user_message.unwrap_or(""), 5);
+        if !matched_skills.is_empty() {
             output.push_str("\n## Active Skills\n");
             output.push_str("These skills define automated workflows. Follow them when trigger conditions match.\n\n");
-            for (name, content) in &self.skills {
+            for (name, content, meta) in &matched_skills {
                 output.push_str(&format!("### skills/{}/SKILL.md\n", name));
-                // Truncate individual skills to 4KB
-                if content.len() > 4096 {
-                    output.push_str(crate::text_utils::truncate_bytes(content, 4096));
+                let max_bytes = meta.max_context_bytes;
+                if content.len() > max_bytes {
+                    output.push_str(crate::text_utils::truncate_bytes(content, max_bytes));
                     output.push_str("\n...(truncated)...\n");
                 } else {
                     output.push_str(content);
@@ -195,6 +313,36 @@ impl Workspace {
         }
 
         output
+    }
+
+    /// Match skills against a user message. Returns matched skills sorted by priority.
+    ///
+    /// - Skills with `always_load: true` are always included.
+    /// - Otherwise, checks if any trigger keyword appears in the message (case-insensitive substring).
+    /// - Results are sorted by priority (lower = higher priority).
+    /// - Returns at most `max_skills` results.
+    pub fn match_skills(&self, user_message: &str, max_skills: usize) -> Vec<(String, String, SkillMetadata)> {
+        let msg_lower = user_message.to_lowercase();
+
+        let mut matched: Vec<(String, String, SkillMetadata)> = self
+            .skills
+            .iter()
+            .filter(|(_, _, meta)| {
+                if meta.always_load {
+                    return true;
+                }
+                meta.triggers.iter().any(|trigger| {
+                    msg_lower.contains(&trigger.to_lowercase())
+                })
+            })
+            .cloned()
+            .collect();
+
+        // Sort by priority (lower number = higher priority)
+        matched.sort_by_key(|(_, _, meta)| meta.priority);
+
+        matched.truncate(max_skills);
+        matched
     }
 
     /// Read a file if it exists, return None otherwise.

@@ -1,0 +1,47 @@
+[package]
+name = "skills-manager"
+version = "0.1.0"
+edition = "2021"
+authors = ["tonitangpotato <tonitangpotato@users.noreply.github.com>"]
+description = "Universal AI agent skill management — load, match, and manage markdown-based skills"
+repository = "https://github.com/tonitangpotato/rustclaw"
+license = "MIT"
+readme = "README.md"
+keywords = ["agent", "ai", "skills", "llm", "automation"]
+categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+name = "skills_manager"
+path = "src/lib.rs"
+
+[[bin]]
+name = "skillz"
+path = "src/main.rs"
+
+[dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Regex for trigger matching
+regex = "1"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Logging
+tracing = "0.1"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Glob patterns
+glob = "0.3"
+
+[dev-dependencies]
+tempfile = "3"

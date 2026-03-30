@@ -10,8 +10,8 @@
 |---|---|---|---|
 | Language | TypeScript | Rust | **Rust** |
 | Memory | MCP/external | PostgreSQL | **engramai (native)** |
-| Multi-agent | Config-based | Not yet | **Hierarchical orchestration + GID** |
-| Binary size | ~200MB (Node) | ~15MB | **~7MB** |
+| Multi-agent | Config-based | Not yet | **Hierarchical orchestration + GID code intelligence** |
+| Binary size | ~200MB (Node) | ~15MB | **~35MB** |
 | Startup | ~2s | ~1s | **<100ms** |
 | Memory recall | ~200ms (MCP) | N/A | **~5ms** |
 
@@ -73,8 +73,12 @@ Built-in tools available to the agent:
 - **exec** — Execute shell commands
 - **read_file** — Read file contents
 - **write_file** — Write files (creates dirs)
+- **edit_file** — Surgical text replacement
 - **list_dir** — List directory contents
 - **web_fetch** — Fetch URL content
+- **web_search** — Brave search API
+- **engram_recall** / **engram_store** — Cognitive memory recall and storage
+- **gid_*** — 30 graph-indexed development tools (code intelligence, task tracking, impact analysis)
 
 ## Hooks
 
@@ -159,11 +163,16 @@ Drive alignment is **multilingual by design** — embeddings capture semantic me
 - [x] Cron system (standard cron expressions + timezone)
 - [x] Multi-agent orchestration (orchestrator + specialist sub-agents)
 - [x] Safety layer (prompt injection detection, sensitive leak check)
-- [x] GID integration (30 tools — extract, schema, tasks, advise, etc.)
+- [x] GID integration (30 tools — code intelligence, task tracking, impact analysis)
 - [x] EmotionBus (drive alignment, behavior feedback, emotional trends, self-reflection)
 - [x] Cross-language drive alignment (embedding-based)
+- [x] Voice I/O — whisper.cpp STT (local, ~3s for 40s audio) + edge-tts TTS (Telegram voice messages)
+- [x] Config hot-reload (FSEvents file watcher)
+- [x] Stream mode (Telegram typing effect with chunked responses)
+- [x] Skill system (markdown-based workflow definitions, auto-loaded from `skills/`)
+- [x] Per-chat voice mode toggle
 - [ ] SQLite session persistence
-- [ ] Voice I/O (STT + TTS)
+- [ ] Reply-to-message context (quoted message parsing)
 - [ ] Web dashboard enhancements (orchestrator view, agent name)
 - [ ] Hot-reload orchestrator config
 - [ ] WASM tool sandbox
