@@ -5,6 +5,7 @@ mod auth_profiles;
 mod browser;
 mod channels;
 mod config;
+mod context;
 mod credential;
 mod cron;
 mod daemon;

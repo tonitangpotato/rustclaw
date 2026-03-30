@@ -55,6 +55,10 @@ pub struct AgentRunner {
     safety: SafetyLayer,
     /// Runtime model override (set via /model command)
     model_override: Arc<RwLock<Option<String>>>,
+    /// Runtime context (OS, version, etc.) — populated once at startup
+    pub runtime_ctx: crate::context::RuntimeContext,
+    /// Channel capabilities — set when channel starts
+    pub channel_caps: Arc<RwLock<crate::context::ChannelCapabilities>>,
 }
 
 impl AgentRunner {
@@ -94,6 +98,8 @@ impl AgentRunner {
         // Set model name in workspace for system prompt
         workspace.model = Some(config.llm.model.clone());
 
+        let runtime_ctx = crate::context::RuntimeContext::detect(&config.llm.model);
+
         Self {
             config,
             workspace,
@@ -106,7 +112,14 @@ impl AgentRunner {
             sandbox,
             safety,
             model_override: Arc::new(RwLock::new(None)),
+            runtime_ctx,
+            channel_caps: Arc::new(RwLock::new(crate::context::ChannelCapabilities::default())),
         }
+    }
+
+    /// Set channel capabilities (called when channel starts).
+    pub async fn set_channel_capabilities(&self, caps: crate::context::ChannelCapabilities) {
+        *self.channel_caps.write().await = caps;
     }
 
     /// Get the current config.
@@ -196,6 +209,35 @@ impl AgentRunner {
         self.process_message_with_options(session_key, user_message, user_id, channel, false).await
     }
 
+    /// Process with structured context, returning ProcessedResponse.
+    pub async fn process_message_with_context(
+        &self,
+        session_key: &str,
+        user_message: &str,
+        msg_ctx: &crate::context::MessageContext,
+        is_heartbeat: bool,
+    ) -> anyhow::Result<crate::context::ProcessedResponse> {
+        // Prepend message context as prefix
+        let channel_caps = self.channel_caps.read().await;
+        let prefix = msg_ctx.format_prefix(&channel_caps.name);
+        let full_message = if prefix.is_empty() {
+            user_message.to_string()
+        } else {
+            format!("{}{}", prefix, user_message)
+        };
+        drop(channel_caps);
+
+        let raw = self.process_message_with_options(
+            session_key,
+            &full_message,
+            msg_ctx.sender_id.as_deref(),
+            Some(&self.channel_caps.read().await.name),
+            is_heartbeat,
+        ).await?;
+
+        Ok(crate::context::ProcessedResponse::from_raw(&raw))
+    }
+
     /// Process an incoming message with additional options.
     pub async fn process_message_with_options(
         &self,
@@ -258,7 +300,14 @@ impl AgentRunner {
 
         // 4. Build system prompt (include HEARTBEAT.md if this is a heartbeat poll)
         //    Pass user_message for dynamic skill injection
-        let mut system_prompt = self.workspace.build_system_prompt_with_skills(is_heartbeat, Some(user_message));
+        let channel_caps = self.channel_caps.read().await;
+        let mut system_prompt = self.workspace.build_system_prompt_full(
+            &self.runtime_ctx,
+            &channel_caps,
+            is_heartbeat,
+            Some(user_message),
+        );
+        drop(channel_caps);
         if !memory_context.is_empty() {
             system_prompt.push_str("\n\n## Relevant Memories\n");
             system_prompt.push_str(&memory_context);

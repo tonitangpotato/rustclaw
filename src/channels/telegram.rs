@@ -45,6 +45,26 @@ impl TelegramBot {
         })
     }
     
+    /// Return Telegram channel capabilities.
+    fn capabilities(&self) -> crate::context::ChannelCapabilities {
+        crate::context::ChannelCapabilities {
+            name: "telegram".into(),
+            supports_reactions: true,
+            supports_inline_buttons: true,
+            supports_voice: true,
+            supports_reply_to: true,
+            supports_typing: true,
+            supports_markdown: true,
+            supports_tables: false,
+            max_message_length: 4096,
+            format_notes: vec![
+                "Use bullet lists instead of markdown tables — Telegram does not render them".into(),
+                "Code blocks use triple backticks".into(),
+                "For long responses, split into multiple messages".into(),
+            ],
+        }
+    }
+
     /// Fetch bot username by calling getMe API.
     async fn fetch_bot_username(client: &reqwest::Client, token: &str) -> anyhow::Result<String> {
         let url = format!("{}/bot{}/getMe", TELEGRAM_API, token);
@@ -249,7 +269,6 @@ impl TelegramBot {
 
         // Build session key
         let session_key = format!("telegram:{}", chat_id);
-        let user_id_str = user_id.to_string();
         
         // In groups, reply to the user's message
         let reply_to = if is_group { message_id } else { None };
@@ -268,6 +287,28 @@ impl TelegramBot {
             self.send_message(chat_id, msg, reply_to).await?;
             return Ok(());
         }
+
+        // Build structured message context
+        let msg_ctx = crate::context::MessageContext {
+            sender_id: Some(user_id.to_string()),
+            sender_name: message["from"]["first_name"].as_str().map(String::from),
+            sender_username: message["from"]["username"].as_str().map(String::from),
+            chat_type: if is_group {
+                crate::context::ChatType::Group {
+                    title: message["chat"]["title"].as_str().map(String::from),
+                }
+            } else {
+                crate::context::ChatType::Direct
+            },
+            reply_to: message.get("reply_to_message").and_then(|m| {
+                Some(crate::context::QuotedMessage {
+                    text: m["text"].as_str().unwrap_or("").to_string(),
+                    sender_name: m["from"]["first_name"].as_str().map(String::from),
+                    message_id: m["message_id"].as_i64(),
+                })
+            }),
+            message_id,
+        };
 
         // Send persistent "typing" indicator that repeats every 4 seconds
         let typing_client = self.client.clone();
@@ -293,13 +334,50 @@ impl TelegramBot {
         } else {
             match self
                 .runner
-                .process_message(&session_key, &text, Some(&user_id_str), Some("telegram"))
+                .process_message_with_context(&session_key, &text, &msg_ctx, false)
                 .await
             {
                 Ok(response) => {
-                    // Stop typing before sending response
                     typing_handle.abort();
-                    self.send_response(chat_id, &response, reply_to).await
+                    if response.is_silent {
+                        Ok(())
+                    } else {
+                        // Voice mode: channel-level toggle OR VOICE: prefix from LLM
+                        let use_voice = response.voice_text.is_some()
+                            || self.is_voice_mode(chat_id).await;
+                        let effective_reply = response.reply_to.or(reply_to);
+
+                        if use_voice {
+                            let voice_text = response.voice_text.as_ref()
+                                .unwrap_or(&response.text);
+                            // Send voice typing indicator
+                            let _ = self.client
+                                .post(self.api_url("sendChatAction"))
+                                .json(&serde_json::json!({
+                                    "chat_id": chat_id,
+                                    "action": "record_voice",
+                                }))
+                                .send()
+                                .await;
+                            let tts_config = crate::tts::TtsConfig::default();
+                            match crate::tts::synthesize(voice_text, &tts_config).await {
+                                Ok(ogg_path) => {
+                                    if let Err(e) = self.send_voice(chat_id, &ogg_path).await {
+                                        tracing::error!("Voice send failed: {}", e);
+                                        self.send_message(chat_id, &response.text, effective_reply).await
+                                    } else {
+                                        Ok(())
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!("TTS failed: {}", e);
+                                    self.send_message(chat_id, &response.text, effective_reply).await
+                                }
+                            }
+                        } else {
+                            self.send_message(chat_id, &response.text, effective_reply).await
+                        }
+                    }
                 }
                 Err(e) => {
                     typing_handle.abort();
@@ -1205,5 +1283,7 @@ fn build_inline_keyboard(buttons: &[InlineButton]) -> serde_json::Value {
 /// Start the Telegram channel.
 pub async fn start(config: TelegramConfig, runner: Arc<AgentRunner>) -> anyhow::Result<()> {
     let bot = TelegramBot::new(config, runner).await?;
+    // Register channel capabilities with the agent runner
+    bot.runner.set_channel_capabilities(bot.capabilities()).await;
     bot.run().await
 }

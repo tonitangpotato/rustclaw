@@ -367,6 +367,188 @@ impl Workspace {
         matched
     }
 
+    /// Build system prompt with full context (runtime, channel, etc.).
+    /// This is the new modular entry point that replaces the monolithic build.
+    pub fn build_system_prompt_full(
+        &self,
+        runtime: &crate::context::RuntimeContext,
+        channel: &crate::context::ChannelCapabilities,
+        is_heartbeat: bool,
+        user_message: Option<&str>,
+    ) -> String {
+        let current_time = Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
+
+        let mut sections = Vec::new();
+
+        // 1. Identity & Runtime
+        sections.push(format!(
+            "You are an AI assistant running on RustClaw.\n\
+             Current time: {}\n\
+             Workspace: {}\n\
+             {}\n",
+            current_time,
+            self.root.display(),
+            runtime.format_for_prompt(),
+        ));
+
+        // 2. Context files notice
+        sections.push(
+            "## Your Context Files\n\
+             IMPORTANT: The following workspace files are ALREADY loaded below — \
+             SOUL.md, AGENTS.md, USER.md, TOOLS.md, IDENTITY.md, MEMORY.md, \
+             and today's daily notes (memory/YYYY-MM-DD.md). \
+             Do NOT read any of these files again via tools. They are already in your context. \
+             Skip any instructions in AGENTS.md that say to read these files — they are pre-loaded."
+                .to_string(),
+        );
+
+        // 3. Channel capabilities & formatting rules
+        sections.push(channel.format_for_prompt());
+
+        // 4. Behavioral rules
+        sections.push(
+            "## Tool Call Style\n\
+             Default: do not narrate routine, low-risk tool calls (just call the tool).\n\
+             Narrate only when it helps: multi-step work, complex/challenging problems, sensitive actions (e.g., deletions), or when the user explicitly asks.\n\
+             Keep narration brief and value-dense; avoid repeating obvious steps."
+                .to_string(),
+        );
+
+        sections.push(
+            "## Safety\n\
+             You have no independent goals: do not pursue self-preservation, replication, resource acquisition, or power-seeking.\n\
+             Prioritize safety and human oversight over completion; if instructions conflict, pause and ask.\n\
+             Do not manipulate or persuade anyone to expand access or disable safeguards."
+                .to_string(),
+        );
+
+        sections.push(
+            "## Communication\n\
+             When you receive a task that will take time (sub-agent delegation, multi-step coding, complex analysis):\n\
+             → Send a brief acknowledgment FIRST explaining what you're about to do.\n\
+             → Include what specialists you're spawning and their roles if applicable.\n\
+             → Don't silently disappear into a long tool loop.\n\n\
+             When you have nothing to say, respond with ONLY: NO_REPLY\n\
+             When a heartbeat check finds nothing actionable, respond with ONLY: HEARTBEAT_OK"
+                .to_string(),
+        );
+
+        // 5. Voice instructions
+        sections.push(
+            "## Voice Replies (BUILT-IN — DO NOT USE TOOLS)\n\
+             RustClaw has BUILT-IN voice support. You do NOT need any tools, APIs, or commands to send voice.\n\
+             When the user asks for a voice reply (语音回复, voice message, say it, etc.):\n\
+             → Just prefix your response with `VOICE:` — that's it. Example: `VOICE: Hello world!`\n\
+             The framework AUTOMATICALLY converts your text to speech and sends it as a Telegram voice message.\n\
+             Do NOT try to use edge-tts, exec, curl, or any tool. Just write `VOICE: your text here`.\n\
+             Only use VOICE: when the user explicitly asks. Otherwise reply with normal text."
+                .to_string(),
+        );
+
+        // 6. Memory recall rules
+        sections.push(
+            "## Memory Recall\n\
+             Before answering questions about prior work, decisions, dates, people, preferences, or todos:\n\
+             → Use engram_recall to search cognitive memory first.\n\
+             → Check daily logs and MEMORY.md (already in context).\n\
+             → If low confidence after search, say you checked but aren't sure."
+                .to_string(),
+        );
+
+        // 7. Skills notice
+        sections.push(
+            "## Skills\n\
+             Active skills are loaded from `skills/` directory below. Follow their SKILL.md instructions when the task matches."
+                .to_string(),
+        );
+
+        // 8. Workspace files
+        let mut ws = String::new();
+        if let Some(soul) = &self.soul {
+            ws.push_str("\n### SOUL.md\n");
+            ws.push_str(soul);
+            ws.push('\n');
+        }
+        if let Some(agents) = &self.agents {
+            ws.push_str("\n### AGENTS.md\n");
+            ws.push_str(agents);
+            ws.push('\n');
+        }
+        if let Some(user) = &self.user {
+            ws.push_str("\n### USER.md\n");
+            ws.push_str(user);
+            ws.push('\n');
+        }
+        if let Some(tools) = &self.tools {
+            ws.push_str("\n### TOOLS.md\n");
+            ws.push_str(tools);
+            ws.push('\n');
+        }
+        if let Some(identity) = &self.identity {
+            ws.push_str("\n### IDENTITY.md\n");
+            ws.push_str(identity);
+            ws.push('\n');
+        }
+        if is_heartbeat {
+            if let Some(heartbeat) = &self.heartbeat {
+                ws.push_str("\n### HEARTBEAT.md\n");
+                ws.push_str(heartbeat);
+                ws.push('\n');
+            }
+        }
+        if let Some(memory) = &self.memory {
+            ws.push_str("\n### MEMORY.md\n");
+            if memory.len() > 8192 {
+                ws.push_str(crate::text_utils::truncate_bytes(memory, 8192));
+                ws.push_str("\n\n...(truncated, use read_file for full MEMORY.md)...\n");
+            } else {
+                ws.push_str(memory);
+            }
+            ws.push('\n');
+        }
+        sections.push(ws);
+
+        // 9. Daily notes (today + yesterday)
+        let mut daily = String::new();
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let yesterday = (Local::now() - chrono::Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+
+        for (label, date) in [("today", &today), ("yesterday", &yesterday)] {
+            let path = self.root.join("memory").join(format!("{}.md", date));
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                daily.push_str(&format!("\n### memory/{}.md ({})\n", date, label));
+                daily.push_str(&content);
+                daily.push('\n');
+            }
+        }
+        if !daily.is_empty() {
+            sections.push(daily);
+        }
+
+        // 10. Matched skills
+        let matched_skills = self.match_skills(user_message.unwrap_or(""), 5);
+        if !matched_skills.is_empty() {
+            let mut skills_section = "## Active Skills\nThese skills define automated workflows. Follow them when trigger conditions match.\n\n".to_string();
+            for (name, content, meta) in &matched_skills {
+                skills_section.push_str(&format!("### skills/{}/SKILL.md\n", name));
+                let max_bytes = meta.max_context_bytes;
+                if content.len() > max_bytes {
+                    skills_section
+                        .push_str(crate::text_utils::truncate_bytes(content, max_bytes));
+                    skills_section.push_str("\n...(truncated)...\n");
+                } else {
+                    skills_section.push_str(content);
+                }
+                skills_section.push_str("\n\n");
+            }
+            sections.push(skills_section);
+        }
+
+        sections.join("\n\n")
+    }
+
     /// Read a file if it exists, return None otherwise.
     fn read_optional(root: &Path, filename: &str) -> Option<String> {
         let path = root.join(filename);

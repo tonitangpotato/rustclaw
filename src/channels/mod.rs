@@ -15,12 +15,18 @@ use async_trait::async_trait;
 
 use crate::agent::AgentRunner;
 use crate::config::Config;
+use crate::context::ChannelCapabilities;
 
 /// Common trait for all messaging channels.
 #[async_trait]
 pub trait Channel: Send + Sync {
     /// Returns the channel name (e.g., "telegram", "discord").
     fn name(&self) -> &str;
+
+    /// Declare what this channel supports (formatting, reactions, voice, etc.).
+    fn capabilities(&self) -> ChannelCapabilities {
+        ChannelCapabilities::default()
+    }
 
     /// Start the channel's event loop (long-poll, gateway, etc.).
     /// This should run indefinitely until an error occurs.
