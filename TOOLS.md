@@ -73,6 +73,7 @@ RustClaw has **built-in voice support** via the `VOICE:` prefix. No external too
   - **Task management**: status tracking, dependency DAGs, blockers
   - **Design-to-code**: DESIGN.md → graph → tasks → implementation
 - Use GID for: understanding codebase structure, tracking what depends on what, finding impact of changes, managing tasks with dependencies
+- **`gid design` workflow**: `gid design <file>` outputs a *prompt*, not a graph. You (the agent/LLM) generate the YAML yourself based on that prompt, then pipe it back: `echo "<yaml>" | gid design --parse` to merge into the graph. Two-step loop.
 - 39 commands: `gid tasks`, `gid query impact <node>`, `gid query deps <node>`, `gid visual`, `gid analyze`, etc.
 
 ### Dashboard
