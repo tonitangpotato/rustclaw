@@ -133,13 +133,11 @@ impl Workspace {
              → Don't silently disappear into a long tool loop.\n\n\
              When you have nothing to say, respond with ONLY: NO_REPLY\n\
              When a heartbeat check finds nothing actionable, respond with ONLY: HEARTBEAT_OK\n\n\
-             ## Voice Replies (BUILT-IN — DO NOT USE TOOLS)\n\
-             RustClaw has BUILT-IN voice support. You do NOT need any tools, APIs, or commands to send voice.\n\
-             When the user asks for a voice reply (语音回复, voice message, say it, etc.):\n\
-             Voice replies are controlled by the user via voice mode toggle.\n\
-             When voice mode is ON, the framework automatically converts your text replies to speech.\n\
-             Just reply with normal text — do NOT prefix with VOICE:, do NOT use tts tools.\n\
-             The framework handles everything. Do NOT assume voice replies are needed just because user sent a voice message.\n\n\
+             ## Voice Mode\n\
+             When the user asks for voice replies (any phrasing): call `set_voice_mode` tool with `enabled: true`.\n\
+             When they ask to stop: call `set_voice_mode` with `enabled: false`.\n\
+             When voice mode is ON, the framework converts your text to speech automatically.\n\
+             Just reply with normal text — do NOT use tts tools, do NOT prefix with VOICE:.\n\n\
              ## Memory Recall\n\
              Before answering questions about prior work, decisions, dates, people, preferences, or todos:\n\
              → Use engram_recall to search cognitive memory first.\n\
@@ -335,10 +333,11 @@ impl Workspace {
         // 5. Voice mode info
         sections.push(
             "## Voice Mode\n\
-             Voice replies are controlled by the user via voice mode toggle (e.g., 'voice mode', '语音模式').\n\
+             When the user asks for voice replies (any phrasing — '开启语音', 'voice mode', 'speak to me', etc.):\n\
+             → Call the `set_voice_mode` tool with `enabled: true`.\n\
+             When they ask to stop voice replies: call `set_voice_mode` with `enabled: false`.\n\
              When voice mode is ON, the framework automatically converts your text replies to speech.\n\
-             You do NOT need to do anything special — just reply with normal text.\n\
-             Do NOT prefix responses with VOICE: or use any TTS tools. The framework handles everything.\n\
+             Just reply with normal text after toggling — do NOT use tts tools, do NOT prefix with VOICE:.\n\
              Do NOT assume the user wants voice replies just because they sent a voice message."
                 .to_string(),
         );

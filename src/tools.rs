@@ -181,14 +181,32 @@ impl ToolRegistry {
 
     /// Get LLM tool definitions for all registered tools.
     pub fn definitions(&self) -> Vec<crate::llm::ToolDefinition> {
-        self.tools
+        let mut defs: Vec<_> = self.tools
             .iter()
             .map(|t| crate::llm::ToolDefinition {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
                 input_schema: t.input_schema(),
             })
-            .collect()
+            .collect();
+
+        // Virtual tool: set_voice_mode (intercepted by agent, not in registry)
+        defs.push(crate::llm::ToolDefinition {
+            name: "set_voice_mode".to_string(),
+            description: "Toggle voice mode for the current chat. When enabled, all replies are automatically converted to voice messages via TTS.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "true to enable voice replies, false to disable"
+                    }
+                },
+                "required": ["enabled"]
+            }),
+        });
+
+        defs
     }
 
     /// Execute a tool by name.

@@ -2,7 +2,6 @@
 //!
 //! Uses long polling (getUpdates) — simple, no webhook needed.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::agent::AgentRunner;
@@ -10,7 +9,6 @@ use crate::config::TelegramConfig;
 use crate::stt;
 use crate::text_utils;
 use crate::tts::{synthesize, TtsConfig};
-use tokio::sync::Mutex;
 
 const TELEGRAM_API: &str = "https://api.telegram.org";
 
@@ -22,9 +20,6 @@ struct TelegramBot {
     runner: Arc<AgentRunner>,
     /// Bot username (fetched via getMe on startup)
     bot_username: String,
-    /// Per-chat voice mode state
-    voice_mode: Arc<Mutex<HashMap<i64, bool>>>,
-    voice_mode_path: std::path::PathBuf,
 }
 
 impl TelegramBot {
@@ -35,18 +30,6 @@ impl TelegramBot {
         // Fetch bot username via getMe
         let bot_username = Self::fetch_bot_username(&client, &token).await?;
         tracing::info!("Bot username: @{}", bot_username);
-
-        // Load persisted voice mode state
-        let voice_mode_path = std::path::Path::new(&std::env::var("HOME").unwrap_or_default())
-            .join(".rustclaw/voice-mode.json");
-        let voice_mode = if voice_mode_path.exists() {
-            match std::fs::read_to_string(&voice_mode_path) {
-                Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
-                Err(_) => HashMap::new(),
-            }
-        } else {
-            HashMap::new()
-        };
         
         Ok(Self {
             client,
@@ -54,8 +37,6 @@ impl TelegramBot {
             config,
             runner,
             bot_username,
-            voice_mode: Arc::new(Mutex::new(voice_mode)),
-            voice_mode_path,
         })
     }
     
@@ -316,7 +297,7 @@ impl TelegramBot {
 
         // Check for voice mode toggle
         if let Some(enabled) = Self::detect_voice_mode_toggle(&text) {
-            self.set_voice_mode(chat_id, enabled).await;
+            self.runner.voice_mode.set(chat_id, enabled).await;
             let msg = if enabled {
                 "🎙 Voice mode ON — 接下来我会用语音回复你"
             } else {
@@ -382,7 +363,7 @@ impl TelegramBot {
                     } else {
                         let effective_reply = response.reply_to.or(reply_to);
                         // Voice decided purely by voice mode state
-                        if self.is_voice_mode(chat_id).await {
+                        if self.runner.voice_mode.is_enabled(chat_id).await {
                             self.send_as_voice(chat_id, &response.text, effective_reply).await
                         } else {
                             self.send_message(chat_id, &response.text, effective_reply).await
@@ -840,7 +821,7 @@ impl TelegramBot {
         // 2. Voice mode is active for this chat
         let voice_text = if let Some(vt) = Self::extract_voice_text(trimmed) {
             Some(vt)
-        } else if self.is_voice_mode(chat_id).await {
+        } else if self.runner.voice_mode.is_enabled(chat_id).await {
             // Strip any VOICE: prefix that might be partial, otherwise use full text
             Some(trimmed.to_string())
         } else {
@@ -909,28 +890,7 @@ impl TelegramBot {
         None
     }
 
-    /// Check if voice mode is active for a chat.
-    async fn is_voice_mode(&self, chat_id: i64) -> bool {
-        let map = self.voice_mode.lock().await;
-        map.get(&chat_id).copied().unwrap_or(false)
-    }
-
-    /// Set voice mode for a chat (persisted to disk).
-    async fn set_voice_mode(&self, chat_id: i64, enabled: bool) {
-        let mut map = self.voice_mode.lock().await;
-        if enabled {
-            map.insert(chat_id, true);
-        } else {
-            map.remove(&chat_id);
-        }
-        tracing::info!("Voice mode for chat {}: {}", chat_id, if enabled { "ON" } else { "OFF" });
-        // Persist to disk
-        if let Ok(data) = serde_json::to_string(&*map) {
-            let _ = std::fs::write(&self.voice_mode_path, data);
-        }
-    }
-
-    fn extract_voice_text(response: &str) -> Option<String> {
+        fn extract_voice_text(response: &str) -> Option<String> {
         // Check for VOICE: prefix at start
         if let Some(rest) = response.strip_prefix("VOICE:") {
             return Some(rest.trim().to_string());
@@ -1030,7 +990,7 @@ impl TelegramBot {
 
         // Step 4: Check for voice mode toggle in transcription
         if let Some(enabled) = Self::detect_voice_mode_toggle(&transcription) {
-            self.set_voice_mode(chat_id, enabled).await;
+            self.runner.voice_mode.set(chat_id, enabled).await;
             let msg = if enabled {
                 "🎙 Voice mode ON — 接下来我会用语音回复你"
             } else {
@@ -1064,7 +1024,7 @@ impl TelegramBot {
                     return Ok(());
                 }
                 let effective_reply = response.reply_to.or(reply_to);
-                if self.is_voice_mode(chat_id).await {
+                if self.runner.voice_mode.is_enabled(chat_id).await {
                     self.send_as_voice(chat_id, &response.text, effective_reply).await?;
                 } else {
                     self.send_message(chat_id, &response.text, effective_reply).await?;

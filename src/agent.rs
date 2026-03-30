@@ -59,6 +59,8 @@ pub struct AgentRunner {
     pub runtime_ctx: crate::context::RuntimeContext,
     /// Channel capabilities — set when channel starts
     pub channel_caps: Arc<RwLock<crate::context::ChannelCapabilities>>,
+    /// Shared voice mode state (accessible by tools and channels)
+    pub voice_mode: crate::voice_mode::VoiceMode,
 }
 
 impl AgentRunner {
@@ -100,6 +102,10 @@ impl AgentRunner {
 
         let runtime_ctx = crate::context::RuntimeContext::detect(&config.llm.model);
 
+        let voice_mode_path = std::path::Path::new(&std::env::var("HOME").unwrap_or_default())
+            .join(".rustclaw/voice-mode.json");
+        let voice_mode = crate::voice_mode::VoiceMode::new(voice_mode_path);
+
         Self {
             config,
             workspace,
@@ -114,6 +120,7 @@ impl AgentRunner {
             model_override: Arc::new(RwLock::new(None)),
             runtime_ctx,
             channel_caps: Arc::new(RwLock::new(crate::context::ChannelCapabilities::default())),
+            voice_mode,
         }
     }
 
@@ -419,6 +426,19 @@ impl AgentRunner {
                         ));
                         continue;
                     }
+                }
+
+                // Intercept set_voice_mode — needs session context (not in tool registry)
+                if tc.name == "set_voice_mode" {
+                    let enabled = tc.input["enabled"].as_bool().unwrap_or(false);
+                    if let Some(chat_id) = crate::voice_mode::VoiceMode::chat_id_from_session(session_key) {
+                        self.voice_mode.set(chat_id, enabled).await;
+                        let status = if enabled { "ON" } else { "OFF" };
+                        tool_results.push((tc.id.clone(), format!("Voice mode set to {}", status), false));
+                    } else {
+                        tool_results.push((tc.id.clone(), "Could not determine chat ID".to_string(), true));
+                    }
+                    continue;
                 }
 
                 // Execute tool with sandbox enforcement

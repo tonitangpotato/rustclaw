@@ -32,6 +32,7 @@ mod text_utils;
 mod tools;
 mod tts;
 mod user_model;
+mod voice_mode;
 mod worktree;
 mod workspace;
 
