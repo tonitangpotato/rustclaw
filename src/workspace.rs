@@ -459,7 +459,8 @@ impl Workspace {
              When the user asks for voice replies (any phrasing): call `set_voice_mode` tool with `enabled: true`.\n\
              When they ask to stop: call `set_voice_mode` with `enabled: false`.\n\
              When voice mode is ON, the framework converts your text to speech automatically.\n\
-             Just reply with normal text — do NOT use tts tools, do NOT prefix with VOICE:.\n\n\
+             Just reply with normal text — do NOT use tts tools, do NOT prefix with VOICE:.\n\
+             IMPORTANT: When voice mode is ON, do NOT use markdown formatting (no *, #, |, `, [], etc.) — write plain conversational text that sounds natural when spoken aloud.\n\n\
              ## GID (Graph Indexed Development)\n\
              GID tracks project architecture, code structure, and tasks as a dependency graph (.gid/graph.yml).\n\
              - New project: Write DESIGN.md → `gid_design` → `gid_advise` → `gid_tasks`\n\
@@ -711,6 +712,7 @@ impl Workspace {
              When they ask to stop voice replies: call `set_voice_mode` with `enabled: false`.\n\
              When voice mode is ON, the framework automatically converts your text replies to speech.\n\
              Just reply with normal text after toggling — do NOT use tts tools, do NOT prefix with VOICE:.\n\
+             IMPORTANT: When voice mode is ON, do NOT use markdown formatting (no *, #, |, `, [], etc.) — write plain conversational text that sounds natural when spoken aloud.\n\
              Do NOT assume the user wants voice replies just because they sent a voice message."
                 .to_string(),
         );

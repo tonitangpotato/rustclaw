@@ -165,8 +165,10 @@ impl TelegramBot {
             .send()
             .await;
 
+        // Strip markdown formatting so TTS doesn't read *, #, |, ` etc.
+        let clean_text = strip_markdown(text);
         let tts_config = crate::tts::TtsConfig::default();
-        match crate::tts::synthesize(text, &tts_config).await {
+        match crate::tts::synthesize(&clean_text, &tts_config).await {
             Ok(ogg_path) => {
                 if let Err(e) = self.send_voice(chat_id, &ogg_path).await {
                     tracing::error!("Voice send failed: {}", e);
@@ -1246,4 +1248,39 @@ pub async fn start(config: TelegramConfig, runner: Arc<AgentRunner>) -> anyhow::
     // Register channel capabilities with the agent runner
     bot.runner.set_channel_capabilities(bot.capabilities()).await;
     bot.run().await
+}
+
+/// Strip markdown formatting from text for TTS output.
+/// Removes *, #, `, |, [], and other markdown symbols that sound unnatural when spoken.
+fn strip_markdown(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    for line in text.lines() {
+        let trimmed = line.trim();
+        // Skip pure markdown table separator lines (|---|---|)
+        if trimmed.starts_with('|') && trimmed.contains("---") {
+            continue;
+        }
+        // Remove heading markers
+        let line = if trimmed.starts_with('#') {
+            trimmed.trim_start_matches('#').trim()
+        } else {
+            trimmed
+        };
+        // Remove table pipes at start/end
+        let line = line.trim_start_matches('|').trim_end_matches('|');
+        result.push_str(line);
+        result.push('\n');
+    }
+    // Remove bold/italic markers
+    let result = result.replace("**", "").replace("__", "");
+    // Remove inline code
+    let result = result.replace('`', "");
+    // Remove link syntax [text](url) → text
+    let re = regex::Regex::new(r"\[([^\]]+)\]\([^)]+\)").unwrap();
+    let result = re.replace_all(&result, "$1").to_string();
+    // Remove remaining pipes (table cells)
+    let result = result.replace(" | ", ", ");
+    // Clean up extra whitespace
+    let result = result.replace("  ", " ");
+    result.trim().to_string()
 }
