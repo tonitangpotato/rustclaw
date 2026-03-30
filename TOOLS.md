@@ -84,3 +84,34 @@ RustClaw has **built-in voice support** via the `VOICE:` prefix. No external too
 ---
 
 Add whatever helps you do your job. This is your cheat sheet.
+
+### Skills (SKM)
+- **Engine**: [skm](https://crates.io/crates/skm) v0.1 (Agent Skill Engine)
+- **Skills directory**: `/Users/potato/rustclaw/skills/`
+- **Format**: agentskills.io standard SKILL.md (YAML frontmatter + markdown body)
+- **Selection**: `skm-select` TriggerStrategy (regex pattern matching, µs latency)
+- **always_load**: Skills with `always_load: true` in frontmatter are always injected into system prompt
+- **Matched skills**: Triggered skills are injected when user message matches patterns/keywords
+- **Auto-skill generation**: `src/skills.rs` — learns from agent experience, generates new SKILL.md files
+
+#### Adding a new skill:
+1. Create `skills/my-skill/SKILL.md`
+2. Add YAML frontmatter with `name`, `description`, `triggers` (patterns + keywords)
+3. Write instructions in markdown body
+4. Skill is auto-loaded on next message (no restart needed)
+
+#### Example SKILL.md:
+```yaml
+---
+name: web-scraping
+description: Extract content from web pages
+triggers:
+  patterns: ["https?://"]
+  keywords: ["scrape", "fetch page"]
+priority: 80
+always_load: false
+---
+
+# Web Scraping
+Instructions for the agent...
+```
