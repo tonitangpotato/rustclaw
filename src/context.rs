@@ -204,12 +204,10 @@ impl RuntimeContext {
 /// Processed LLM response with extracted control signals.
 #[derive(Debug)]
 pub struct ProcessedResponse {
-    /// The text to display (voice text extracted if applicable).
+    /// The text to display.
     pub text: String,
     /// Reply to a specific message ID.
     pub reply_to: Option<i64>,
-    /// If set, the response should be sent as voice with this text.
-    pub voice_text: Option<String>,
     /// Whether the response should be suppressed (NO_REPLY / HEARTBEAT_OK).
     pub is_silent: bool,
 }
@@ -222,19 +220,16 @@ impl ProcessedResponse {
         let is_silent = trimmed == "NO_REPLY" || trimmed == "HEARTBEAT_OK";
 
         let (text, reply_to) = Self::extract_reply_tag(trimmed);
-        let voice_text = Self::extract_voice_text(&text);
 
         ProcessedResponse {
-            text: voice_text.clone().unwrap_or_else(|| text.clone()),
+            text,
             reply_to,
-            voice_text,
             is_silent,
         }
     }
 
     /// Extract `[[reply_to:123]]` tag from response.
     fn extract_reply_tag(text: &str) -> (String, Option<i64>) {
-        // Match [[reply_to:123]] or [[ reply_to: 123 ]] at start of text
         let re = regex::Regex::new(r"^\[\[\s*reply_to:\s*(\d+)\s*\]\]\s*").unwrap();
         if let Some(caps) = re.captures(text) {
             let id = caps[1].parse::<i64>().ok();
@@ -243,27 +238,6 @@ impl ProcessedResponse {
         } else {
             (text.to_string(), None)
         }
-    }
-
-    /// Extract VOICE: prefix or \nVOICE: anywhere in text.
-    fn extract_voice_text(text: &str) -> Option<String> {
-        let trimmed = text.trim();
-
-        // Check VOICE: at start
-        if let Some(rest) = trimmed.strip_prefix("VOICE:") {
-            return Some(rest.trim().to_string());
-        }
-        // Check 🔊 at start
-        if let Some(rest) = trimmed.strip_prefix("🔊") {
-            return Some(rest.trim().to_string());
-        }
-        // Check \nVOICE: anywhere (LLM sometimes puts preamble before VOICE:)
-        if let Some(pos) = trimmed.find("\nVOICE:") {
-            let after = &trimmed[pos + 7..];
-            return Some(after.trim().to_string());
-        }
-
-        None
     }
 }
 
@@ -284,20 +258,6 @@ mod tests {
     }
 
     #[test]
-    fn test_processed_response_voice() {
-        let r = ProcessedResponse::from_raw("VOICE: Hello world");
-        assert!(!r.is_silent);
-        assert_eq!(r.voice_text, Some("Hello world".into()));
-        assert_eq!(r.text, "Hello world");
-    }
-
-    #[test]
-    fn test_processed_response_voice_in_middle() {
-        let r = ProcessedResponse::from_raw("Some preamble\nVOICE: The actual voice text");
-        assert_eq!(r.voice_text, Some("The actual voice text".into()));
-    }
-
-    #[test]
     fn test_processed_response_reply_tag() {
         let r = ProcessedResponse::from_raw("[[reply_to:12345]] Hello there");
         assert_eq!(r.reply_to, Some(12345));
@@ -308,7 +268,6 @@ mod tests {
     fn test_processed_response_plain() {
         let r = ProcessedResponse::from_raw("Just a normal message");
         assert!(!r.is_silent);
-        assert!(r.voice_text.is_none());
         assert!(r.reply_to.is_none());
         assert_eq!(r.text, "Just a normal message");
     }

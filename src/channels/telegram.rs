@@ -162,6 +162,30 @@ impl TelegramBot {
         Ok(())
     }
 
+    /// Synthesize TTS and send as voice message, with text fallback on failure.
+    async fn send_as_voice(&self, chat_id: i64, text: &str, reply_to: Option<i64>) -> anyhow::Result<()> {
+        let _ = self.client
+            .post(self.api_url("sendChatAction"))
+            .json(&serde_json::json!({ "chat_id": chat_id, "action": "record_voice" }))
+            .send()
+            .await;
+
+        let tts_config = crate::tts::TtsConfig::default();
+        match crate::tts::synthesize(text, &tts_config).await {
+            Ok(ogg_path) => {
+                if let Err(e) = self.send_voice(chat_id, &ogg_path).await {
+                    tracing::error!("Voice send failed: {}", e);
+                    self.send_message(chat_id, text, reply_to).await?;
+                }
+            }
+            Err(e) => {
+                tracing::error!("TTS failed: {}", e);
+                self.send_message(chat_id, text, reply_to).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Process a single update.
     async fn handle_update(&self, update: &serde_json::Value) -> anyhow::Result<()> {
         // Handle callback queries (inline button presses)
@@ -342,38 +366,10 @@ impl TelegramBot {
                     if response.is_silent {
                         Ok(())
                     } else {
-                        // Voice mode: channel-level toggle OR VOICE: prefix from LLM
-                        let use_voice = response.voice_text.is_some()
-                            || self.is_voice_mode(chat_id).await;
                         let effective_reply = response.reply_to.or(reply_to);
-
-                        if use_voice {
-                            let voice_text = response.voice_text.as_ref()
-                                .unwrap_or(&response.text);
-                            // Send voice typing indicator
-                            let _ = self.client
-                                .post(self.api_url("sendChatAction"))
-                                .json(&serde_json::json!({
-                                    "chat_id": chat_id,
-                                    "action": "record_voice",
-                                }))
-                                .send()
-                                .await;
-                            let tts_config = crate::tts::TtsConfig::default();
-                            match crate::tts::synthesize(voice_text, &tts_config).await {
-                                Ok(ogg_path) => {
-                                    if let Err(e) = self.send_voice(chat_id, &ogg_path).await {
-                                        tracing::error!("Voice send failed: {}", e);
-                                        self.send_message(chat_id, &response.text, effective_reply).await
-                                    } else {
-                                        Ok(())
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::error!("TTS failed: {}", e);
-                                    self.send_message(chat_id, &response.text, effective_reply).await
-                                }
-                            }
+                        // Voice decided purely by voice mode state
+                        if self.is_voice_mode(chat_id).await {
+                            self.send_as_voice(chat_id, &response.text, effective_reply).await
                         } else {
                             self.send_message(chat_id, &response.text, effective_reply).await
                         }
@@ -1026,27 +1022,9 @@ impl TelegramBot {
                 if response.is_silent {
                     return Ok(());
                 }
-                // Only use voice if VOICE: prefix OR voice mode is ON
-                // Receiving a voice message does NOT auto-trigger voice reply
-                let use_voice = response.voice_text.is_some()
-                    || self.is_voice_mode(chat_id).await;
                 let effective_reply = response.reply_to.or(reply_to);
-
-                if use_voice {
-                    let voice_text = response.voice_text.as_ref().unwrap_or(&response.text);
-                    let tts_config = crate::tts::TtsConfig::default();
-                    match crate::tts::synthesize(voice_text, &tts_config).await {
-                        Ok(ogg_path) => {
-                            if let Err(e) = self.send_voice(chat_id, &ogg_path).await {
-                                tracing::error!("Voice send failed: {}", e);
-                                self.send_message(chat_id, &response.text, effective_reply).await?;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("TTS failed: {}", e);
-                            self.send_message(chat_id, &response.text, effective_reply).await?;
-                        }
-                    }
+                if self.is_voice_mode(chat_id).await {
+                    self.send_as_voice(chat_id, &response.text, effective_reply).await?;
                 } else {
                     self.send_message(chat_id, &response.text, effective_reply).await?;
                 }

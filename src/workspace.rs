@@ -433,17 +433,14 @@ impl Workspace {
                 .to_string(),
         );
 
-        // 5. Voice instructions
+        // 5. Voice mode info
         sections.push(
-            "## Voice Replies (BUILT-IN — DO NOT USE TOOLS)\n\
-             RustClaw has BUILT-IN voice support. You do NOT need any tools, APIs, or commands to send voice.\n\
-             When the user asks for a voice reply (语音回复, voice message, say it, etc.):\n\
-             → Just prefix your response with `VOICE:` — that's it. Example: `VOICE: Hello world!`\n\
-             The framework AUTOMATICALLY converts your text to speech and sends it as a Telegram voice message.\n\
-             Do NOT try to use edge-tts, exec, curl, or any tool. Just write `VOICE: your text here`.\n\
-             Only use VOICE: when the user explicitly asks (e.g., '用语音回复', 'reply with voice').\n\
-             Receiving a voice message from the user does NOT mean they want a voice reply.\n\
-             Default to text replies. Never add VOICE: prefix unless explicitly requested."
+            "## Voice Mode\n\
+             Voice replies are controlled by the user via voice mode toggle (e.g., 'voice mode', '语音模式').\n\
+             When voice mode is ON, the framework automatically converts your text replies to speech.\n\
+             You do NOT need to do anything special — just reply with normal text.\n\
+             Do NOT prefix responses with VOICE: or use any TTS tools. The framework handles everything.\n\
+             Do NOT assume the user wants voice replies just because they sent a voice message."
                 .to_string(),
         );
 
