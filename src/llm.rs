@@ -530,8 +530,12 @@ impl AnthropicClient {
                     .header("anthropic-beta", "prompt-caching-2024-07-31,prompt-caching-scope-2026-01-05");
             }
             AuthProfileCredential::Token { token, .. } => {
+                // OAuth tokens (sk-ant-oat01-*) work with x-api-key header,
+                // NOT Bearer. The Anthropic SDK (used by OpenClaw/Claude Code)
+                // sends them as apiKey → x-api-key. Using Bearer routes to a
+                // different backend with stricter rate limits (529 overloaded).
                 req = req
-                    .header("Authorization", format!("Bearer {}", token))
+                    .header("x-api-key", token)
                     .header("anthropic-beta", OAUTH_BETA_HEADER)
                     .header("user-agent", OAUTH_USER_AGENT)
                     .header("x-app", "cli");
