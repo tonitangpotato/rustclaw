@@ -612,6 +612,8 @@ impl AnthropicClient {
 /// Retry configuration
 const MAX_RETRIES: u32 = 5;
 const INITIAL_BACKOFF_MS: u64 = 1000;
+/// Max backoff for retries (cap exponential growth)
+const MAX_BACKOFF_MS: u64 = 60_000; // 1 minute max between retries
 
 /// Check if a status code should trigger a retry.
 fn should_retry(status: reqwest::StatusCode) -> bool {
@@ -714,7 +716,7 @@ impl LlmClient for AnthropicClient {
                 Ok(r) => r,
                 Err(e) => {
                     if attempt <= MAX_RETRIES {
-                        let backoff = INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1);
+                        let backoff = (INITIAL_BACKOFF_MS * 2u64.pow(attempt.saturating_sub(1).min(6))).min(MAX_BACKOFF_MS);
                         tracing::warn!(
                             "Request failed (attempt {}/{}): {}. Retrying in {}ms...",
                             attempt, MAX_RETRIES, e, backoff
@@ -816,7 +818,7 @@ impl LlmClient for AnthropicClient {
 
                 let backoff = retry_after
                     .map(|secs| secs * 1000)
-                    .unwrap_or_else(|| INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1));
+                    .unwrap_or_else(|| (INITIAL_BACKOFF_MS * 2u64.pow(attempt.saturating_sub(1).min(6))).min(MAX_BACKOFF_MS));
 
                 tracing::warn!(
                     "Retryable error {} (attempt {}/{}). Retrying in {}ms...",
@@ -996,7 +998,7 @@ impl LlmClient for AnthropicClient {
                 Ok(r) => r,
                 Err(e) => {
                     if attempt <= MAX_RETRIES {
-                        let backoff = INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1);
+                        let backoff = (INITIAL_BACKOFF_MS * 2u64.pow(attempt.saturating_sub(1).min(6))).min(MAX_BACKOFF_MS);
                         tracing::warn!(
                             "Stream request failed (attempt {}/{}): {}. Retrying in {}ms...",
                             attempt, MAX_RETRIES, e, backoff
@@ -1099,7 +1101,7 @@ impl LlmClient for AnthropicClient {
 
                 let backoff = retry_after
                     .map(|secs| secs * 1000)
-                    .unwrap_or_else(|| INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1));
+                    .unwrap_or_else(|| (INITIAL_BACKOFF_MS * 2u64.pow(attempt.saturating_sub(1).min(6))).min(MAX_BACKOFF_MS));
 
                 tracing::warn!(
                     "Stream retryable error {} (attempt {}/{}). Retrying in {}ms...",

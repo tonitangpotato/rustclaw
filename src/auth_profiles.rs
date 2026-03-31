@@ -312,7 +312,8 @@ impl AuthProfileStore {
     }
 
     /// Mark a profile as failed with a specific reason.
-    /// Applies exponential backoff cooldown: 1min, 5min, 25min, max 1 hour.
+    /// Applies reason-aware exponential backoff cooldown.
+    /// If a cooldown window is already active, does NOT extend it (prevents escalation storms).
     pub fn mark_failure(&mut self, profile_id: &str, reason: AuthProfileFailureReason) {
         if !self.profiles.contains_key(profile_id) {
             return;
@@ -331,6 +332,11 @@ impl AuthProfileStore {
             }
         }
 
+        // If cooldown is already active, don't escalate — just record the failure.
+        // This prevents retry storms from pushing the cooldown window further out.
+        // (Matches OpenClaw's keepActiveWindowOrRecompute pattern.)
+        let already_in_cooldown = stats.cooldown_until.map(|until| now < until).unwrap_or(false);
+
         // Increment error count
         let error_count = stats.error_count.unwrap_or(0) + 1;
         stats.error_count = Some(error_count);
@@ -341,18 +347,25 @@ impl AuthProfileStore {
         let failure_counts = stats.failure_counts.get_or_insert_with(HashMap::new);
         *failure_counts.entry(reason_key).or_insert(0) += 1;
 
-        // Calculate cooldown: 1min * 5^(errorCount-1), max 1 hour
-        // Error 1 → 1min, Error 2 → 5min, Error 3 → 25min, Error 4+ → 60min
-        let cooldown_ms = calculate_cooldown_ms(error_count);
-        stats.cooldown_until = Some(now + cooldown_ms);
+        if already_in_cooldown {
+            // Don't extend the cooldown — just log
+            tracing::debug!(
+                "Profile {} failed ({:?}), error_count={}, cooldown already active",
+                profile_id, reason, error_count
+            );
+        } else {
+            // Calculate new cooldown (reason-aware)
+            let cooldown_ms = calculate_cooldown_ms(error_count, reason);
+            stats.cooldown_until = Some(now + cooldown_ms);
 
-        tracing::warn!(
-            "Profile {} failed ({:?}), error_count={}, cooldown={}ms",
-            profile_id,
-            reason,
-            error_count,
-            cooldown_ms
-        );
+            tracing::warn!(
+                "Profile {} failed ({:?}), error_count={}, cooldown={}ms",
+                profile_id,
+                reason,
+                error_count,
+                cooldown_ms
+            );
+        }
     }
 
     /// Get a credential by profile ID.
@@ -361,18 +374,52 @@ impl AuthProfileStore {
     }
 }
 
-/// Calculate cooldown duration in milliseconds based on error count.
-/// Formula: min(1 hour, 1 minute * 5^(error_count - 1))
-/// Results: 1min, 5min, 25min, 1h max
-fn calculate_cooldown_ms(error_count: u32) -> u64 {
-    const ONE_MINUTE_MS: u64 = 60 * 1000;
-    const ONE_HOUR_MS: u64 = 60 * 60 * 1000;
-
+/// Calculate cooldown duration in milliseconds based on error count and failure reason.
+///
+/// Different failure types deserve different backoff strategies:
+/// - **Overloaded (529/500/502/503)**: Server-side issue, short backoff. 30s, 60s, 2min, 5min max.
+///   Cooling down YOUR profile for an hour doesn't help — the server is overloaded, not your token.
+/// - **RateLimit (429)**: Your token hit a rate limit. Standard backoff. 1min, 5min, 25min, 1h max.
+/// - **Auth/Billing**: Your credentials are invalid. Longer backoff. Same as rate limit.
+/// - **Other**: Standard backoff.
+fn calculate_cooldown_ms(error_count: u32, reason: AuthProfileFailureReason) -> u64 {
     let count = error_count.max(1);
-    let exponent = (count - 1).min(3); // Cap at 5^3 = 125, but we'll hit 1h cap at 5^2
 
-    let cooldown = ONE_MINUTE_MS * 5u64.pow(exponent);
-    cooldown.min(ONE_HOUR_MS)
+    match reason {
+        // Server overload — short, gentle backoff (server will recover)
+        AuthProfileFailureReason::Overloaded => {
+            const BASE_MS: u64 = 30_000; // 30 seconds
+            const MAX_MS: u64 = 5 * 60 * 1000; // 5 minutes max
+            let backoff = BASE_MS * 2u64.pow((count - 1).min(4));
+            backoff.min(MAX_MS)
+        }
+
+        // Rate limit — standard exponential backoff
+        AuthProfileFailureReason::RateLimit => {
+            const ONE_MINUTE_MS: u64 = 60 * 1000;
+            const MAX_MS: u64 = 60 * 60 * 1000; // 1 hour max
+            let backoff = ONE_MINUTE_MS * 5u64.pow((count - 1).min(3));
+            backoff.min(MAX_MS)
+        }
+
+        // Auth failures — standard backoff (won't self-resolve, but avoids spam)
+        AuthProfileFailureReason::Auth
+        | AuthProfileFailureReason::AuthPermanent
+        | AuthProfileFailureReason::Billing => {
+            const ONE_MINUTE_MS: u64 = 60 * 1000;
+            const MAX_MS: u64 = 60 * 60 * 1000;
+            let backoff = ONE_MINUTE_MS * 5u64.pow((count - 1).min(3));
+            backoff.min(MAX_MS)
+        }
+
+        // Timeout, unknown, etc. — moderate backoff
+        _ => {
+            const ONE_MINUTE_MS: u64 = 60 * 1000;
+            const MAX_MS: u64 = 15 * 60 * 1000; // 15 minutes max
+            let backoff = ONE_MINUTE_MS * 2u64.pow((count - 1).min(4));
+            backoff.min(MAX_MS)
+        }
+    }
 }
 
 /// Get the default path for auth-profiles.json.
@@ -456,12 +503,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_cooldown_calculation() {
-        assert_eq!(calculate_cooldown_ms(1), 60_000); // 1 min
-        assert_eq!(calculate_cooldown_ms(2), 300_000); // 5 min
-        assert_eq!(calculate_cooldown_ms(3), 1_500_000); // 25 min
-        assert_eq!(calculate_cooldown_ms(4), 3_600_000); // 1 hour (capped)
-        assert_eq!(calculate_cooldown_ms(5), 3_600_000); // 1 hour (capped)
+    fn test_cooldown_rate_limit() {
+        // Rate limit: 1min, 5min, 25min, 1h max
+        let r = AuthProfileFailureReason::RateLimit;
+        assert_eq!(calculate_cooldown_ms(1, r), 60_000);
+        assert_eq!(calculate_cooldown_ms(2, r), 300_000);
+        assert_eq!(calculate_cooldown_ms(3, r), 1_500_000);
+        assert_eq!(calculate_cooldown_ms(4, r), 3_600_000); // 1 hour cap
+    }
+
+    #[test]
+    fn test_cooldown_overloaded() {
+        // Overloaded: 30s, 60s, 120s, 240s, 300s max (5 min)
+        let r = AuthProfileFailureReason::Overloaded;
+        assert_eq!(calculate_cooldown_ms(1, r), 30_000);    // 30s
+        assert_eq!(calculate_cooldown_ms(2, r), 60_000);    // 1min
+        assert_eq!(calculate_cooldown_ms(3, r), 120_000);   // 2min
+        assert_eq!(calculate_cooldown_ms(4, r), 240_000);   // 4min
+        assert_eq!(calculate_cooldown_ms(5, r), 300_000);   // 5min cap
+    }
+
+    #[test]
+    fn test_cooldown_no_escalation_during_active_window() {
+        let now = now_ms();
+        let mut store = AuthProfileStore {
+            version: 1,
+            profiles: [(
+                "a".to_string(),
+                AuthProfileCredential::Token {
+                    provider: "anthropic".to_string(),
+                    token: "tok".to_string(),
+                    expires: None,
+                },
+            )].into(),
+            order: None,
+            last_good: None,
+            usage_stats: Some([(
+                "a".to_string(),
+                ProfileUsageStats {
+                    cooldown_until: Some(now + 30_000), // Active cooldown: 30s from now
+                    error_count: Some(1),
+                    ..Default::default()
+                },
+            )].into()),
+        };
+
+        // Mark another failure during active cooldown
+        store.mark_failure("a", AuthProfileFailureReason::Overloaded);
+        let stats = store.usage_stats.as_ref().unwrap().get("a").unwrap();
+
+        // Error count should increment
+        assert_eq!(stats.error_count, Some(2));
+        // But cooldown should NOT be extended (still original 30s window)
+        assert_eq!(stats.cooldown_until, Some(now + 30_000));
     }
 
     #[test]
