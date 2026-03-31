@@ -348,6 +348,38 @@ async fn main() -> anyhow::Result<()> {
             });
             tracing::info!("Engram self-reflection scheduled (every 24 hours)");
 
+            // Configure token budget alerts
+            {
+                let tracker = llm::token_tracker();
+                tracker.set_hourly_limit(cfg.token_budget.hourly_limit);
+                tracing::info!(
+                    "Token budget: hourly limit = {}M tokens",
+                    cfg.token_budget.hourly_limit / 1_000_000
+                );
+
+                // Wire alert to Telegram notification
+                if let Some(ref tg_config) = cfg.channels.telegram {
+                    let bot_token = tg_config.bot_token.clone();
+                    // Send alerts to the first configured chat (potato's DM)
+                    tracker.set_alert_fn(move |alert| {
+                        let token = bot_token.clone();
+                        let msg = alert.message.clone();
+                        // Fire-and-forget async send
+                        tokio::spawn(async move {
+                            let client = reqwest::Client::new();
+                            let url = format!("https://api.telegram.org/bot{}/sendMessage", token);
+                            let _ = client.post(&url)
+                                .json(&serde_json::json!({
+                                    "chat_id": 7539582820_i64, // potato's Telegram ID
+                                    "text": msg,
+                                }))
+                                .send()
+                                .await;
+                        });
+                    });
+                }
+            }
+
             // Start web dashboard (if enabled)
             dashboard::start_dashboard(cfg.dashboard.clone(), cfg.clone(), runner.clone()).await?;
 

@@ -191,6 +191,10 @@ struct TokensResponse {
     total_cache_write: u64,
     /// Total tokens (input + output)
     total_tokens: u64,
+    /// Tokens used in last hour (sliding window)
+    hourly_tokens: u64,
+    /// Requests in last hour
+    hourly_requests: u64,
 }
 
 #[derive(Serialize)]
@@ -331,6 +335,8 @@ async fn get_tokens(State(_state): State<Arc<DashboardState>>) -> impl IntoRespo
         total_cache_read: stats.total_cache_read,
         total_cache_write: stats.total_cache_write,
         total_tokens: stats.total_input + stats.total_output,
+        hourly_tokens: stats.hourly_tokens,
+        hourly_requests: stats.hourly_requests,
     })
 }
 

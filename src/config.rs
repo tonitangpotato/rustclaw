@@ -114,7 +114,29 @@ pub struct Config {
     /// Context efficiency settings (microcompact, tool result persistence)
     #[serde(default)]
     pub context: ContextConfig,
+
+    /// Token budget / alert configuration
+    #[serde(default)]
+    pub token_budget: TokenBudgetConfig,
 }
+
+/// Token budget and alert thresholds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenBudgetConfig {
+    /// Hourly token limit — alerts when exceeded (default: 2M)
+    #[serde(default = "default_hourly_token_limit")]
+    pub hourly_limit: u64,
+}
+
+impl Default for TokenBudgetConfig {
+    fn default() -> Self {
+        Self {
+            hourly_limit: default_hourly_token_limit(),
+        }
+    }
+}
+
+fn default_hourly_token_limit() -> u64 { 2_000_000 }
 
 /// Context efficiency configuration — controls microcompact and tool result persistence.
 #[derive(Debug, Clone, Serialize, Deserialize)]

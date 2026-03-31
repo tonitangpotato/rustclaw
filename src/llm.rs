@@ -135,6 +135,40 @@ pub struct TokenTracker {
     total_cache_read: std::sync::atomic::AtomicU64,
     /// Total cache write tokens
     total_cache_write: std::sync::atomic::AtomicU64,
+    /// Sliding window: recent token records for rate tracking
+    window: std::sync::Mutex<TokenWindow>,
+    /// Alert callback (set once at startup)
+    alert_fn: std::sync::OnceLock<Box<dyn Fn(TokenAlert) + Send + Sync>>,
+}
+
+/// A time-bucketed record for sliding window tracking.
+#[derive(Debug, Clone)]
+struct WindowEntry {
+    timestamp: std::time::Instant,
+    input_tokens: u64,
+    output_tokens: u64,
+}
+
+/// Sliding window for rate-based alerts.
+#[derive(Debug)]
+struct TokenWindow {
+    entries: Vec<WindowEntry>,
+    /// Hourly alert threshold (total input+output)
+    hourly_limit: u64,
+    /// Whether we've already alerted for this window (avoid spam)
+    alerted_this_hour: bool,
+    /// Last time we pruned old entries
+    last_prune: std::time::Instant,
+}
+
+/// Alert emitted when token usage exceeds threshold.
+#[derive(Debug, Clone)]
+pub struct TokenAlert {
+    pub hourly_tokens: u64,
+    pub hourly_limit: u64,
+    pub hourly_requests: u64,
+    pub total_tokens: u64,
+    pub message: String,
 }
 
 impl TokenTracker {
@@ -146,7 +180,26 @@ impl TokenTracker {
             total_requests: std::sync::atomic::AtomicU64::new(0),
             total_cache_read: std::sync::atomic::AtomicU64::new(0),
             total_cache_write: std::sync::atomic::AtomicU64::new(0),
+            window: std::sync::Mutex::new(TokenWindow {
+                entries: Vec::new(),
+                hourly_limit: 2_000_000, // Default: 2M tokens/hour
+                alerted_this_hour: false,
+                last_prune: std::time::Instant::now(),
+            }),
+            alert_fn: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Set the hourly token limit for alerts.
+    pub fn set_hourly_limit(&self, limit: u64) {
+        if let Ok(mut window) = self.window.lock() {
+            window.hourly_limit = limit;
+        }
+    }
+
+    /// Set the alert callback (called when hourly limit is exceeded).
+    pub fn set_alert_fn(&self, f: impl Fn(TokenAlert) + Send + Sync + 'static) {
+        let _ = self.alert_fn.set(Box::new(f));
     }
 
     /// Record token usage from a request.
@@ -157,13 +210,74 @@ impl TokenTracker {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
         self.total_cache_read.fetch_add(usage.cache_read as u64, Ordering::Relaxed);
         self.total_cache_write.fetch_add(usage.cache_write as u64, Ordering::Relaxed);
-        
+
+        let total = self.total_input.load(Ordering::Relaxed) + self.total_output.load(Ordering::Relaxed);
+
         tracing::debug!(
             "Token usage: input={} output={} cache_read={} cache_write={} (cumulative: {} requests, {} total tokens)",
             usage.input_tokens, usage.output_tokens, usage.cache_read, usage.cache_write,
             self.total_requests.load(Ordering::Relaxed),
-            self.total_input.load(Ordering::Relaxed) + self.total_output.load(Ordering::Relaxed)
+            total,
         );
+
+        // Sliding window check
+        if let Ok(mut window) = self.window.lock() {
+            let now = std::time::Instant::now();
+
+            // Add entry
+            window.entries.push(WindowEntry {
+                timestamp: now,
+                input_tokens: usage.input_tokens as u64,
+                output_tokens: usage.output_tokens as u64,
+            });
+
+            // Prune entries older than 1 hour (but not too frequently)
+            if now.duration_since(window.last_prune).as_secs() > 60 {
+                let one_hour_ago = now - std::time::Duration::from_secs(3600);
+                window.entries.retain(|e| e.timestamp >= one_hour_ago);
+                window.last_prune = now;
+
+                // Reset alert flag if we're in a new window
+                let hourly_total: u64 = window.entries.iter()
+                    .map(|e| e.input_tokens + e.output_tokens)
+                    .sum();
+                if hourly_total < window.hourly_limit / 2 {
+                    window.alerted_this_hour = false;
+                }
+            }
+
+            // Check hourly rate
+            let one_hour_ago = now - std::time::Duration::from_secs(3600);
+            let hourly_total: u64 = window.entries.iter()
+                .filter(|e| e.timestamp >= one_hour_ago)
+                .map(|e| e.input_tokens + e.output_tokens)
+                .sum();
+            let hourly_requests: u64 = window.entries.iter()
+                .filter(|e| e.timestamp >= one_hour_ago)
+                .count() as u64;
+
+            if hourly_total > window.hourly_limit && !window.alerted_this_hour {
+                window.alerted_this_hour = true;
+                let alert = TokenAlert {
+                    hourly_tokens: hourly_total,
+                    hourly_limit: window.hourly_limit,
+                    hourly_requests,
+                    total_tokens: total,
+                    message: format!(
+                        "⚠️ Token alert: {}M tokens in last hour ({} requests). Limit: {}M/hr. Total since start: {}M.",
+                        hourly_total / 1_000_000,
+                        hourly_requests,
+                        window.hourly_limit / 1_000_000,
+                        total / 1_000_000,
+                    ),
+                };
+                tracing::warn!("{}", alert.message);
+
+                if let Some(alert_fn) = self.alert_fn.get() {
+                    alert_fn(alert);
+                }
+            }
+        }
     }
 
     /// Get total input tokens.
@@ -191,15 +305,31 @@ impl TokenTracker {
         self.total_cache_write.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Get snapshot of all stats.
+    /// Get snapshot of all stats (includes hourly window).
     pub fn snapshot(&self) -> TokenStats {
         use std::sync::atomic::Ordering;
+        let (hourly_tokens, hourly_requests) = if let Ok(window) = self.window.lock() {
+            let one_hour_ago = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+            let tokens: u64 = window.entries.iter()
+                .filter(|e| e.timestamp >= one_hour_ago)
+                .map(|e| e.input_tokens + e.output_tokens)
+                .sum();
+            let requests = window.entries.iter()
+                .filter(|e| e.timestamp >= one_hour_ago)
+                .count() as u64;
+            (tokens, requests)
+        } else {
+            (0, 0)
+        };
+
         TokenStats {
             total_input: self.total_input.load(Ordering::Relaxed),
             total_output: self.total_output.load(Ordering::Relaxed),
             total_requests: self.total_requests.load(Ordering::Relaxed),
             total_cache_read: self.total_cache_read.load(Ordering::Relaxed),
             total_cache_write: self.total_cache_write.load(Ordering::Relaxed),
+            hourly_tokens,
+            hourly_requests,
         }
     }
 }
@@ -218,6 +348,10 @@ pub struct TokenStats {
     pub total_requests: u64,
     pub total_cache_read: u64,
     pub total_cache_write: u64,
+    /// Tokens used in last hour (sliding window)
+    pub hourly_tokens: u64,
+    /// Requests in last hour
+    pub hourly_requests: u64,
 }
 
 /// Global token tracker instance.
