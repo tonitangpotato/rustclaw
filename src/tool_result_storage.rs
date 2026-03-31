@@ -1,18 +1,13 @@
 //! Tool result persistence — large results are stored on disk
 //! and replaced with a preview in context.
 //!
-//! Inspired by Claude Code's toolResultStorage.ts:
-//! - Results > threshold are persisted to ~/.rustclaw/tool-results/{session}/
-//! - Context gets preview (first N chars) + file path
-//! - Agent can read_file to access full content when needed
+//! Results > threshold are persisted to ~/.rustclaw/tool-results/{session}/
+//! Context gets preview (first N chars) + file path.
+//! Agent can read_file to access full content when needed.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-/// Default threshold: persist results larger than this (chars).
-const DEFAULT_PERSIST_THRESHOLD: usize = 30_000;
-
-/// Preview size: keep this many chars in context.
-const PREVIEW_CHARS: usize = 2000;
+use crate::config::ContextConfig;
 
 /// Base directory for persisted tool results.
 fn results_dir() -> PathBuf {
@@ -23,8 +18,8 @@ fn results_dir() -> PathBuf {
 }
 
 /// Check if a tool result should be persisted to disk.
-pub fn should_persist(content: &str) -> bool {
-    content.len() > DEFAULT_PERSIST_THRESHOLD
+pub fn should_persist(content: &str, config: &ContextConfig) -> bool {
+    content.len() > config.persist_threshold
 }
 
 /// Persist a large tool result to disk and return the replacement content.
@@ -36,8 +31,8 @@ pub fn persist_and_preview(
     tool_call_id: &str,
     tool_name: &str,
     content: &str,
+    config: &ContextConfig,
 ) -> Option<(String, PathBuf)> {
-    // Sanitize session key for filesystem
     let safe_session = session_key.replace([':', '/', '\\'], "_");
     let dir = results_dir().join(&safe_session);
 
@@ -54,8 +49,7 @@ pub fn persist_and_preview(
         return None;
     }
 
-    let preview_end = content.len().min(PREVIEW_CHARS);
-    // Safety: ensure we don't split a multi-byte char
+    let preview_end = content.len().min(config.persist_preview_chars);
     let preview_end = content.floor_char_boundary(preview_end);
     let preview = &content[..preview_end];
 
@@ -91,13 +85,13 @@ pub fn cleanup_session(session_key: &str) {
 }
 
 /// Clean up all stale tool result directories (for sessions that no longer exist).
-pub fn cleanup_stale(active_sessions: &[String]) {
+pub fn cleanup_stale(active_session_keys: &[String]) {
     let base = results_dir();
     if !base.exists() {
         return;
     }
 
-    let active_set: std::collections::HashSet<String> = active_sessions
+    let active_set: std::collections::HashSet<String> = active_session_keys
         .iter()
         .map(|s| s.replace([':', '/', '\\'], "_"))
         .collect();
@@ -107,7 +101,7 @@ pub fn cleanup_stale(active_sessions: &[String]) {
             if let Some(name) = entry.file_name().to_str() {
                 if !active_set.contains(name) {
                     let _ = std::fs::remove_dir_all(entry.path());
-                    tracing::debug!("Cleaned up stale tool-results: {}", name);
+                    tracing::info!("Cleaned up stale tool-results: {}", name);
                 }
             }
         }
@@ -120,17 +114,19 @@ mod tests {
 
     #[test]
     fn test_should_persist() {
+        let config = ContextConfig::default();
         let short = "a".repeat(1000);
-        assert!(!should_persist(&short));
+        assert!(!should_persist(&short, &config));
 
         let long = "a".repeat(31_000);
-        assert!(should_persist(&long));
+        assert!(should_persist(&long, &config));
     }
 
     #[test]
     fn test_persist_and_preview() {
+        let config = ContextConfig::default();
         let content = "x".repeat(35_000);
-        let result = persist_and_preview("test_session", "call_123", "web_fetch", &content);
+        let result = persist_and_preview("test_session", "call_123", "web_fetch", &content, &config);
         assert!(result.is_some());
 
         let (preview, path) = result.unwrap();

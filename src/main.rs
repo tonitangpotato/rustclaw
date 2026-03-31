@@ -27,7 +27,7 @@ mod search;
 mod serverless;
 mod session;
 mod tool_result_storage;mod skills;
-mod stt;
+mod events;mod stt;
 mod text_utils;
 mod tools;
 mod tts;
@@ -182,6 +182,13 @@ async fn main() -> anyhow::Result<()> {
             // Initialize session manager
             let sessions = session::SessionManager::new(&cfg).await?;
             tracing::info!("Session manager ready");
+
+            // Clean up stale tool result files from previous sessions
+            {
+                let active = sessions.list_sessions().await;
+                let keys: Vec<String> = active.iter().map(|s| s.key.clone()).collect();
+                tool_result_storage::cleanup_stale(&keys);
+            }
 
             // Initialize orchestrator (if enabled)
             let orch = if cfg.orchestrator.enabled {

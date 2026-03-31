@@ -70,12 +70,13 @@ fn persist_large_tool_results(
     session_key: &str,
     tool_results: &mut Vec<(String, String, bool)>,
     tool_names: &[String],
+    config: &crate::config::ContextConfig,
 ) {
     for (i, (id, output, _is_error)) in tool_results.iter_mut().enumerate() {
-        if tool_result_storage::should_persist(output) {
+        if tool_result_storage::should_persist(output, config) {
             let name = tool_names.get(i).map(|s| s.as_str()).unwrap_or("unknown");
             if let Some((preview, _path)) = tool_result_storage::persist_and_preview(
-                session_key, id, name, output,
+                session_key, id, name, output, config,
             ) {
                 *output = preview;
             }
@@ -227,7 +228,7 @@ impl AgentRunner {
 
     /// Process an incoming message and return a response.
     pub async fn process_message(
-        &self,
+        self: &Arc<Self>,
         session_key: &str,
         user_message: &str,
         user_id: Option<&str>,
@@ -238,7 +239,7 @@ impl AgentRunner {
 
     /// Process with structured context, returning ProcessedResponse.
     pub async fn process_message_with_context(
-        &self,
+        self: &Arc<Self>,
         session_key: &str,
         user_message: &str,
         msg_ctx: &crate::context::MessageContext,
@@ -266,14 +267,80 @@ impl AgentRunner {
     }
 
     /// Process an incoming message with additional options.
+        /// Process a message with options, returning the final response string.
+    /// This is a convenience wrapper around `process_message_events`.
     pub async fn process_message_with_options(
-        &self,
+        self: &Arc<Self>,
         session_key: &str,
         user_message: &str,
         user_id: Option<&str>,
         channel: Option<&str>,
         is_heartbeat: bool,
     ) -> anyhow::Result<String> {
+        let rx = self.process_message_events(
+            session_key, user_message, user_id, channel, is_heartbeat,
+        );
+        crate::events::collect_response(rx).await
+    }
+
+    /// Core message processing — emits AgentEvents via a channel.
+    ///
+    /// Returns a Receiver that yields events as they happen:
+    /// - `Text`: intermediate text before tool execution (acknowledgments)
+    /// - `ToolStart`/`ToolDone`: tool execution progress
+    /// - `Response`: final response text
+    /// - `Error`: processing error
+    ///
+    /// Callers that need streaming (Telegram) consume events directly.
+    /// Callers that need a simple string use `collect_response(rx)`.
+    pub fn process_message_events(
+        self: &Arc<Self>,
+        session_key: &str,
+        user_message: &str,
+        user_id: Option<&str>,
+        channel: Option<&str>,
+        is_heartbeat: bool,
+    ) -> tokio::sync::mpsc::Receiver<crate::events::AgentEvent> {
+        use crate::events::{event_channel, AgentEvent};
+
+        let (tx, rx) = event_channel();
+
+        let this = Arc::clone(self);
+        let session_key = session_key.to_string();
+        let user_message = user_message.to_string();
+        let user_id = user_id.map(String::from);
+        let channel = channel.map(String::from);
+
+        tokio::spawn(async move {
+            let result = this.run_agent_loop(
+                tx.clone(),
+                &session_key,
+                &user_message,
+                user_id.as_deref(),
+                channel.as_deref(),
+                is_heartbeat,
+            ).await;
+
+            if let Err(e) = result {
+                let _ = tx.send(AgentEvent::Error(format!("{}", e))).await;
+            }
+        });
+
+        rx
+    }
+
+    /// The actual agent loop — runs in a spawned task, emits events through the channel.
+    async fn run_agent_loop(
+        &self,
+        tx: tokio::sync::mpsc::Sender<crate::events::AgentEvent>,
+        session_key: &str,
+        user_message: &str,
+        user_id: Option<&str>,
+        channel: Option<&str>,
+        is_heartbeat: bool,
+    ) -> anyhow::Result<()> {
+        use crate::events::AgentEvent;
+
         tracing::info!(
             "Processing message for session={} user={:?}",
             session_key,
@@ -286,7 +353,8 @@ impl AgentRunner {
         // 2. Scan inbound for secrets (SafetyLayer)
         if let Some(warning) = self.safety.scan_inbound_for_secrets(user_message) {
             tracing::warn!("Inbound secret detected from user {:?}", user_id);
-            return Ok(warning);
+            let _ = tx.send(AgentEvent::Response(warning)).await;
+            return Ok(());
         }
 
         // 3. Run BeforeInbound hooks
@@ -299,15 +367,16 @@ impl AgentRunner {
         };
 
         {
-            let hooks = self.hooks.read().await;
+            let hooks_guard = self.hooks.read().await;
             if let HookOutcome::Reject(reason) =
-                hooks.run(HookPoint::BeforeInbound, &mut hook_ctx).await?
+                hooks_guard.run(HookPoint::BeforeInbound, &mut hook_ctx).await?
             {
-                return Ok(format!("Message rejected: {}", reason));
+                let _ = tx.send(AgentEvent::Response(format!("Message rejected: {}", reason))).await;
+                return Ok(());
             }
         }
 
-        // 3. Extract recalled memories from hook metadata (set by EngramRecallHook)
+        // Extract recalled memories from hook metadata (set by EngramRecallHook)
         let memory_context = hook_ctx
             .metadata
             .get("engram_recall")
@@ -325,16 +394,15 @@ impl AgentRunner {
             }
         }
 
-        // 4. Build system prompt (include HEARTBEAT.md if this is a heartbeat poll)
-        //    Pass user_message for dynamic skill injection
-        let channel_caps = self.channel_caps.read().await;
+        // 4. Build system prompt
+        let caps = self.channel_caps.read().await;
         let mut system_prompt = self.workspace.build_system_prompt_full(
             &self.runtime_ctx,
-            &channel_caps,
+            &caps,
             is_heartbeat,
             Some(user_message),
         );
-        drop(channel_caps);
+        drop(caps);
         if !memory_context.is_empty() {
             system_prompt.push_str("\n\n## Relevant Memories\n");
             system_prompt.push_str(&memory_context);
@@ -343,9 +411,8 @@ impl AgentRunner {
         // 5. Add user message to session
         session.messages.push(Message::text("user", user_message));
 
-        // 6. Summarize or trim messages to stay within context window
+        // 6. Summarize or trim messages
         if let Some(ref summary_llm) = self.summary_llm {
-            // Try to summarize old messages
             match summarize_old_messages(
                 &mut session,
                 self.config.max_session_messages,
@@ -356,21 +423,18 @@ impl AgentRunner {
                 Ok(true) => {
                     tracing::info!("Summarized old messages in session {}", session_key);
                 }
-                Ok(false) => {
-                    // No summarization needed
-                }
+                Ok(false) => {}
                 Err(e) => {
                     tracing::warn!("Summarization failed, falling back to trim: {}", e);
                     session.trim_messages(self.config.max_session_messages);
                 }
             }
         } else {
-            // No summary model configured, just trim
             session.trim_messages(self.config.max_session_messages);
         }
 
         // 7. Microcompact old tool results
-        crate::session::microcompact_messages(&mut session.messages, 3);
+        crate::session::microcompact_messages(&mut session.messages, &self.config.context);
 
         // 8. Get tool definitions
         let tool_defs = self.tools.definitions();
@@ -380,8 +444,7 @@ impl AgentRunner {
         let mut response_text = String::new();
 
         for turn in 0..max_turns {
-            let response = self
-                .llm_client
+            let response = self.llm_client
                 .read().await
                 .chat(&system_prompt, &session.messages, &tool_defs)
                 .await?;
@@ -417,7 +480,7 @@ impl AgentRunner {
             }
 
             if response.tool_calls.is_empty() {
-                // No tool calls — add final assistant message and break
+                // Final response — no more tool calls
                 if !response_text.is_empty() {
                     tracing::info!("Final response ({} chars): {}...", response_text.len(),
                         {
@@ -425,11 +488,17 @@ impl AgentRunner {
                             let end = response_text.floor_char_boundary(end);
                             &response_text[..end]
                         });
-                    session
-                        .messages
-                        .push(Message::text("assistant", &response_text));
+                    session.messages.push(Message::text("assistant", &response_text));
                 }
+                let _ = tx.send(AgentEvent::Response(response_text.clone())).await;
                 break;
+            }
+
+            // === KEY CHANGE: Emit intermediate text before tool execution ===
+            if let Some(text) = &response.text {
+                if !text.is_empty() {
+                    let _ = tx.send(AgentEvent::Text(text.clone())).await;
+                }
             }
 
             // Add assistant message with tool calls
@@ -440,100 +509,23 @@ impl AgentRunner {
             ));
 
             // Execute each tool
-            let mut tool_results = Vec::new();
-            let mut tool_names_for_persist: Vec<String> = Vec::new();
-            for tc in &response.tool_calls {
-                tool_names_for_persist.push(tc.name.clone());
-                // Run BeforeToolCall hook
-                let mut tc_ctx = HookContext {
-                    session_key: session_key.to_string(),
-                    user_id: user_id.map(String::from),
-                    channel: channel.map(String::from),
-                    content: tc.name.clone(),
-                    metadata: tc.input.clone(),
-                };
-
-                {
-                    let hooks = self.hooks.read().await;
-                    if let HookOutcome::Reject(reason) =
-                        hooks.run(HookPoint::BeforeToolCall, &mut tc_ctx).await?
-                    {
-                        tool_results.push((
-                            tc.id.clone(),
-                            format!("Tool call rejected: {}", reason),
-                            true,
-                        ));
-                        continue;
-                    }
-                }
-
-                // Intercept set_voice_mode — needs session context (not in tool registry)
-                if tc.name == "set_voice_mode" {
-                    let enabled = tc.input["enabled"].as_bool().unwrap_or(false);
-                    if let Some(chat_id) = crate::voice_mode::VoiceMode::chat_id_from_session(session_key) {
-                        self.voice_mode.set(chat_id, enabled).await;
-                        let status = if enabled { "ON" } else { "OFF" };
-                        tool_results.push((tc.id.clone(), format!("Voice mode set to {}", status), false));
-                    } else {
-                        tool_results.push((tc.id.clone(), "Could not determine chat ID".to_string(), true));
-                    }
-                    continue;
-                }
-
-                // Execute tool with sandbox enforcement
-                let result = self.execute_tool_sandboxed(&tc.name, tc.input.clone()).await;
-                match result {
-                    Ok(tool_result) => {
-                        // Sanitize tool output through SafetyLayer
-                        let sanitized = self.safety.sanitize_tool_output(&tc.name, &tool_result.output);
-                        if sanitized.was_modified {
-                            tracing::info!(
-                                "Tool {} → {} chars (sanitized, {} warnings), error={}",
-                                tc.name, sanitized.content.len(),
-                                sanitized.warnings.len(), tool_result.is_error
-                            );
-                        } else {
-                            tracing::info!(
-                                "Tool {} → {} chars, error={}",
-                                tc.name, sanitized.content.len(), tool_result.is_error
-                            );
-                        }
-                        
-                        // Log behavior feedback (BehaviorFeedback integration)
-                        let is_success = !tool_result.is_error;
-                        if let Err(e) = self.memory.log_behavior(&tc.name, is_success) {
-                            tracing::debug!("Behavior logging failed (non-fatal): {}", e);
-                        }
-                        
-                        // Wrap web_fetch output as untrusted external content
-                        let output = if tc.name == "web_fetch" {
-                            wrap_external_content("web_fetch", &sanitized.content)
-                        } else {
-                            sanitized.content
-                        };
-                        tool_results.push((tc.id.clone(), output, tool_result.is_error));
-                    }
-                    Err(e) => {
-                        tracing::warn!("Tool {} sandbox error: {}", tc.name, e);
-                        
-                        // Log behavior failure
-                        if let Err(log_e) = self.memory.log_behavior(&tc.name, false) {
-                            tracing::debug!("Behavior logging failed (non-fatal): {}", log_e);
-                        }
-                        
-                        tool_results.push((tc.id.clone(), format!("Sandbox error: {}", e), true));
-                    }
-                }
-            }
+            let (tool_results, tool_names) = self.execute_tool_batch(
+                &response.tool_calls,
+                session_key,
+                user_id,
+                channel,
+                &tx,
+            ).await?;
 
             // Persist large tool results to disk
-            persist_large_tool_results(session_key, &mut tool_results, &tool_names_for_persist);
+            let mut tool_results = tool_results;
+            persist_large_tool_results(session_key, &mut tool_results, &tool_names, &self.config.context);
 
             // Add tool results as user message
             session.messages.push(Message::tool_results(tool_results));
         }
 
-        // 9. Run BeforeOutbound hooks (includes EngramStoreHook for auto-store)
+        // 10. Run BeforeOutbound hooks
         {
             let mut out_ctx = HookContext {
                 session_key: session_key.to_string(),
@@ -544,14 +536,137 @@ impl AgentRunner {
                     "user_message": user_message,
                 }),
             };
-            let hooks = self.hooks.read().await;
-            hooks.run(HookPoint::BeforeOutbound, &mut out_ctx).await?;
+            let hooks_guard = self.hooks.read().await;
+            hooks_guard.run(HookPoint::BeforeOutbound, &mut out_ctx).await?;
         }
 
-        // 10. Update session
+        // 11. Update session
         self.sessions.update(session).await;
 
-        Ok(response_text)
+        Ok(())
+    }
+
+    /// Execute a batch of tool calls, emitting events for each.
+    /// Returns (tool_results, tool_names) for persist-to-disk processing.
+    async fn execute_tool_batch(
+        &self,
+        tool_calls: &[crate::llm::ToolCall],
+        session_key: &str,
+        user_id: Option<&str>,
+        channel: Option<&str>,
+        tx: &tokio::sync::mpsc::Sender<crate::events::AgentEvent>,
+    ) -> anyhow::Result<(Vec<(String, String, bool)>, Vec<String>)> {
+        use crate::events::AgentEvent;
+
+        let mut tool_results = Vec::new();
+        let mut tool_names = Vec::new();
+
+        for tc in tool_calls {
+            tool_names.push(tc.name.clone());
+
+            // Emit ToolStart event
+            let _ = tx.send(AgentEvent::ToolStart {
+                name: tc.name.clone(),
+                id: tc.id.clone(),
+            }).await;
+
+            // Run BeforeToolCall hook
+            let mut tc_ctx = HookContext {
+                session_key: session_key.to_string(),
+                user_id: user_id.map(String::from),
+                channel: channel.map(String::from),
+                content: tc.name.clone(),
+                metadata: tc.input.clone(),
+            };
+
+            {
+                let hooks_guard = self.hooks.read().await;
+                if let HookOutcome::Reject(reason) =
+                    hooks_guard.run(HookPoint::BeforeToolCall, &mut tc_ctx).await?
+                {
+                    tool_results.push((
+                        tc.id.clone(),
+                        format!("Tool call rejected: {}", reason),
+                        true,
+                    ));
+                    continue;
+                }
+            }
+
+            // Intercept set_voice_mode
+            if tc.name == "set_voice_mode" {
+                let enabled = tc.input["enabled"].as_bool().unwrap_or(false);
+                if let Some(chat_id) = crate::voice_mode::VoiceMode::chat_id_from_session(session_key) {
+                    self.voice_mode.set(chat_id, enabled).await;
+                    let status = if enabled { "ON" } else { "OFF" };
+                    tool_results.push((tc.id.clone(), format!("Voice mode set to {}", status), false));
+                } else {
+                    tool_results.push((tc.id.clone(), "Could not determine chat ID".to_string(), true));
+                }
+                continue;
+            }
+
+            // Execute tool with sandbox enforcement
+            let result = self.execute_tool_sandboxed(&tc.name, tc.input.clone()).await;
+
+            match result {
+                Ok(tool_result) => {
+                    let sanitized = self.safety.sanitize_tool_output(&tc.name, &tool_result.output);
+                    if sanitized.was_modified {
+                        tracing::info!(
+                            "Tool {} → {} chars (sanitized, {} warnings), error={}",
+                            tc.name, sanitized.content.len(),
+                            sanitized.warnings.len(), tool_result.is_error
+                        );
+                    } else {
+                        tracing::info!(
+                            "Tool {} → {} chars, error={}",
+                            tc.name, sanitized.content.len(), tool_result.is_error
+                        );
+                    }
+
+                    // Log behavior feedback
+                    if let Err(e) = self.memory.log_behavior(&tc.name, !tool_result.is_error) {
+                        tracing::debug!("Behavior logging failed (non-fatal): {}", e);
+                    }
+
+                    let output = if tc.name == "web_fetch" {
+                        wrap_external_content("web_fetch", &sanitized.content)
+                    } else {
+                        sanitized.content
+                    };
+
+                    // Emit ToolDone event
+                    let preview_end = output.len().min(100);
+                    let preview_end = output.floor_char_boundary(preview_end);
+                    let _ = tx.send(AgentEvent::ToolDone {
+                        name: tc.name.clone(),
+                        id: tc.id.clone(),
+                        preview: output[..preview_end].to_string(),
+                        is_error: tool_result.is_error,
+                    }).await;
+
+                    tool_results.push((tc.id.clone(), output, tool_result.is_error));
+                }
+                Err(e) => {
+                    tracing::warn!("Tool {} sandbox error: {}", tc.name, e);
+                    if let Err(log_e) = self.memory.log_behavior(&tc.name, false) {
+                        tracing::debug!("Behavior logging failed (non-fatal): {}", log_e);
+                    }
+
+                    let _ = tx.send(AgentEvent::ToolDone {
+                        name: tc.name.clone(),
+                        id: tc.id.clone(),
+                        preview: format!("Error: {}", e),
+                        is_error: true,
+                    }).await;
+
+                    tool_results.push((tc.id.clone(), format!("Sandbox error: {}", e), true));
+                }
+            }
+        }
+
+        Ok((tool_results, tool_names))
     }
 
     /// Execute a tool with sandbox enforcement.
@@ -705,7 +820,7 @@ impl AgentRunner {
         session.trim_messages(self.config.max_session_messages);
 
         // Microcompact old tool results
-        crate::session::microcompact_messages(&mut session.messages, 3);
+        crate::session::microcompact_messages(&mut session.messages, &self.config.context);
 
         // Get tool definitions from sub-agent's own registry
         let tool_defs = subagent.tools.definitions();
@@ -816,7 +931,7 @@ impl AgentRunner {
             }
 
             // Persist large tool results to disk
-            persist_large_tool_results(&session_key, &mut tool_results, &tool_names_for_persist);
+            persist_large_tool_results(&session_key, &mut tool_results, &tool_names_for_persist, &self.config.context);
 
             // Add tool results as user message
             session.messages.push(Message::tool_results(tool_results));
@@ -941,7 +1056,7 @@ impl AgentRunner {
         session.trim_messages(self.config.max_session_messages);
 
         // 7. Microcompact old tool results
-        crate::session::microcompact_messages(&mut session.messages, 3);
+        crate::session::microcompact_messages(&mut session.messages, &self.config.context);
 
         // 8. Get tool definitions
         let tool_defs = self.tools.definitions();
@@ -986,7 +1101,9 @@ impl AgentRunner {
 
             // Execute each tool
             let mut tool_results = Vec::new();
+            let mut tool_names_for_persist: Vec<String> = Vec::new();
             for tc in &response.tool_calls {
+                tool_names_for_persist.push(tc.name.clone());
                 // Run BeforeToolCall hook
                 let mut tc_ctx = HookContext {
                     session_key: session_key.clone(),
@@ -1034,6 +1151,9 @@ impl AgentRunner {
                     }
                 }
             }
+
+            // Persist large tool results to disk
+            persist_large_tool_results(&session_key, &mut tool_results, &tool_names_for_persist, &self.config.context);
 
             // Add tool results as user message
             session.messages.push(Message::tool_results(tool_results));

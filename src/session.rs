@@ -445,26 +445,50 @@ pub async fn summarize_old_messages(
 /// Zero LLM cost — purely in-memory content replacement.
 ///
 /// Returns the number of chars saved.
-pub fn microcompact_messages(messages: &mut [Message], keep_recent_turns: usize) -> usize {
-    const MIN_SIZE_TO_CLEAR: usize = 2000; // Only clear results > 2K chars
-    const PREVIEW_CHARS: usize = 200; // Keep first N chars as preview
+/// Microcompact: clear old tool result content to reduce context size.
+///
+/// Uses config values for thresholds. The `keep_recent_turns` parameter
+/// counts assistant messages (each LLM response = 1 turn), not raw message indices.
+pub fn microcompact_messages(
+    messages: &mut [Message],
+    config: &crate::config::ContextConfig,
+) -> usize {
+    let min_size = config.microcompact_min_size;
+    let preview_chars = config.microcompact_preview_chars;
+    let keep_turns = config.microcompact_keep_turns;
 
-    if messages.len() <= keep_recent_turns * 2 {
-        return 0; // Not enough history to compact
+    // Count turns by assistant messages (each LLM call produces one)
+    let mut assistant_count = 0;
+    let mut cutoff_idx = messages.len();
+    for (i, msg) in messages.iter().enumerate().rev() {
+        if msg.role == "assistant" {
+            assistant_count += 1;
+            if assistant_count >= keep_turns {
+                cutoff_idx = i;
+                break;
+            }
+        }
     }
 
-    let cutoff = messages.len().saturating_sub(keep_recent_turns * 2);
+    if cutoff_idx == 0 {
+        return 0;
+    }
+
     let mut chars_saved = 0;
 
-    for msg in messages[..cutoff].iter_mut() {
+    for msg in messages[..cutoff_idx].iter_mut() {
         if msg.role != "user" {
             continue;
         }
         for block in msg.content.iter_mut() {
             if let ContentBlock::ToolResult { content, .. } = block {
-                if content.len() > MIN_SIZE_TO_CLEAR {
+                // Skip already-cleared results
+                if content.ends_with(" chars]") && content.contains("[Tool result cleared") {
+                    continue;
+                }
+                if content.len() > min_size {
                     let original_len = content.len();
-                    let preview_end = content.len().min(PREVIEW_CHARS);
+                    let preview_end = content.len().min(preview_chars);
                     let preview_end = content.floor_char_boundary(preview_end);
                     let preview = &content[..preview_end];
                     *content = format!(
@@ -479,9 +503,9 @@ pub fn microcompact_messages(messages: &mut [Message], keep_recent_turns: usize)
 
     if chars_saved > 0 {
         tracing::info!(
-            "Microcompact: cleared {} chars from old tool results (kept last {} turns)",
+            "Microcompact: cleared {} chars from old tool results (kept last {} assistant turns)",
             chars_saved,
-            keep_recent_turns
+            keep_turns
         );
     }
 

@@ -110,7 +110,53 @@ pub struct Config {
     /// Web search configuration.
     #[serde(default)]
     pub web_search: WebSearchConfig,
+
+    /// Context efficiency settings (microcompact, tool result persistence)
+    #[serde(default)]
+    pub context: ContextConfig,
 }
+
+/// Context efficiency configuration — controls microcompact and tool result persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextConfig {
+    /// Microcompact: minimum tool result size (chars) to clear when old.
+    #[serde(default = "default_microcompact_min_size")]
+    pub microcompact_min_size: usize,
+
+    /// Microcompact: chars to keep as preview when clearing.
+    #[serde(default = "default_microcompact_preview_chars")]
+    pub microcompact_preview_chars: usize,
+
+    /// Microcompact: keep tool results from the last N LLM turns untouched.
+    #[serde(default = "default_microcompact_keep_turns")]
+    pub microcompact_keep_turns: usize,
+
+    /// Persist-to-disk: tool results larger than this are persisted to disk.
+    #[serde(default = "default_persist_threshold")]
+    pub persist_threshold: usize,
+
+    /// Persist-to-disk: chars to keep as in-context preview.
+    #[serde(default = "default_persist_preview_chars")]
+    pub persist_preview_chars: usize,
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            microcompact_min_size: default_microcompact_min_size(),
+            microcompact_preview_chars: default_microcompact_preview_chars(),
+            microcompact_keep_turns: default_microcompact_keep_turns(),
+            persist_threshold: default_persist_threshold(),
+            persist_preview_chars: default_persist_preview_chars(),
+        }
+    }
+}
+
+fn default_microcompact_min_size() -> usize { 2_000 }
+fn default_microcompact_preview_chars() -> usize { 200 }
+fn default_microcompact_keep_turns() -> usize { 3 }
+fn default_persist_threshold() -> usize { 30_000 }
+fn default_persist_preview_chars() -> usize { 2_000 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WebSearchConfig {
