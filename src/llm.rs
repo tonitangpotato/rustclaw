@@ -398,7 +398,7 @@ pub trait LlmClient: Send + Sync {
 
 /// Anthropic Claude client (supports both API key and OAuth token).
 /// OAuth header constants for Claude Max / Claude Code compatibility.
-const OAUTH_BETA_HEADER: &str = "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14,prompt-caching-2024-07-31";
+const OAUTH_BETA_HEADER: &str = "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14,prompt-caching-2024-07-31,prompt-caching-scope-2026-01-05";
 const OAUTH_USER_AGENT: &str = "claude-cli/2.1.62";
 
 /// Claude Code identity string — REQUIRED for OAuth tokens to access non-haiku models.
@@ -486,7 +486,7 @@ impl AnthropicClient {
             AuthMode::ApiKey(key) => {
                 req = req
                     .header("x-api-key", key)
-                    .header("anthropic-beta", "prompt-caching-2024-07-31");
+                    .header("anthropic-beta", "prompt-caching-2024-07-31,prompt-caching-scope-2026-01-05");
             }
             AuthMode::OAuthToken(token) => {
                 req = req
@@ -527,7 +527,7 @@ impl AnthropicClient {
             AuthProfileCredential::ApiKey { key, .. } => {
                 req = req
                     .header("x-api-key", key)
-                    .header("anthropic-beta", "prompt-caching-2024-07-31");
+                    .header("anthropic-beta", "prompt-caching-2024-07-31,prompt-caching-scope-2026-01-05");
             }
             AuthProfileCredential::Token { token, .. } => {
                 req = req
