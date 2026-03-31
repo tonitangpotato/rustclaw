@@ -20,6 +20,8 @@ struct TelegramBot {
     runner: Arc<AgentRunner>,
     /// Bot username (fetched via getMe on startup)
     bot_username: String,
+    /// Sessions currently being processed (for queue routing)
+    active_sessions: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl TelegramBot {
@@ -37,6 +39,7 @@ impl TelegramBot {
             config,
             runner,
             bot_username,
+            active_sessions: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
         })
     }
     
@@ -326,7 +329,7 @@ impl TelegramBot {
         let typing_client = self.client.clone();
         let typing_url = self.api_url("sendChatAction");
         let typing_chat_id = chat_id;
-        let typing_handle = tokio::spawn(async move {
+        let mut typing_handle = tokio::spawn(async move {
             loop {
                 let _ = typing_client
                     .post(&typing_url)
@@ -340,40 +343,143 @@ impl TelegramBot {
             }
         });
 
-        // Process with agent (streaming or regular)
-        let result = if self.config.stream_mode {
-            self.process_with_streaming(chat_id, &session_key, &text, user_id, reply_to).await
-        } else {
-            match self
-                .runner
-                .process_message_with_context(&session_key, &text, &msg_ctx, false)
-                .await
-            {
-                Ok(response) => {
-                    typing_handle.abort();
-                    if response.is_silent {
-                        Ok(())
-                    } else {
-                        let effective_reply = response.reply_to.or(reply_to);
-                        // Voice decided purely by voice mode state
-                        if self.runner.voice_mode.is_enabled(chat_id).await {
-                            self.send_as_voice(chat_id, &response.text, effective_reply).await
-                        } else {
-                            self.send_message(chat_id, &response.text, effective_reply).await
+        // Check if this session is already busy
+        {
+            let active = self.active_sessions.lock().await;
+            if active.contains(&session_key) {
+                // Session busy — check for /btw or queue the message
+                typing_handle.abort();
+                if text.starts_with("/btw ") || text.starts_with("/btw\n") {
+                    let question = text.strip_prefix("/btw").unwrap().trim();
+                    match self.runner.process_btw(&session_key, question, Some(&user_id.to_string()), Some("telegram")).await {
+                        Ok(response) => {
+                            let trimmed = response.trim();
+                            if !trimmed.is_empty() && trimmed != "NO_REPLY" {
+                                self.send_message(chat_id, trimmed, reply_to).await?;
+                            }
+                        }
+                        Err(e) => {
+                            self.send_message(chat_id, &format!("⚠️ BTW error: {}", e), reply_to).await?;
                         }
                     }
+                } else {
+                    // Queue the message for injection into the running session
+                    self.runner.queue_message(
+                        &session_key,
+                        &text,
+                        Some(&user_id.to_string()),
+                        crate::message_queue::Priority::Next,
+                    ).await;
+                    tracing::info!("Queued message for busy session {}", session_key);
                 }
-                Err(e) => {
+                return Ok(());
+            }
+        }
+
+        // Mark session as active
+        {
+            let mut active = self.active_sessions.lock().await;
+            active.insert(session_key.clone());
+        }
+
+        // Prepend message context as prefix
+        let channel_caps = self.runner.channel_caps.read().await;
+        let prefix = msg_ctx.format_prefix(&channel_caps.name);
+        let full_message = if prefix.is_empty() {
+            text.clone()
+        } else {
+            format!("{}{}", prefix, text)
+        };
+        drop(channel_caps);
+
+        // Process with event stream (unified path for both streaming and regular)
+        let mut rx = self.runner.process_message_events(
+            &session_key,
+            &full_message,
+            Some(&user_id.to_string()),
+            Some("telegram"),
+            false,
+        );
+
+        // Consume events
+        let mut final_response = String::new();
+        let mut had_error = false;
+
+        while let Some(event) = rx.recv().await {
+            use crate::events::AgentEvent;
+            match event {
+                AgentEvent::Text(text) => {
+                    // Intermediate text — send immediately as acknowledgment
                     typing_handle.abort();
+                    let response = crate::context::ProcessedResponse::from_raw(&text);
+                    if !response.is_silent {
+                        let effective_reply = response.reply_to.or(reply_to);
+                        if self.runner.voice_mode.is_enabled(chat_id).await {
+                            let _ = self.send_as_voice(chat_id, &response.text, effective_reply).await;
+                        } else {
+                            let _ = self.send_message(chat_id, &response.text, effective_reply).await;
+                        }
+                    }
+                    // Restart typing indicator for tool execution
+                    let typing_client = self.client.clone();
+                    let typing_url = self.api_url("sendChatAction");
+                    let typing_chat_id = chat_id;
+                    typing_handle.abort();
+                    typing_handle = tokio::spawn(async move {
+                        loop {
+                            let _ = typing_client
+                                .post(&typing_url)
+                                .json(&serde_json::json!({
+                                    "chat_id": typing_chat_id,
+                                    "action": "typing",
+                                }))
+                                .send()
+                                .await;
+                            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                        }
+                    });
+                }
+                AgentEvent::ToolStart { name, .. } => {
+                    tracing::debug!("Tool starting: {}", name);
+                    // Typing indicator already running
+                }
+                AgentEvent::ToolDone { name, is_error, .. } => {
+                    tracing::debug!("Tool done: {} (error={})", name, is_error);
+                }
+                AgentEvent::Response(text) => {
+                    final_response = text;
+                }
+                AgentEvent::Error(e) => {
                     tracing::error!("Agent error: {}", e);
-                    self.send_message(chat_id, &format!("⚠️ Error: {}", e), reply_to).await
+                    had_error = true;
+                    final_response = format!("⚠️ Error: {}", e);
                 }
             }
-        };
-        
-        // Ensure typing is stopped
+        }
+
+        // Stop typing
         typing_handle.abort();
-        result?;
+
+        // Mark session as no longer active
+        {
+            let mut active = self.active_sessions.lock().await;
+            active.remove(&session_key);
+        }
+
+        // Send final response
+        if !final_response.is_empty() {
+            let response = crate::context::ProcessedResponse::from_raw(&final_response);
+            if response.is_silent && !had_error {
+                // Silent response (NO_REPLY, HEARTBEAT_OK)
+            } else {
+                let effective_reply = response.reply_to.or(reply_to);
+                if self.runner.voice_mode.is_enabled(chat_id).await && !had_error {
+                    self.send_as_voice(chat_id, &response.text, effective_reply).await?;
+                } else {
+                    self.send_message(chat_id, &response.text, effective_reply).await?;
+                }
+            }
+        }
 
         Ok(())
     }
