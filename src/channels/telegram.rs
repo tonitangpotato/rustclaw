@@ -297,17 +297,8 @@ impl TelegramBot {
         tracing::info!("Message from user {} in chat {}: {}", user_id, chat_id, 
             text_utils::truncate_chars(&text, 50));
 
-        // Check for voice mode toggle
-        if let Some(enabled) = Self::detect_voice_mode_toggle(&text) {
-            self.runner.voice_mode.set(chat_id, enabled).await;
-            let msg = if enabled {
-                "🎙 Voice mode ON — 接下来我会用语音回复你"
-            } else {
-                "💬 Voice mode OFF — 切换回文字回复"
-            };
-            self.send_message(chat_id, msg, reply_to).await?;
-            return Ok(());
-        }
+        // Voice mode toggle is handled entirely by LLM via set_voice_mode tool.
+        // No hardcoded pattern matching — LLM understands any phrasing.
 
         // Build structured message context
         let msg_ctx = crate::context::MessageContext {
@@ -826,34 +817,8 @@ impl TelegramBot {
     }
 
     /// Check if user message is toggling voice mode. Returns Some(true/false) if toggling.
-    fn detect_voice_mode_toggle(text: &str) -> Option<bool> {
-        let lower = text.to_lowercase();
-        let normalized = lower.trim();
-
-        // Fast-path patterns for unambiguous exact phrases only.
-        // For anything ambiguous (e.g. "关闭语音模式" contains "语音模式"),
-        // let the LLM handle it via set_voice_mode tool.
-        let disable_patterns = [
-            "text mode", "文字模式", "关闭语音", "停止语音", "不要语音",
-        ];
-        let enable_patterns = [
-            "开启语音", "打开语音", "voice mode on", "start voice",
-        ];
-
-        // Check disable first (higher priority)
-        for p in &disable_patterns {
-            if normalized.contains(p) {
-                return Some(false);
-            }
-        }
-        for p in &enable_patterns {
-            if normalized.contains(p) {
-                return Some(true);
-            }
-        }
-        // "voice mode" / "语音模式" alone is ambiguous — let LLM decide
-        None
-    }
+    // detect_voice_mode_toggle removed — voice mode toggle is now 100% LLM-driven
+    // via set_voice_mode tool. No hardcoded patterns = no mismatches.
 
     /// Handle a voice message by downloading, transcribing, and processing.
     async fn handle_voice_message(
@@ -936,23 +901,9 @@ impl TelegramBot {
         // Clean up the input file
         let _ = tokio::fs::remove_file(ogg_path).await;
 
-        // Step 4: Check for voice mode toggle in transcription
-        if let Some(enabled) = Self::detect_voice_mode_toggle(&transcription) {
-            self.runner.voice_mode.set(chat_id, enabled).await;
-            let msg = if enabled {
-                "🎙 Voice mode ON — 接下来我会用语音回复你"
-            } else {
-                "💬 Voice mode OFF — 切换回文字回复"
-            };
-            if enabled {
-                self.send_as_voice(chat_id, msg, reply_to).await?;
-            } else {
-                self.send_message(chat_id, msg, reply_to).await?;
-            }
-            return Ok(());
-        }
+        // Voice mode toggle is handled by LLM via set_voice_mode tool.
 
-        // Step 5: Process through agent with [Voice message] prefix
+        // Step 4: Process through agent with [Voice message] prefix
         let user_message = format!("[Voice message] {}", transcription);
         let session_key = format!("telegram:{}", chat_id);
 
