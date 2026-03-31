@@ -80,7 +80,7 @@ impl TelegramBot {
         format!("{}/bot{}/{}", TELEGRAM_API, self.token, method)
     }
 
-    /// Send a text message with MarkdownV2 formatting, falling back to plain text.
+    /// Send a text message as plain text (no parse_mode).
     /// If `reply_to` is provided, the message will be a reply to that message.
     /// Parses `[[button:text|callback_data]]` patterns into inline keyboard buttons.
     async fn send_message(&self, chat_id: i64, text: &str, reply_to: Option<i64>) -> anyhow::Result<()> {
@@ -97,12 +97,10 @@ impl TelegramBot {
             // Only add buttons to the last chunk
             let add_buttons = i == total_chunks - 1 && !buttons.is_empty();
             
-            // Try MarkdownV2 first
-            let escaped = escape_markdown_v2(chunk);
+            // Send as plain text — no parse_mode
             let mut payload = serde_json::json!({
                 "chat_id": chat_id,
-                "text": escaped,
-                "parse_mode": "MarkdownV2",
+                "text": chunk,
             });
             if let Some(msg_id) = reply_id {
                 payload["reply_to_message_id"] = serde_json::json!(msg_id);
@@ -111,31 +109,11 @@ impl TelegramBot {
                 payload["reply_markup"] = build_inline_keyboard(&buttons);
             }
             
-            let response = self.client
+            self.client
                 .post(self.api_url("sendMessage"))
                 .json(&payload)
                 .send()
                 .await?;
-
-            // If MarkdownV2 fails (400 error), retry without parse_mode
-            if response.status().as_u16() == 400 {
-                tracing::debug!("MarkdownV2 failed, retrying without parse_mode");
-                let mut fallback = serde_json::json!({
-                    "chat_id": chat_id,
-                    "text": chunk,
-                });
-                if let Some(msg_id) = reply_id {
-                    fallback["reply_to_message_id"] = serde_json::json!(msg_id);
-                }
-                if add_buttons {
-                    fallback["reply_markup"] = build_inline_keyboard(&buttons);
-                }
-                self.client
-                    .post(self.api_url("sendMessage"))
-                    .json(&fallback)
-                    .send()
-                    .await?;
-            }
         }
         Ok(())
     }
@@ -1066,30 +1044,21 @@ impl TelegramBot {
 
     /// Edit an existing message.
     async fn edit_message(&self, chat_id: i64, message_id: i64, text: &str) -> anyhow::Result<()> {
-        // Try MarkdownV2 first
-        let escaped = escape_markdown_v2(text);
+        // Send as plain text — no parse_mode
         let response = self.client
             .post(self.api_url("editMessageText"))
             .json(&serde_json::json!({
                 "chat_id": chat_id,
                 "message_id": message_id,
-                "text": escaped,
-                "parse_mode": "MarkdownV2",
+                "text": text,
             }))
             .send()
             .await?;
 
-        // If MarkdownV2 fails, retry without parse_mode
-        if response.status().as_u16() == 400 {
-            self.client
-                .post(self.api_url("editMessageText"))
-                .json(&serde_json::json!({
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                    "text": text,
-                }))
-                .send()
-                .await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            tracing::debug!("Edit message failed ({}): {}", status, body);
         }
 
         Ok(())

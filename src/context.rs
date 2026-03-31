@@ -45,15 +45,19 @@ impl MessageContext {
         sender.push_str(&format!(" {}]", Local::now().format("%a %Y-%m-%d %H:%M %Z")));
         parts.push(sender);
 
-        // Quoted message
+        // Quoted message (with message_id so LLM can reference it)
         if let Some(reply) = &self.reply_to {
             let quoted_sender = reply
                 .sender_name
                 .as_deref()
                 .unwrap_or("unknown");
+            let msg_id_str = reply.message_id
+                .map(|id| format!(" (msg_id:{})", id))
+                .unwrap_or_default();
             parts.push(format!(
-                "Replying to {}:\n> {}",
+                "Replying to {}{}:\n> {}",
                 quoted_sender,
+                msg_id_str,
                 reply.text.lines().collect::<Vec<_>>().join("\n> ")
             ));
         }
@@ -310,7 +314,7 @@ mod tests {
             ..Default::default()
         };
         let prefix = ctx.format_prefix("telegram");
-        assert!(prefix.contains("Replying to bot:"));
+        assert!(prefix.contains("Replying to bot (msg_id:999):"));
         assert!(prefix.contains("> Original message"));
     }
 
