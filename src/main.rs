@@ -28,6 +28,7 @@ mod serverless;
 mod session;
 mod tool_result_storage;mod skills;
 mod events;mod stt;
+mod message_queue;
 mod text_utils;
 mod tools;
 mod tts;

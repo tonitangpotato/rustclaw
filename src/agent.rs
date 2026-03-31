@@ -62,6 +62,8 @@ pub struct AgentRunner {
     pub channel_caps: Arc<RwLock<crate::context::ChannelCapabilities>>,
     /// Shared voice mode state (accessible by tools and channels)
     pub voice_mode: crate::voice_mode::VoiceMode,
+    /// Message queues for handling messages while agent is busy
+    pub message_queues: crate::message_queue::SessionQueues,
 }
 
 /// Persist large tool results to disk, replacing content with preview.
@@ -142,6 +144,7 @@ impl AgentRunner {
             runtime_ctx,
             channel_caps: Arc::new(RwLock::new(crate::context::ChannelCapabilities::default())),
             voice_mode,
+            message_queues: crate::message_queue::SessionQueues::new(),
         }
     }
 
@@ -224,6 +227,84 @@ impl AgentRunner {
         session.messages.clear();
         self.sessions.update(session).await;
         tracing::info!("Session cleared: {}", session_key);
+    }
+
+    /// Queue a message for later injection (used when agent is busy processing).
+    pub async fn queue_message(
+        &self,
+        session_key: &str,
+        text: &str,
+        user_id: Option<&str>,
+        priority: crate::message_queue::Priority,
+    ) {
+        let msg = crate::message_queue::QueuedMessage::new(text.to_string(), priority)
+            .with_user(user_id.map(String::from));
+        self.message_queues.push(session_key, msg).await;
+    }
+
+    /// Check if a session has pending queued messages.
+    pub async fn has_queued_messages(&self, session_key: &str) -> bool {
+        self.message_queues.has_pending(session_key).await
+    }
+
+    /// Handle a BTW (side question) — lightweight query without interrupting main loop.
+    ///
+    /// Uses forked context (shares history snapshot) but no tools, single turn.
+    /// Returns the response directly without affecting the main session.
+    pub async fn process_btw(
+        &self,
+        session_key: &str,
+        question: &str,
+        user_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> anyhow::Result<String> {
+        tracing::info!("Processing BTW question for session {}", session_key);
+
+        // Get current session snapshot (don't modify it)
+        let session = self.sessions.get_or_create(session_key).await;
+
+        // Build system prompt (no heartbeat content)
+        let caps = self.channel_caps.read().await;
+        let mut system_prompt = self.workspace.build_system_prompt_full(
+            &self.runtime_ctx,
+            &caps,
+            false,
+            Some(question),
+        );
+        drop(caps);
+
+        // Prepend instructions to answer without tools
+        let btw_instructions = r#"<system-reminder>
+This is a side question from the user. Answer directly in a single response.
+
+IMPORTANT CONTEXT:
+- You are a lightweight agent spawned to answer this one question
+- The main agent continues working independently in the background
+- You share conversation context but are a separate instance
+- Do NOT reference being interrupted or what you were "previously doing"
+
+CRITICAL CONSTRAINTS:
+- You have NO tools available
+- This is a one-shot response — no follow-up turns
+- You can ONLY use information from the conversation context
+- NEVER offer to "check", "try", or take any action
+- If you don't know, say so — don't promise to investigate
+</system-reminder>
+
+"#;
+        system_prompt.insert_str(0, btw_instructions);
+
+        // Clone session messages + add BTW question
+        let mut btw_messages = session.messages.clone();
+        btw_messages.push(Message::text("user", question));
+
+        // Single LLM call, no tools
+        let response = self.llm_client
+            .read().await
+            .chat(&system_prompt, &btw_messages, &[]) // Empty tool list
+            .await?;
+
+        Ok(response.text.unwrap_or_else(|| "No response".to_string()))
     }
 
     /// Process an incoming message and return a response.
@@ -523,6 +604,22 @@ impl AgentRunner {
 
             // Add tool results as user message
             session.messages.push(Message::tool_results(tool_results));
+
+            // Check for queued messages (messages sent while agent was busy)
+            let queued = self.message_queues.drain(session_key).await;
+            if !queued.is_empty() {
+                tracing::info!(
+                    "Injecting {} queued message(s) into session {}",
+                    queued.len(),
+                    session_key
+                );
+                for qmsg in queued {
+                    // Emit event if this is a user message injection
+                    let _ = tx.send(AgentEvent::Text(format!("[User]: {}", qmsg.text))).await;
+                    session.messages.push(Message::text("user", &qmsg.text));
+                }
+                // Continue loop — these queued messages will be processed in next LLM call
+            }
         }
 
         // 10. Run BeforeOutbound hooks
