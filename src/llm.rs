@@ -321,9 +321,29 @@ impl AnthropicClient {
             profile_manager,
             current_profile_id: Arc::new(Mutex::new(None)),
             model: config.model.clone(),
-            max_tokens: config.max_tokens,
+            max_tokens: config.max_tokens.unwrap_or_else(|| Self::default_max_tokens(&config.model)),
             base_url,
         })
+    }
+
+    /// Returns the model's maximum output tokens.
+    /// Each provider knows its own models' limits.
+    /// Model max output tokens per Anthropic docs:
+    /// https://docs.anthropic.com/en/docs/about-claude/models
+    fn default_max_tokens(model: &str) -> u32 {
+        if model.contains("opus-4-6") {
+            128000
+        } else if model.contains("opus-4-5") || model.contains("opus") {
+            64000
+        } else if model.contains("sonnet-4-6") {
+            64000
+        } else if model.contains("sonnet-4-5") || model.contains("sonnet") {
+            16000
+        } else if model.contains("haiku-4-5") || model.contains("haiku") {
+            64000
+        } else {
+            16000
+        }
     }
 
     /// Apply auth headers to a request builder using the given auth mode.
@@ -1152,9 +1172,21 @@ impl OpenAIClient {
             client: reqwest::Client::new(),
             api_key,
             model: config.model.clone(),
-            max_tokens: config.max_tokens,
+            max_tokens: config.max_tokens.unwrap_or_else(|| Self::default_max_tokens(&config.model)),
             base_url,
         })
+    }
+
+    fn default_max_tokens(model: &str) -> u32 {
+        if model.contains("gpt-4o") {
+            16384
+        } else if model.contains("gpt-4") {
+            8192
+        } else if model.contains("o1") || model.contains("o3") {
+            16384
+        } else {
+            8192
+        }
     }
 
     /// Convert internal messages to OpenAI format.
@@ -1357,8 +1389,18 @@ impl GoogleClient {
             client: reqwest::Client::new(),
             api_key,
             model: config.model.clone(),
-            max_tokens: config.max_tokens,
+            max_tokens: config.max_tokens.unwrap_or_else(|| Self::default_max_tokens(&config.model)),
         })
+    }
+
+    fn default_max_tokens(model: &str) -> u32 {
+        if model.contains("pro") {
+            8192
+        } else if model.contains("flash") {
+            8192
+        } else {
+            8192
+        }
     }
 
     /// Convert messages to Google format.

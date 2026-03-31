@@ -187,7 +187,7 @@ $ rustclaw skills generate market-research "Research crypto market trends"
 ✨ Created skills/market-research/SKILL.md
 ```
 
-### Status: 💡 New
+### Status: ✅ Done — 已实现为 [skm](https://crates.io/crates/skm) v0.1 (Agent Skill Engine)，RustClaw 已集成
 
 ---
 

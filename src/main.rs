@@ -34,6 +34,7 @@ mod tts;
 mod user_model;
 mod voice_mode;
 mod worktree;
+// mod platform; // WIP: disabled until compilation fixed
 mod workspace;
 
 use clap::Parser;

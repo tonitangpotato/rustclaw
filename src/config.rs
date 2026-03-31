@@ -147,17 +147,13 @@ pub struct LlmConfig {
     /// API base URL override
     pub base_url: Option<String>,
 
-    /// Max tokens per response
-    #[serde(default = "default_max_tokens")]
-    pub max_tokens: u32,
+    /// Max tokens per response. None = auto-detect from model (recommended).
+    /// Only set this if you want to explicitly limit output length.
+    pub max_tokens: Option<u32>,
 
     /// Temperature
     #[serde(default = "default_temperature")]
     pub temperature: f32,
-}
-
-fn default_max_tokens() -> u32 {
-    8192
 }
 
 fn default_temperature() -> f32 {

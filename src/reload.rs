@@ -150,7 +150,7 @@ fn diff_config(old: &Config, new: &Config) -> Vec<String> {
 
     if old.llm.max_tokens != new.llm.max_tokens {
         changes.push(format!(
-            "llm.max_tokens: {} → {}",
+            "llm.max_tokens: {:?} → {:?}",
             old.llm.max_tokens, new.llm.max_tokens
         ));
     }

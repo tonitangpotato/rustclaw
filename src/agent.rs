@@ -78,7 +78,7 @@ impl AgentRunner {
         let summary_llm = config.summary_model.as_ref().map(|model| {
             let mut summary_config = config.llm.clone();
             summary_config.model = model.clone();
-            summary_config.max_tokens = 1024; // Summaries don't need many tokens
+            summary_config.max_tokens = Some(1024); // Summaries don't need many tokens
             llm::create_client(&summary_config).expect("Failed to create summary LLM client")
         });
 
@@ -379,6 +379,20 @@ impl AgentRunner {
                 response_text = text.clone();
             }
 
+            // Handle max_tokens truncation during tool calls
+            if response.stop_reason == "max_tokens" && !response.tool_calls.is_empty() {
+                tracing::warn!(
+                    "Turn {}: max_tokens hit during tool call — output truncated. Asking to retry.",
+                    turn
+                );
+                session.messages.push(Message::text(
+                    "user",
+                    "Your last response was truncated (hit output token limit). \
+                     Break the work into smaller steps — write shorter content per tool call.",
+                ));
+                continue;
+            }
+
             if response.tool_calls.is_empty() {
                 // No tool calls — add final assistant message and break
                 if !response_text.is_empty() {
@@ -593,11 +607,13 @@ impl AgentRunner {
         
         let workspace = Workspace::load(workspace_dir)?;
 
-        // Create LLM client with model override if specified
+        // Create LLM client with independent config for sub-agent
         let mut llm_config = self.config.llm.clone();
         if let Some(model) = &agent_config.model {
             llm_config.model = model.clone();
         }
+        // Sub-agent inherits parent's LLM config as-is (including max_tokens).
+        // With None (default), provider auto-resolves to model max.
         let llm_client = llm::create_client(&llm_config)?;
 
         // Create sub-agent's own tool registry scoped to its workspace
@@ -689,6 +705,22 @@ impl AgentRunner {
 
             if let Some(text) = &response.text {
                 response_text = text.clone();
+            }
+
+            // If max_tokens hit during tool call, the JSON is likely truncated.
+            // Don't try to execute — ask LLM to retry with smaller steps.
+            if response.stop_reason == "max_tokens" && !response.tool_calls.is_empty() {
+                tracing::warn!(
+                    "Sub-agent '{}' turn {}: max_tokens hit during tool call — output truncated. Asking to retry.",
+                    subagent.name, turn
+                );
+                session.messages.push(Message::text(
+                    "user",
+                    "Your last response was truncated (hit output token limit). \
+                     Break the work into smaller steps — write shorter content per tool call, \
+                     or split large files into multiple write_file calls.",
+                ));
+                continue;
             }
 
             if response.tool_calls.is_empty() {

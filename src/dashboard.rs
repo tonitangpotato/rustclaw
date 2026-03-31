@@ -436,7 +436,7 @@ async fn get_config(State(state): State<Arc<DashboardState>>) -> impl IntoRespon
         llm: LlmConfigRedacted {
             provider: state.config.llm.provider.clone(),
             model: state.config.llm.model.clone(),
-            max_tokens: state.config.llm.max_tokens,
+            max_tokens: state.config.llm.max_tokens.unwrap_or(0),
             temperature: state.config.llm.temperature,
         },
         channels: ChannelsConfigRedacted {

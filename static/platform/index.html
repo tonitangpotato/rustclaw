@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Phone Agent — Your Personal AI Caller</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        navy: { 50: '#f0f4ff', 100: '#dbe4ff', 200: '#bac8ff', 400: '#748ffc', 500: '#4c6ef5', 600: '#3b5bdb', 700: '#364fc7', 800: '#1e3a5f', 900: '#0f1f3d' },
+                        accent: { 400: '#69db7c', 500: '#51cf66', 600: '#40c057' },
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+        .fade-in { animation: fadeIn 0.3s ease-in; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+        .spinner { border: 3px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; width: 20px; height: 20px; animation: spin 0.6s linear infinite; display: inline-block; vertical-align: middle; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+        .status-active { background: #40c057; box-shadow: 0 0 6px rgba(64,192,87,0.5); }
+        .status-stopped { background: #868e96; }
+        .status-error { background: #fa5252; }
+    </style>
+</head>
+<body class="bg-navy-900 text-white min-h-screen">
+
+<!-- ─── App Container ──────────────────────────────────── -->
+<div id="app">
+
+    <!-- ─── Landing Page ─────────────────────────────────── -->
+    <div id="landing" class="min-h-screen flex flex-col">
+        <nav class="flex items-center justify-between px-8 py-5">
+            <div class="text-2xl font-bold">
+                <span class="text-accent-500">📞</span> AI Phone Agent
+            </div>
+            <div class="space-x-4">
+                <button onclick="showAuth('login')" class="px-5 py-2 text-sm font-medium rounded-lg border border-navy-400 hover:bg-navy-800 transition">Log In</button>
+                <button onclick="showAuth('register')" class="px-5 py-2 text-sm font-medium rounded-lg bg-accent-600 hover:bg-accent-500 transition text-navy-900">Get Started</button>
+            </div>
+        </nav>
+
+        <div class="flex-1 flex items-center justify-center px-8">
+            <div class="max-w-2xl text-center">
+                <h1 class="text-5xl md:text-6xl font-bold leading-tight mb-6">
+                    Your AI makes<br>
+                    <span class="text-accent-400">phone calls</span> for you
+                </h1>
+                <p class="text-xl text-navy-200 mb-10 leading-relaxed">
+                    Schedule appointments, call customer service, negotiate bills — let your personal AI assistant handle the phone calls you don't want to make.
+                </p>
+                <button onclick="showAuth('register')" class="px-8 py-4 bg-accent-600 hover:bg-accent-500 text-navy-900 font-semibold rounded-xl text-lg transition transform hover:scale-105">
+                    Start Free Trial →
+                </button>
+                <div class="mt-12 grid grid-cols-3 gap-8 text-sm text-navy-200">
+                    <div>
+                        <div class="text-3xl mb-2">🏥</div>
+                        <div class="font-medium text-white">Doctor Appointments</div>
+                        <div>Book, reschedule, or cancel</div>
+                    </div>
+                    <div>
+                        <div class="text-3xl mb-2">📱</div>
+                        <div class="font-medium text-white">Customer Service</div>
+                        <div>Wait on hold for you</div>
+                    </div>
+                    <div>
+                        <div class="text-3xl mb-2">🍽️</div>
+                        <div class="font-medium text-white">Reservations</div>
+                        <div>Restaurants, salons, anything</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ─── Auth Forms ───────────────────────────────────── -->
+    <div id="auth-page" class="min-h-screen flex items-center justify-center px-4" style="display:none">
+        <div class="w-full max-w-md">
+            <button onclick="showLanding()" class="text-navy-200 hover:text-white mb-6 inline-flex items-center text-sm">
+                ← Back
+            </button>
+
+            <div class="bg-navy-800 rounded-2xl p-8 shadow-2xl border border-navy-700">
+                <h2 id="auth-title" class="text-2xl font-bold mb-6">Create Account</h2>
+
+                <div id="auth-error" class="hidden mb-4 p-3 bg-red-500/20 border border-red-500/40 rounded-lg text-red-300 text-sm"></div>
+
+                <form id="auth-form" onsubmit="handleAuth(event)">
+                    <label class="block mb-4">
+                        <span class="text-sm text-navy-200 mb-1 block">Email</span>
+                        <input type="email" id="auth-email" required
+                            class="w-full px-4 py-3 bg-navy-900 border border-navy-600 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-transparent outline-none transition" placeholder="you@example.com">
+                    </label>
+                    <label class="block mb-6">
+                        <span class="text-sm text-navy-200 mb-1 block">Password</span>
+                        <input type="password" id="auth-password" required minlength="8"
+                            class="w-full px-4 py-3 bg-navy-900 border border-navy-600 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-transparent outline-none transition" placeholder="Min 8 characters">
+                    </label>
+                    <button type="submit" id="auth-submit"
+                        class="w-full py-3 bg-accent-600 hover:bg-accent-500 text-navy-900 font-semibold rounded-lg transition">
+                        <span id="auth-btn-text">Create Account</span>
+                    </button>
+                </form>
+
+                <div class="mt-6 text-center text-sm text-navy-200">
+                    <span id="auth-toggle-text">Already have an account?</span>
+                    <button id="auth-toggle-btn" onclick="toggleAuthMode()" class="text-accent-400 hover:text-accent-300 ml-1 font-medium">Log in</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ─── Dashboard ────────────────────────────────────── -->
+    <div id="dashboard" class="min-h-screen" style="display:none">
+        <nav class="flex items-center justify-between px-8 py-4 border-b border-navy-700 bg-navy-800/50 backdrop-blur">
+            <div class="text-xl font-bold">
+                <span class="text-accent-500">📞</span> AI Phone Agent
+            </div>
+            <div class="flex items-center space-x-4">
+                <span id="user-email" class="text-sm text-navy-200"></span>
+                <button onclick="logout()" class="px-4 py-2 text-sm rounded-lg border border-navy-600 hover:bg-navy-700 transition">Log Out</button>
+            </div>
+        </nav>
+
+        <div class="max-w-4xl mx-auto px-6 py-8 space-y-8 fade-in">
+
+            <!-- ─── Bot Connection ────────────────────── -->
+            <section class="bg-navy-800 rounded-2xl p-6 border border-navy-700">
+                <h3 class="text-lg font-semibold mb-4 flex items-center">
+                    <span class="mr-2">🤖</span> Telegram Bot Connection
+                </h3>
+
+                <div id="instance-status" class="mb-4"></div>
+
+                <div id="instance-form-container">
+                    <p class="text-sm text-navy-200 mb-4">
+                        Create a Telegram bot via <a href="https://t.me/BotFather" target="_blank" class="text-accent-400 hover:underline">@BotFather</a>, then paste the token here.
+                    </p>
+                    <div class="flex space-x-3">
+                        <input type="text" id="bot-token" placeholder="123456789:ABCdef..."
+                            class="flex-1 px-4 py-3 bg-navy-900 border border-navy-600 rounded-lg focus:ring-2 focus:ring-accent-500 outline-none transition text-sm">
+                        <button onclick="connectBot()" id="connect-btn"
+                            class="px-6 py-3 bg-accent-600 hover:bg-accent-500 text-navy-900 font-medium rounded-lg transition whitespace-nowrap">
+                            Connect Bot
+                        </button>
+                    </div>
+                </div>
+
+                <div id="instance-connected" style="display:none" class="fade-in">
+                    <div class="flex items-center justify-between p-4 bg-navy-900 rounded-lg">
+                        <div class="flex items-center space-x-3">
+                            <span id="instance-dot" class="status-dot status-active"></span>
+                            <div>
+                                <div class="font-medium" id="instance-type-label">Telegram Bot</div>
+                                <div class="text-sm text-navy-200" id="instance-created"></div>
+                            </div>
+                        </div>
+                        <button onclick="disconnectBot()" class="px-4 py-2 text-sm rounded-lg border border-red-500/50 text-red-400 hover:bg-red-500/10 transition">
+                            Disconnect
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ─── Profile ───────────────────────────── -->
+            <section class="bg-navy-800 rounded-2xl p-6 border border-navy-700">
+                <h3 class="text-lg font-semibold mb-4 flex items-center">
+                    <span class="mr-2">👤</span> Your Profile
+                    <span class="ml-2 text-xs text-navy-400 font-normal">Used by your AI when making calls</span>
+                </h3>
+
+                <form id="profile-form" onsubmit="saveProfile(event)" class="space-y-4">
+                    <div class="grid grid-cols-2 gap-4">
+                        <label class="block">
+                            <span class="text-sm text-navy-200 mb-1 block">Full Name</span>
+                            <input type="text" id="pf-name" class="w-full px-4 py-2.5 bg-navy-900 border border-navy-600 rounded-lg focus:ring-2 focus:ring-accent-500 outline-none transition text-sm">
+                        </label>
+                        <label class="block">
+                            <span class="text-sm text-navy-200 mb-1 block">Phone</span>
+                            <input type="tel" id="pf-phone" class="w-full px-4 py-2.5 bg-navy-900 border border-navy-600 rounded-lg focus:ring-2 focus:ring-accent-500 outline-none transition text-sm">
+                        </label>
+                    </div>
+                    <label class="block">
+                        <span class="text-sm text-navy-200 mb-1 block">Address</span>
+                        <input type="text" id="pf-address" class="w-full px-4 py-2.5 bg-navy-900 border border-navy-600 rounded-lg focus:ring-2 focus:ring-accent-500 outline-none transition text-sm">
+                    </label>
+                    <label class="block">
+                        <span class="text-sm text-navy-200 mb-1 block">Timezone</span>
+                        <select id="pf-timezone" class="w-full px-4 py-2.5 bg-navy-900 border border-navy-600 rounded-lg focus:ring-2 focus:ring-accent-500 outline-none transition text-sm">
+                            <option value="">Select timezone</option>
+                            <option value="America/New_York">Eastern (New York)</option>
+                            <option value="America/Chicago">Central (Chicago)</option>
+                            <option value="America/Denver">Mountain (Denver)</option>
+                            <option value="America/Los_Angeles">Pacific (Los Angeles)</option>
+                            <option value="America/Anchorage">Alaska</option>
+                            <option value="Pacific/Honolulu">Hawaii</option>
+                        </select>
+                    </label>
+
+                    <!-- Insurance -->
+                    <div class="border-t border-navy-700 pt-4 mt-4">
+                        <h4 class="text-sm font-medium text-navy-200 mb-3">Insurance (optional)</h4>
+                        <div class="grid grid-cols-3 gap-3">
+                            <input type="text" id="pf-ins-provider" placeholder="Provider" class="px-3 py-2 bg-navy-900 border border-navy-600 rounded-lg text-sm focus:ring-2 focus:ring-accent-500 outline-none">
+                            <input type="text" id="pf-ins-member" placeholder="Member ID" class="px-3 py-2 bg-navy-900 border border-navy-600 rounded-lg text-sm focus:ring-2 focus:ring-accent-500 outline-none">
+                            <input type="text" id="pf-ins-group" placeholder="Group #" class="px-3 py-2 bg-navy-900 border border-navy-600 rounded-lg text-sm focus:ring-2 focus:ring-accent-500 outline-none">
+                        </div>
+                    </div>
+
+                    <!-- Contacts -->
+                    <div class="border-t border-navy-700 pt-4 mt-4">
+                        <div class="flex items-center justify-between mb-3">
+                            <h4 class="text-sm font-medium text-navy-200">Saved Contacts</h4>
+                            <button type="button" onclick="addContact()" class="text-xs text-accent-400 hover:text-accent-300">+ Add Contact</button>
+                        </div>
+                        <div id="contacts-list" class="space-y-2"></div>
+                    </div>
+
+                    <div class="flex justify-end pt-2">
+                        <button type="submit" class="px-6 py-2.5 bg-accent-600 hover:bg-accent-500 text-navy-900 font-medium rounded-lg transition text-sm">
+                            Save Profile
+                        </button>
+                    </div>
+                </form>
+                <div id="profile-msg" class="hidden mt-3 text-sm text-accent-400"></div>
+            </section>
+
+            <!-- ─── Call History ──────────────────────── -->
+            <section class="bg-navy-800 rounded-2xl p-6 border border-navy-700">
+                <h3 class="text-lg font-semibold mb-4 flex items-center">
+                    <span class="mr-2">📋</span> Call History
+                </h3>
+                <div id="calls-list">
+                    <div class="text-sm text-navy-400 text-center py-8">No calls yet. Connect your bot and start making calls!</div>
+                </div>
+            </section>
+        </div>
+    </div>
+</div>
+
+<script>
+// ─── State ──────────────────────────────────────────────
+let authMode = 'register'; // or 'login'
+let token = localStorage.getItem('platform_token');
+let userId = localStorage.getItem('platform_user_id');
+let userEmail = localStorage.getItem('platform_email');
+
+const API = window.location.origin;
+
+// ─── Init ───────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+    if (token && userId) {
+        showDashboard();
+    }
+});
+
+// ─── Navigation ─────────────────────────────────────────
+function showLanding() {
+    document.getElementById('landing').style.display = '';
+    document.getElementById('auth-page').style.display = 'none';
+    document.getElementById('dashboard').style.display = 'none';
+}
+
+function showAuth(mode) {
+    authMode = mode;
+    document.getElementById('landing').style.display = 'none';
+    document.getElementById('auth-page').style.display = '';
+    document.getElementById('dashboard').style.display = 'none';
+    updateAuthUI();
+    document.getElementById('auth-error').classList.add('hidden');
+}
+
+function showDashboard() {
+    document.getElementById('landing').style.display = 'none';
+    document.getElementById('auth-page').style.display = 'none';
+    document.getElementById('dashboard').style.display = '';
+    document.getElementById('user-email').textContent = userEmail || '';
+    loadProfile();
+    loadInstance();
+    loadCalls();
+}
+
+function toggleAuthMode() {
+    authMode = authMode === 'register' ? 'login' : 'register';
+    updateAuthUI();
+    document.getElementById('auth-error').classList.add('hidden');
+}
+
+function updateAuthUI() {
+    const isReg = authMode === 'register';
+    document.getElementById('auth-title').textContent = isReg ? 'Create Account' : 'Welcome Back';
+    document.getElementById('auth-btn-text').textContent = isReg ? 'Create Account' : 'Log In';
+    document.getElementById('auth-toggle-text').textContent = isReg ? 'Already have an account?' : "Don't have an account?";
+    document.getElementById('auth-toggle-btn').textContent = isReg ? 'Log in' : 'Sign up';
+}
+
+function logout() {
+    token = null; userId = null; userEmail = null;
+    localStorage.removeItem('platform_token');
+    localStorage.removeItem('platform_user_id');
+    localStorage.removeItem('platform_email');
+    showLanding();
+}
+
+// ─── API Helpers ────────────────────────────────────────
+async function api(path, opts = {}) {
+    const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+
+    const res = await fetch(API + path, { ...opts, headers });
+    const data = await res.json().catch(() => ({}));
+
+    if (res.status === 401 && token) {
+        logout();
+        showAuth('login');
+        return { error: 'Session expired, please log in again' };
+    }
+
+    if (!res.ok) return { error: data.error || 'Request failed' };
+    return data;
+}
+
+// ─── Auth ───────────────────────────────────────────────
+async function handleAuth(e) {
+    e.preventDefault();
+    const errEl = document.getElementById('auth-error');
+    errEl.classList.add('hidden');
+
+    const email = document.getElementById('auth-email').value.trim();
+    const password = document.getElementById('auth-password').value;
+
+    const endpoint = authMode === 'register' ? '/api/auth/register' : '/api/auth/login';
+    const btnText = document.getElementById('auth-btn-text');
+    const oldText = btnText.textContent;
+    btnText.innerHTML = '<span class="spinner"></span>';
+
+    const data = await api(endpoint, { method: 'POST', body: JSON.stringify({ email, password }) });
+
+    if (data.error) {
+        errEl.textContent = data.error;
+        errEl.classList.remove('hidden');
+        btnText.textContent = oldText;
+        return;
+    }
+
+    token = data.token;
+    userId = data.user_id;
+    userEmail = email;
+    localStorage.setItem('platform_token', token);
+    localStorage.setItem('platform_user_id', userId);
+    localStorage.setItem('platform_email', email);
+
+    showDashboard();
+}
+
+// ─── Profile ────────────────────────────────────────────
+let profileContacts = [];
+
+async function loadProfile() {
+    const data = await api('/api/user/profile');
+    if (data.error) return;
+
+    document.getElementById('pf-name').value = data.full_name || '';
+    document.getElementById('pf-phone').value = data.phone || '';
+    document.getElementById('pf-address').value = data.address || '';
+    document.getElementById('pf-timezone').value = data.timezone || '';
+
+    if (data.insurance) {
+        document.getElementById('pf-ins-provider').value = data.insurance.provider || '';
+        document.getElementById('pf-ins-member').value = data.insurance.member_id || '';
+        document.getElementById('pf-ins-group').value = data.insurance.group || '';
+    }
+
+    profileContacts = data.contacts || [];
+    renderContacts();
+}
+
+function renderContacts() {
+    const el = document.getElementById('contacts-list');
+    if (profileContacts.length === 0) {
+        el.innerHTML = '<div class="text-xs text-navy-400">No contacts saved yet.</div>';
+        return;
+    }
+    el.innerHTML = profileContacts.map((c, i) => `
+        <div class="flex items-center space-x-2 bg-navy-900 rounded-lg p-2.5">
+            <input type="text" value="${esc(c.name)}" onchange="profileContacts[${i}].name=this.value" placeholder="Name" class="flex-1 px-2 py-1.5 bg-transparent border border-navy-600 rounded text-sm focus:ring-1 focus:ring-accent-500 outline-none">
+            <input type="text" value="${esc(c.phone)}" onchange="profileContacts[${i}].phone=this.value" placeholder="Phone" class="w-36 px-2 py-1.5 bg-transparent border border-navy-600 rounded text-sm focus:ring-1 focus:ring-accent-500 outline-none">
+            <input type="text" value="${esc(c.notes || '')}" onchange="profileContacts[${i}].notes=this.value||null" placeholder="Notes" class="flex-1 px-2 py-1.5 bg-transparent border border-navy-600 rounded text-sm focus:ring-1 focus:ring-accent-500 outline-none">
+            <button onclick="removeContact(${i})" class="text-red-400 hover:text-red-300 text-lg leading-none">&times;</button>
+        </div>
+    `).join('');
+}
+
+function addContact() {
+    profileContacts.push({ name: '', phone: '', address: null, notes: null });
+    renderContacts();
+}
+
+function removeContact(i) {
+    profileContacts.splice(i, 1);
+    renderContacts();
+}
+
+async function saveProfile(e) {
+    e.preventDefault();
+    const msgEl = document.getElementById('profile-msg');
+    msgEl.classList.add('hidden');
+
+    const provider = document.getElementById('pf-ins-provider').value.trim();
+    const memberId = document.getElementById('pf-ins-member').value.trim();
+    const insGroup = document.getElementById('pf-ins-group').value.trim();
+
+    const profile = {
+        user_id: parseInt(userId),
+        full_name: document.getElementById('pf-name').value.trim() || null,
+        phone: document.getElementById('pf-phone').value.trim() || null,
+        address: document.getElementById('pf-address').value.trim() || null,
+        timezone: document.getElementById('pf-timezone').value || null,
+        contacts: profileContacts.filter(c => c.name || c.phone),
+        insurance: provider ? { provider, member_id: memberId, group: insGroup || null } : null,
+    };
+
+    const data = await api('/api/user/profile', { method: 'PUT', body: JSON.stringify(profile) });
+
+    if (data.error) {
+        msgEl.textContent = '❌ ' + data.error;
+        msgEl.className = 'mt-3 text-sm text-red-400';
+        msgEl.classList.remove('hidden');
+    } else {
+        msgEl.textContent = '✅ Profile saved';
+        msgEl.className = 'mt-3 text-sm text-accent-400';
+        msgEl.classList.remove('hidden');
+        setTimeout(() => msgEl.classList.add('hidden'), 3000);
+    }
+}
+
+// ─── Instance ───────────────────────────────────────────
+async function loadInstance() {
+    const data = await api('/api/instance');
+    if (data.error) {
+        document.getElementById('instance-status').innerHTML = '';
+        document.getElementById('instance-form-container').style.display = '';
+        document.getElementById('instance-connected').style.display = 'none';
+        return;
+    }
+
+    document.getElementById('instance-form-container').style.display = 'none';
+    document.getElementById('instance-connected').style.display = '';
+
+    const dot = document.getElementById('instance-dot');
+    dot.className = 'status-dot status-' + data.status;
+    document.getElementById('instance-type-label').textContent = data.channel_type + ' — ' + data.status;
+    document.getElementById('instance-created').textContent = 'Connected since ' + new Date(data.created_at).toLocaleDateString();
+}
+
+async function connectBot() {
+    const tokenInput = document.getElementById('bot-token');
+    const btn = document.getElementById('connect-btn');
+    const val = tokenInput.value.trim();
+    if (!val) return;
+
+    btn.innerHTML = '<span class="spinner"></span>';
+    btn.disabled = true;
+
+    const data = await api('/api/instance', {
+        method: 'POST',
+        body: JSON.stringify({ channel_type: 'telegram', bot_token: val })
+    });
+
+    if (data.error) {
+        btn.textContent = 'Connect Bot';
+        btn.disabled = false;
+        const st = document.getElementById('instance-status');
+        st.innerHTML = '<div class="p-3 bg-red-500/20 border border-red-500/40 rounded-lg text-red-300 text-sm">' + esc(data.error) + '</div>';
+        return;
+    }
+
+    document.getElementById('instance-status').innerHTML = '';
+    tokenInput.value = '';
+    btn.textContent = 'Connect Bot';
+    btn.disabled = false;
+    loadInstance();
+}
+
+async function disconnectBot() {
+    if (!confirm('Disconnect your Telegram bot?')) return;
+    await api('/api/instance', { method: 'DELETE' });
+    document.getElementById('instance-form-container').style.display = '';
+    document.getElementById('instance-connected').style.display = 'none';
+}
+
+// ─── Calls ──────────────────────────────────────────────
+async function loadCalls() {
+    const data = await api('/api/calls');
+    const el = document.getElementById('calls-list');
+
+    if (data.error || !Array.isArray(data) || data.length === 0) {
+        el.innerHTML = '<div class="text-sm text-navy-400 text-center py-8">No calls yet. Connect your bot and start making calls!</div>';
+        return;
+    }
+
+    el.innerHTML = data.map(c => `
+        <div class="flex items-center justify-between p-3 bg-navy-900 rounded-lg mb-2">
+            <div>
+                <div class="font-medium text-sm">${esc(c.purpose)}</div>
+                <div class="text-xs text-navy-200">${esc(c.to_number)} · ${c.duration_secs ? c.duration_secs + 's' : 'N/A'}</div>
+            </div>
+            <div class="text-right">
+                <div class="text-xs px-2 py-0.5 rounded-full inline-block ${callStatusClass(c.status)}">${esc(c.status)}</div>
+                <div class="text-xs text-navy-400 mt-1">${c.created_at ? new Date(c.created_at).toLocaleString() : ''}</div>
+            </div>
+        </div>
+    `).join('');
+}
+
+function callStatusClass(s) {
+    if (s === 'completed') return 'bg-accent-600/20 text-accent-400';
+    if (s === 'in-progress') return 'bg-blue-500/20 text-blue-400';
+    if (s === 'failed') return 'bg-red-500/20 text-red-400';
+    return 'bg-navy-700 text-navy-200';
+}
+
+// ─── Util ───────────────────────────────────────────────
+function esc(s) {
+    if (!s) return '';
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+}
+</script>
+</body>
+</html>
