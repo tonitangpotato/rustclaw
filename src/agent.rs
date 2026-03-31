@@ -349,10 +349,13 @@ impl AgentRunner {
             session.trim_messages(self.config.max_session_messages);
         }
 
-        // 7. Get tool definitions
+        // 7. Microcompact old tool results
+        crate::session::microcompact_messages(&mut session.messages, 3);
+
+        // 8. Get tool definitions
         let tool_defs = self.tools.definitions();
 
-        // 8. Agentic loop
+        // 9. Agentic loop
         let max_turns = 30;
         let mut response_text = String::new();
 
@@ -676,6 +679,9 @@ impl AgentRunner {
         // Trim messages
         session.trim_messages(self.config.max_session_messages);
 
+        // Microcompact old tool results
+        crate::session::microcompact_messages(&mut session.messages, 3);
+
         // Get tool definitions from sub-agent's own registry
         let tool_defs = subagent.tools.definitions();
 
@@ -904,10 +910,13 @@ impl AgentRunner {
         // 6. Trim messages
         session.trim_messages(self.config.max_session_messages);
 
-        // 7. Get tool definitions
+        // 7. Microcompact old tool results
+        crate::session::microcompact_messages(&mut session.messages, 3);
+
+        // 8. Get tool definitions
         let tool_defs = self.tools.definitions();
 
-        // 8. Agentic loop - non-streaming until final response
+        // 9. Agentic loop - non-streaming until final response
         let max_turns = 30;
         let mut has_tool_calls = true;
 

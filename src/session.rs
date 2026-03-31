@@ -440,6 +440,54 @@ pub async fn summarize_old_messages(
 }
 
 /// SQLite row mapping.
+/// Microcompact: clear old tool result content to reduce context size.
+/// Replaces large tool results older than `keep_recent_turns` with a cleared marker.
+/// Zero LLM cost — purely in-memory content replacement.
+///
+/// Returns the number of chars saved.
+pub fn microcompact_messages(messages: &mut [Message], keep_recent_turns: usize) -> usize {
+    const MIN_SIZE_TO_CLEAR: usize = 2000; // Only clear results > 2K chars
+    const PREVIEW_CHARS: usize = 200; // Keep first N chars as preview
+
+    if messages.len() <= keep_recent_turns * 2 {
+        return 0; // Not enough history to compact
+    }
+
+    let cutoff = messages.len().saturating_sub(keep_recent_turns * 2);
+    let mut chars_saved = 0;
+
+    for msg in messages[..cutoff].iter_mut() {
+        if msg.role != "user" {
+            continue;
+        }
+        for block in msg.content.iter_mut() {
+            if let ContentBlock::ToolResult { content, .. } = block {
+                if content.len() > MIN_SIZE_TO_CLEAR {
+                    let original_len = content.len();
+                    let preview_end = content.len().min(PREVIEW_CHARS);
+                    let preview_end = content.floor_char_boundary(preview_end);
+                    let preview = &content[..preview_end];
+                    *content = format!(
+                        "{}...\n\n[Tool result cleared — {} chars]",
+                        preview, original_len
+                    );
+                    chars_saved += original_len - content.len();
+                }
+            }
+        }
+    }
+
+    if chars_saved > 0 {
+        tracing::info!(
+            "Microcompact: cleared {} chars from old tool results (kept last {} turns)",
+            chars_saved,
+            keep_recent_turns
+        );
+    }
+
+    chars_saved
+}
+
 #[derive(sqlx::FromRow)]
 struct SessionRow {
     key: String,
