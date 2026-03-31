@@ -1,5 +1,75 @@
 # RustClaw Bug Fixes & Post-Mortems
 
+## 2026-03-31: OAuth Token Auth Header (ROOT CAUSE — 529 Overloaded)
+
+**Symptom**: RustClaw gets 529 (Overloaded) on every LLM request across all auth profiles. OpenClaw works fine with the same token.
+
+**Root Cause**: RustClaw sent OAuth tokens (`sk-ant-oat01-*`) via `Authorization: Bearer` header, routing to Anthropic's OAuth backend with strict capacity limits. OpenClaw (via Anthropic SDK) sends the **same tokens** via `x-api-key` header, routing to the API key backend with higher capacity.
+
+**Evidence**: `curl` with `Bearer` → 529/401. Same token with `x-api-key` → 200.
+
+**Fix** (commit `41ec48c`): Changed `AuthProfileCredential::Token` to use `x-api-key` header instead of `Authorization: Bearer`.
+
+**Impact**: 529 errors eliminated entirely. First request succeeds without retries.
+
+---
+
+## 2026-03-31: Prompt Caching Enabled
+
+**Symptom**: RustClaw sends 43K tokens per request (full system prompt + tools every time). OpenClaw sends ~172 new tokens per request (100% cache hit).
+
+**Root Cause**: No `cache_control` markers on system prompt, tool definitions, or messages. No `prompt-caching` beta header.
+
+**Fix** (commits `453c12d`, `3dac71f`):
+1. `cache_control: {"type": "ephemeral"}` on last system prompt block
+2. `cache_control` on last tool definition
+3. `cache_control` on last user message (cache breakpoint)
+4. Added `prompt-caching-2024-07-31,prompt-caching-scope-2026-01-05` to beta headers (both OAuth and API key paths)
+
+**Result**: First request: `cache_write: 13,377` tokens cached. Subsequent: `cache_read: 17,675` tokens hit. Effective input tokens dropped from 43K to ~7 per request.
+
+---
+
+## 2026-03-31: Raw Markdown in Telegram Messages (ROOT FIX)
+
+**Symptom**: LLM outputs standard Markdown (`**bold**`, `## headers`, `- lists`), Telegram displays raw formatting characters.
+
+**History**:
+1. Original: MarkdownV2 parse_mode — required aggressive escaping, buggy
+2. Removed parse_mode entirely — raw markdown visible
+3. Markdown v1 parse_mode — only supports `*bold*`, not `**bold**`
+
+**Root Fix** (commit `4e38cea`): New `src/markdown.rs` module using `pulldown-cmark` to convert standard Markdown → Telegram HTML.
+
+**Architecture**:
+```
+LLM output (Markdown) → markdown::to_telegram_html() → Telegram API (parse_mode: "HTML")
+                                                         ↓ (400 error?)
+                                                    markdown::strip_markdown() → plain text fallback
+```
+
+**Supported elements**: bold, italic, strikethrough, inline code, code blocks (with language), headings (→bold), ordered/unordered/nested lists, links, blockquotes, horizontal rules. HTML special chars escaped.
+
+**Design**: Pure function module, no state. Parser (pulldown-cmark) is battle-tested. Each channel owns its formatting layer — Telegram-specific by design. 17 unit tests.
+
+---
+
+## 2026-03-31: Token Budget Alert System
+
+**Symptom**: No visibility into token consumption rate. RustClaw burned 2.2M tokens in ~2 hours without warning.
+
+**Fix** (commit `fac398b`): Sliding window tracking, 1-hour window, configurable `token_budget.hourly_limit` (default 2M). Auto-sends Telegram DM alert. Fires once per window, resets at 50%.
+
+---
+
+## 2026-03-31: Reason-Aware Auth Profile Cooldown
+
+**Symptom**: 529 Overloaded (server-side, transient) got same 1-hour cooldown as 429 RateLimit (your quota exceeded). All profiles locked out simultaneously.
+
+**Fix** (commit `92a440b`): Different cooldown curves per error type. Overloaded: 30s→5min max. RateLimit: 1min→1hr max. No escalation during active window.
+
+---
+
 ## 2026-03-30: Silent Process Exit (ROOT CAUSE FOUND)
 
 **Symptom**: RustClaw process silently exits after running for hours. No panic, no error log. Happened repeatedly over several days.
