@@ -398,7 +398,7 @@ pub trait LlmClient: Send + Sync {
 
 /// Anthropic Claude client (supports both API key and OAuth token).
 /// OAuth header constants for Claude Max / Claude Code compatibility.
-const OAUTH_BETA_HEADER: &str = "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14";
+const OAUTH_BETA_HEADER: &str = "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14,prompt-caching-2024-07-31";
 const OAUTH_USER_AGENT: &str = "claude-cli/2.1.62";
 
 /// Claude Code identity string — REQUIRED for OAuth tokens to access non-haiku models.
@@ -484,7 +484,9 @@ impl AnthropicClient {
     async fn apply_auth_mode(&self, mut req: reqwest::RequestBuilder, auth: &AuthMode) -> anyhow::Result<reqwest::RequestBuilder> {
         match auth {
             AuthMode::ApiKey(key) => {
-                req = req.header("x-api-key", key);
+                req = req
+                    .header("x-api-key", key)
+                    .header("anthropic-beta", "prompt-caching-2024-07-31");
             }
             AuthMode::OAuthToken(token) => {
                 req = req
@@ -523,7 +525,9 @@ impl AnthropicClient {
 
         match credential {
             AuthProfileCredential::ApiKey { key, .. } => {
-                req = req.header("x-api-key", key);
+                req = req
+                    .header("x-api-key", key)
+                    .header("anthropic-beta", "prompt-caching-2024-07-31");
             }
             AuthProfileCredential::Token { token, .. } => {
                 req = req
@@ -594,17 +598,53 @@ impl AnthropicClient {
 
     /// Build the system prompt value for the API request.
     /// For OAuth tokens, injects the Claude Code identity prefix (required for non-haiku access).
+    /// Sets cache_control on the last block for prompt caching.
     fn build_system_value(&self, system: &str) -> serde_json::Value {
         let is_oauth = matches!(&self.auth, AuthMode::OAuthToken(_) | AuthMode::OAuthManaged(_));
         if is_oauth {
             // OAuth tokens MUST include Claude Code identity to access sonnet/opus models.
             // Format as array of content blocks (matching the official SDK).
+            // cache_control on last block enables prompt caching for the entire system prompt.
             serde_json::json!([
                 {"type": "text", "text": CLAUDE_CODE_IDENTITY},
-                {"type": "text", "text": system}
+                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
             ])
         } else {
-            serde_json::json!(system)
+            // Non-OAuth: array format with cache_control
+            serde_json::json!([
+                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+            ])
+        }
+    }
+
+    /// Add cache_control to the last tool definition for prompt caching.
+    fn add_tool_cache_breakpoint(tools: &mut serde_json::Value) {
+        if let Some(arr) = tools.as_array_mut() {
+            if let Some(last) = arr.last_mut() {
+                last["cache_control"] = serde_json::json!({"type": "ephemeral"});
+            }
+        }
+    }
+
+    /// Add cache_control breakpoint to the last user message in the messages array.
+    /// This marks the boundary between cached prefix and new content.
+    fn add_message_cache_breakpoint(messages: &mut serde_json::Value) {
+        if let Some(arr) = messages.as_array_mut() {
+            // Find the last user message
+            if let Some(last_user) = arr.iter_mut().rev().find(|m| m["role"] == "user") {
+                // If content is a string, convert to array format with cache_control
+                if last_user["content"].is_string() {
+                    let text = last_user["content"].as_str().unwrap_or("").to_string();
+                    last_user["content"] = serde_json::json!([
+                        {"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}
+                    ]);
+                } else if let Some(content_arr) = last_user["content"].as_array_mut() {
+                    // Add cache_control to the last content block
+                    if let Some(last_block) = content_arr.last_mut() {
+                        last_block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+                    }
+                }
+            }
         }
     }
 }
@@ -658,7 +698,12 @@ impl LlmClient for AnthropicClient {
                     })
                 })
                 .collect::<Vec<_>>());
+            // Cache breakpoint on last tool definition
+            Self::add_tool_cache_breakpoint(&mut body["tools"]);
         }
+
+        // Cache breakpoint on last user message
+        Self::add_message_cache_breakpoint(&mut body["messages"]);
 
         // Retry loop with exponential backoff and profile rotation
         let mut attempt = 0;
@@ -932,7 +977,12 @@ impl LlmClient for AnthropicClient {
                     })
                 })
                 .collect::<Vec<_>>());
+            // Cache breakpoint on last tool definition
+            Self::add_tool_cache_breakpoint(&mut body["tools"]);
         }
+
+        // Cache breakpoint on last user message
+        Self::add_message_cache_breakpoint(&mut body["messages"]);
 
         // Retry loop with exponential backoff and profile rotation (same pattern as chat())
         let mut attempt = 0;
