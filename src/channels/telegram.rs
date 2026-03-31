@@ -830,15 +830,17 @@ impl TelegramBot {
         let lower = text.to_lowercase();
         let normalized = lower.trim();
 
-        // Enable patterns
-        // Fast-path patterns (exact phrases only). LLM tool handles everything else.
-        let enable_patterns = [
-            "voice mode", "语音模式",
-        ];
+        // Fast-path patterns for unambiguous exact phrases only.
+        // For anything ambiguous (e.g. "关闭语音模式" contains "语音模式"),
+        // let the LLM handle it via set_voice_mode tool.
         let disable_patterns = [
-            "text mode", "文字模式",
+            "text mode", "文字模式", "关闭语音", "停止语音", "不要语音",
+        ];
+        let enable_patterns = [
+            "开启语音", "打开语音", "voice mode on", "start voice",
         ];
 
+        // Check disable first (higher priority)
         for p in &disable_patterns {
             if normalized.contains(p) {
                 return Some(false);
@@ -849,6 +851,7 @@ impl TelegramBot {
                 return Some(true);
             }
         }
+        // "voice mode" / "语音模式" alone is ambiguous — let LLM decide
         None
     }
 
