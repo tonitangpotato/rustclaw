@@ -22,6 +22,7 @@ use crate::memory::MemoryManager;
 use crate::safety::{SafetyLayer, wrap_external_content};
 use crate::sandbox::WasmSandbox;
 use crate::session::{summarize_old_messages, SessionManager};
+use crate::tool_result_storage;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
@@ -61,6 +62,25 @@ pub struct AgentRunner {
     pub channel_caps: Arc<RwLock<crate::context::ChannelCapabilities>>,
     /// Shared voice mode state (accessible by tools and channels)
     pub voice_mode: crate::voice_mode::VoiceMode,
+}
+
+/// Persist large tool results to disk, replacing content with preview.
+/// Mutates tool_results in place.
+fn persist_large_tool_results(
+    session_key: &str,
+    tool_results: &mut Vec<(String, String, bool)>,
+    tool_names: &[String],
+) {
+    for (i, (id, output, _is_error)) in tool_results.iter_mut().enumerate() {
+        if tool_result_storage::should_persist(output) {
+            let name = tool_names.get(i).map(|s| s.as_str()).unwrap_or("unknown");
+            if let Some((preview, _path)) = tool_result_storage::persist_and_preview(
+                session_key, id, name, output,
+            ) {
+                *output = preview;
+            }
+        }
+    }
 }
 
 impl AgentRunner {
@@ -421,7 +441,9 @@ impl AgentRunner {
 
             // Execute each tool
             let mut tool_results = Vec::new();
+            let mut tool_names_for_persist: Vec<String> = Vec::new();
             for tc in &response.tool_calls {
+                tool_names_for_persist.push(tc.name.clone());
                 // Run BeforeToolCall hook
                 let mut tc_ctx = HookContext {
                     session_key: session_key.to_string(),
@@ -503,6 +525,9 @@ impl AgentRunner {
                     }
                 }
             }
+
+            // Persist large tool results to disk
+            persist_large_tool_results(session_key, &mut tool_results, &tool_names_for_persist);
 
             // Add tool results as user message
             session.messages.push(Message::tool_results(tool_results));
@@ -763,7 +788,9 @@ impl AgentRunner {
 
             // Execute each tool using sub-agent's tool registry
             let mut tool_results = Vec::new();
+            let mut tool_names_for_persist: Vec<String> = Vec::new();
             for tc in &response.tool_calls {
+                tool_names_for_persist.push(tc.name.clone());
                 let result = subagent.tools.execute(&tc.name, tc.input.clone()).await;
                 match result {
                     Ok(tool_result) => {
@@ -787,6 +814,9 @@ impl AgentRunner {
                     }
                 }
             }
+
+            // Persist large tool results to disk
+            persist_large_tool_results(&session_key, &mut tool_results, &tool_names_for_persist);
 
             // Add tool results as user message
             session.messages.push(Message::tool_results(tool_results));
