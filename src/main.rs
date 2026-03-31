@@ -16,6 +16,7 @@ mod export;
 mod heartbeat;
 mod hooks;
 mod llm;
+mod markdown;
 mod memory;
 mod oauth;
 mod orchestrator;

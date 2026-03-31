@@ -80,15 +80,19 @@ impl TelegramBot {
         format!("{}/bot{}/{}", TELEGRAM_API, self.token, method)
     }
 
-    /// Send a text message as plain text (no parse_mode).
-    /// If `reply_to` is provided, the message will be a reply to that message.
+    /// Send a text message with Telegram HTML formatting.
+    /// Markdown from LLM output is converted to Telegram HTML via pulldown-cmark.
+    /// Falls back to stripped plain text if HTML parse fails.
     /// Parses `[[button:text|callback_data]]` patterns into inline keyboard buttons.
     async fn send_message(&self, chat_id: i64, text: &str, reply_to: Option<i64>) -> anyhow::Result<()> {
         // Extract inline buttons from text
         let (clean_text, buttons) = extract_inline_buttons(text);
         
+        // Convert markdown → Telegram HTML
+        let html_text = crate::markdown::to_telegram_html(&clean_text);
+        
         // Split long messages (Telegram limit: 4096 chars)
-        let chunks = text_utils::split_message(&clean_text, 4096);
+        let chunks = text_utils::split_message(&html_text, 4096);
         let total_chunks = chunks.len();
         
         for (i, chunk) in chunks.iter().enumerate() {
@@ -97,13 +101,10 @@ impl TelegramBot {
             // Only add buttons to the last chunk
             let add_buttons = i == total_chunks - 1 && !buttons.is_empty();
             
-            // Use Markdown (v1) parse mode — supports *bold*, `code`, _italic_
-            // without the aggressive escaping MarkdownV2 requires.
-            // Fallback: if Markdown parse fails (400), retry without parse_mode.
             let mut payload = serde_json::json!({
                 "chat_id": chat_id,
                 "text": chunk,
-                "parse_mode": "Markdown",
+                "parse_mode": "HTML",
             });
             if let Some(msg_id) = reply_id {
                 payload["reply_to_message_id"] = serde_json::json!(msg_id);
@@ -118,9 +119,13 @@ impl TelegramBot {
                 .send()
                 .await?;
             
-            // If Markdown parse failed (400), retry as plain text
+            // If HTML parse failed (400), fall back to stripped plain text
             if resp.status() == 400 {
-                tracing::warn!("Markdown parse failed, retrying as plain text");
+                tracing::warn!("HTML parse failed, falling back to plain text");
+                let plain = crate::markdown::strip_markdown(&clean_text);
+                let plain_chunks = text_utils::split_message(&plain, 4096);
+                let plain_chunk = plain_chunks.get(i).unwrap_or(chunk);
+                payload["text"] = serde_json::json!(plain_chunk);
                 payload.as_object_mut().unwrap().remove("parse_mode");
                 self.client
                     .post(self.api_url("sendMessage"))
@@ -519,8 +524,10 @@ impl TelegramBot {
                     }
                     let payload = serde_json::json!({
                         "chat_id": chat_id,
-                        "text": format!("🤖 Current model: `{}`\n\nChoose a model:", current),
-                        "parse_mode": "Markdown",
+                        "text": format!("🤖 Current model: <code>{}</code>
+
+Choose a model:", current),
+                        "parse_mode": "HTML",
                         "reply_markup": {
                             "inline_keyboard": buttons
                         }
@@ -615,8 +622,8 @@ impl TelegramBot {
                     .json(&serde_json::json!({
                         "chat_id": chat_id,
                         "message_id": msg_id,
-                        "text": format!("✅ Model: `{}`", model_id),
-                        "parse_mode": "Markdown",
+                        "text": format!("✅ Model: <code>{}</code>", model_id),
+                        "parse_mode": "HTML",
                         "reply_markup": { "inline_keyboard": buttons }
                     }))
                     .send()
@@ -1038,10 +1045,11 @@ impl TelegramBot {
 
     /// Send a message and return the message ID.
     async fn send_message_get_id(&self, chat_id: i64, text: &str) -> anyhow::Result<i64> {
+        let html_text = crate::markdown::to_telegram_html(text);
         let mut payload = serde_json::json!({
             "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown",
+            "text": html_text,
+            "parse_mode": "HTML",
         });
         let resp = self.client
             .post(self.api_url("sendMessage"))
@@ -1049,9 +1057,10 @@ impl TelegramBot {
             .send()
             .await?;
         
-        // Fallback to plain text on Markdown parse failure
+        // Fallback to plain text on HTML parse failure
         let response = if resp.status() == 400 {
-            tracing::warn!("Markdown parse failed in send_message_get_id, retrying as plain text");
+            tracing::warn!("HTML parse failed in send_message_get_id, falling back to plain text");
+            payload["text"] = serde_json::json!(crate::markdown::strip_markdown(text));
             payload.as_object_mut().unwrap().remove("parse_mode");
             self.client
                 .post(self.api_url("sendMessage"))
@@ -1073,11 +1082,12 @@ impl TelegramBot {
 
     /// Edit an existing message.
     async fn edit_message(&self, chat_id: i64, message_id: i64, text: &str) -> anyhow::Result<()> {
+        let html_text = crate::markdown::to_telegram_html(text);
         let mut payload = serde_json::json!({
             "chat_id": chat_id,
             "message_id": message_id,
-            "text": text,
-            "parse_mode": "Markdown",
+            "text": html_text,
+            "parse_mode": "HTML",
         });
         let response = self.client
             .post(self.api_url("editMessageText"))
@@ -1086,8 +1096,9 @@ impl TelegramBot {
             .await?;
 
         if response.status().as_u16() == 400 {
-            // Markdown parse failed, retry as plain text
-            tracing::warn!("Markdown parse failed in edit_message, retrying as plain text");
+            // HTML parse failed, fall back to stripped plain text
+            tracing::warn!("HTML parse failed in edit_message, falling back to plain text");
+            payload["text"] = serde_json::json!(crate::markdown::strip_markdown(text));
             payload.as_object_mut().unwrap().remove("parse_mode");
             let retry = self.client
                 .post(self.api_url("editMessageText"))
