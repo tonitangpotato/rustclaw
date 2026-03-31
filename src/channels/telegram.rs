@@ -97,10 +97,13 @@ impl TelegramBot {
             // Only add buttons to the last chunk
             let add_buttons = i == total_chunks - 1 && !buttons.is_empty();
             
-            // Send as plain text — no parse_mode
+            // Use Markdown (v1) parse mode — supports *bold*, `code`, _italic_
+            // without the aggressive escaping MarkdownV2 requires.
+            // Fallback: if Markdown parse fails (400), retry without parse_mode.
             let mut payload = serde_json::json!({
                 "chat_id": chat_id,
                 "text": chunk,
+                "parse_mode": "Markdown",
             });
             if let Some(msg_id) = reply_id {
                 payload["reply_to_message_id"] = serde_json::json!(msg_id);
@@ -109,11 +112,22 @@ impl TelegramBot {
                 payload["reply_markup"] = build_inline_keyboard(&buttons);
             }
             
-            self.client
+            let resp = self.client
                 .post(self.api_url("sendMessage"))
                 .json(&payload)
                 .send()
                 .await?;
+            
+            // If Markdown parse failed (400), retry as plain text
+            if resp.status() == 400 {
+                tracing::warn!("Markdown parse failed, retrying as plain text");
+                payload.as_object_mut().unwrap().remove("parse_mode");
+                self.client
+                    .post(self.api_url("sendMessage"))
+                    .json(&payload)
+                    .send()
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -1024,16 +1038,31 @@ impl TelegramBot {
 
     /// Send a message and return the message ID.
     async fn send_message_get_id(&self, chat_id: i64, text: &str) -> anyhow::Result<i64> {
-        let response = self.client
+        let mut payload = serde_json::json!({
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown",
+        });
+        let resp = self.client
             .post(self.api_url("sendMessage"))
-            .json(&serde_json::json!({
-                "chat_id": chat_id,
-                "text": text,
-            }))
+            .json(&payload)
             .send()
-            .await?
-            .json::<serde_json::Value>()
             .await?;
+        
+        // Fallback to plain text on Markdown parse failure
+        let response = if resp.status() == 400 {
+            tracing::warn!("Markdown parse failed in send_message_get_id, retrying as plain text");
+            payload.as_object_mut().unwrap().remove("parse_mode");
+            self.client
+                .post(self.api_url("sendMessage"))
+                .json(&payload)
+                .send()
+                .await?
+                .json::<serde_json::Value>()
+                .await?
+        } else {
+            resp.json::<serde_json::Value>().await?
+        };
 
         let message_id = response["result"]["message_id"]
             .as_i64()
@@ -1044,18 +1073,32 @@ impl TelegramBot {
 
     /// Edit an existing message.
     async fn edit_message(&self, chat_id: i64, message_id: i64, text: &str) -> anyhow::Result<()> {
-        // Send as plain text — no parse_mode
+        let mut payload = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "parse_mode": "Markdown",
+        });
         let response = self.client
             .post(self.api_url("editMessageText"))
-            .json(&serde_json::json!({
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "text": text,
-            }))
+            .json(&payload)
             .send()
             .await?;
 
-        if !response.status().is_success() {
+        if response.status().as_u16() == 400 {
+            // Markdown parse failed, retry as plain text
+            tracing::warn!("Markdown parse failed in edit_message, retrying as plain text");
+            payload.as_object_mut().unwrap().remove("parse_mode");
+            let retry = self.client
+                .post(self.api_url("editMessageText"))
+                .json(&payload)
+                .send()
+                .await?;
+            if !retry.status().is_success() {
+                let body = retry.text().await.unwrap_or_default();
+                tracing::debug!("Edit message plain text also failed: {}", body);
+            }
+        } else if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             tracing::debug!("Edit message failed ({}): {}", status, body);
