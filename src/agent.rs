@@ -64,6 +64,8 @@ pub struct AgentRunner {
     pub voice_mode: crate::voice_mode::VoiceMode,
     /// Message queues for handling messages while agent is busy
     pub message_queues: crate::message_queue::SessionQueues,
+    /// Per-session cancellation tokens for /stop support
+    cancellation_tokens: Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio_util::sync::CancellationToken>>>,
 }
 
 /// Persist large tool results to disk, replacing content with preview.
@@ -145,6 +147,7 @@ impl AgentRunner {
             channel_caps: Arc::new(RwLock::new(crate::context::ChannelCapabilities::default())),
             voice_mode,
             message_queues: crate::message_queue::SessionQueues::new(),
+            cancellation_tokens: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -227,6 +230,26 @@ impl AgentRunner {
         session.messages.clear();
         self.sessions.update(session).await;
         tracing::info!("Session cleared: {}", session_key);
+    }
+
+    /// Get or create a cancellation token for a session.
+    pub async fn get_cancellation_token(&self, session_key: &str) -> tokio_util::sync::CancellationToken {
+        let mut tokens = self.cancellation_tokens.lock().await;
+        tokens.entry(session_key.to_string())
+            .or_insert_with(tokio_util::sync::CancellationToken::new)
+            .clone()
+    }
+
+    /// Cancel a running session's agent loop.
+    pub async fn cancel_session(&self, session_key: &str) -> bool {
+        let mut tokens = self.cancellation_tokens.lock().await;
+        if let Some(token) = tokens.remove(session_key) {
+            token.cancel();
+            tracing::info!("Session cancelled: {}", session_key);
+            true
+        } else {
+            false
+        }
     }
 
     /// Queue a message for later injection (used when agent is busy processing).
@@ -521,10 +544,19 @@ CRITICAL CONSTRAINTS:
         let tool_defs = self.tools.definitions();
 
         // 9. Agentic loop
-        let max_turns = 30;
+        let max_turns = 80;
         let mut response_text = String::new();
+        let mut sent_response = false;
+        let cancel_token = self.get_cancellation_token(session_key).await;
 
         for turn in 0..max_turns {
+            // Check for cancellation before each turn
+            if cancel_token.is_cancelled() {
+                tracing::info!("Session {} cancelled at turn {}", session_key, turn);
+                let _ = tx.send(AgentEvent::Response("⛔ Stopped.".to_string())).await;
+                sent_response = true;
+                break;
+            }
             let response = self.llm_client
                 .read().await
                 .chat(&system_prompt, &session.messages, &tool_defs)
@@ -572,6 +604,7 @@ CRITICAL CONSTRAINTS:
                     session.messages.push(Message::text("assistant", &response_text));
                 }
                 let _ = tx.send(AgentEvent::Response(response_text.clone())).await;
+                sent_response = true;
                 break;
             }
 
@@ -620,6 +653,23 @@ CRITICAL CONSTRAINTS:
                 }
                 // Continue loop — these queued messages will be processed in next LLM call
             }
+        }
+
+        
+
+        // Safety net: if loop exhausted max_turns without sending Response, send now
+        if !sent_response {
+            tracing::warn!("Max turns ({}) exhausted without end_turn — sending accumulated response", max_turns);
+            if !response_text.is_empty() {
+                session.messages.push(Message::text("assistant", &response_text));
+            }
+            let _ = tx.send(AgentEvent::Response(response_text.clone())).await;
+        }
+
+        // Clean up cancellation token
+        {
+            let mut tokens = self.cancellation_tokens.lock().await;
+            tokens.remove(session_key);
         }
 
         // 10. Run BeforeOutbound hooks
@@ -1159,7 +1209,7 @@ CRITICAL CONSTRAINTS:
         let tool_defs = self.tools.definitions();
 
         // 9. Agentic loop - non-streaming until final response
-        let max_turns = 30;
+        let max_turns = 80;
         let mut has_tool_calls = true;
 
         for turn in 0..max_turns {

@@ -91,5 +91,6 @@ argon2 = "0.5"
 jsonwebtoken = "9"
 rand = "0.8"
 pulldown-cmark = "0.13.3"
+tokio-util = { version = "0.7.18", features = ["rt"] }
 
 [dev-dependencies]

@@ -153,7 +153,7 @@ impl Session {
         if summarized_count >= self.messages.len() {
             // Edge case: all messages were summarized
             self.messages.clear();
-            self.messages.push(Message::text("system", &format!(
+            self.messages.push(Message::text("user", &format!(
                 "[Previous conversation summary]\n{}",
                 summary
             )));
@@ -163,7 +163,7 @@ impl Session {
             let safe_start = self.safe_split_index(summarized_count);
             let remaining: Vec<Message> = self.messages[safe_start..].to_vec();
             self.messages.clear();
-            self.messages.push(Message::text("system", &format!(
+            self.messages.push(Message::text("user", &format!(
                 "[Previous conversation summary]\n{}",
                 summary
             )));

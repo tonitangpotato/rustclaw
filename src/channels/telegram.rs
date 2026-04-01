@@ -563,11 +563,27 @@ Choose a model:", current),
                 self.send_message(chat_id, "🔄 New conversation started.", None).await?;
                 Ok(true)
             }
+            "/stop" => {
+                let session_key = format!("telegram:{}", chat_id);
+                let cancelled = self.runner.cancel_session(&session_key).await;
+                // Also remove from active sessions so new messages aren't queued
+                {
+                    let mut active = self.active_sessions.lock().await;
+                    active.remove(&session_key);
+                }
+                if cancelled {
+                    self.send_message(chat_id, "⛔ Stopped.", None).await?;
+                } else {
+                    self.send_message(chat_id, "Nothing running.", None).await?;
+                }
+                Ok(true)
+            }
             "/help" => {
                 let msg = "🐾 **RustClaw Commands**\n\n\
                     /model — Show or switch AI model\n\
                     /status — Show bot status\n\
                     /new — Start a new conversation\n\
+                    /stop — Stop current task\n\
                     /help — Show this help";
                 self.send_message(chat_id, msg, None).await?;
                 Ok(true)

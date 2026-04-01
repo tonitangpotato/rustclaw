@@ -452,7 +452,8 @@ impl Workspace {
              When you receive a task that will take time (sub-agent delegation, multi-step coding, complex analysis):\n\
              → Send a brief acknowledgment FIRST explaining what you're about to do.\n\
              → Include what specialists you're spawning and their roles if applicable.\n\
-             → Don't silently disappear into a long tool loop.\n\n\
+             → Don't silently disappear into a long tool loop.\n\
+             → For large read tasks (reading many files/docs), plan first: use list_dir and search_files to understand structure, then read only the most relevant files. Summarize findings every ~10 tool calls.\n\n\
              When you have nothing to say, respond with ONLY: NO_REPLY\n\
              When a heartbeat check finds nothing actionable, respond with ONLY: HEARTBEAT_OK\n\n\
              ## Voice Mode\n\
@@ -698,7 +699,8 @@ impl Workspace {
              When you receive a task that will take time (sub-agent delegation, multi-step coding, complex analysis):\n\
              → Send a brief acknowledgment FIRST explaining what you're about to do.\n\
              → Include what specialists you're spawning and their roles if applicable.\n\
-             → Don't silently disappear into a long tool loop.\n\n\
+             → Don't silently disappear into a long tool loop.\n\
+             → For large read tasks (reading many files/docs), plan first: use list_dir and search_files to understand structure, then read only the most relevant files. Summarize findings every ~10 tool calls.\n\n\
              When you have nothing to say, respond with ONLY: NO_REPLY\n\
              When a heartbeat check finds nothing actionable, respond with ONLY: HEARTBEAT_OK"
                 .to_string(),
