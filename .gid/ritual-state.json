@@ -1,0 +1,11 @@
+{
+  "ritual_name": "test-toolscope",
+  "started_at": "2026-04-02T21:50:00Z",
+  "current_phase": 0,
+  "phase_states": [
+    {"phase_id": "research", "status": "running", "started_at": "2026-04-02T21:50:00Z"},
+    {"phase_id": "draft-requirements", "status": "pending"},
+    {"phase_id": "execute-tasks", "status": "pending"}
+  ],
+  "status": {"type": "running"}
+}
