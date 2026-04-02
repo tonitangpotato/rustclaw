@@ -21,6 +21,7 @@ mod memory;
 mod oauth;
 mod orchestrator;
 mod plugins;
+mod prompt;
 mod reload;
 mod sandbox;
 mod safety;

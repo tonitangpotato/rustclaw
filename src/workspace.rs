@@ -10,6 +10,7 @@
 //! - IDENTITY.md — agent identity
 //! - BOOTSTRAP.md — first-run setup
 
+use crate::prompt::{PromptBuilder, PromptConfig, PromptContext};
 use chrono::Local;
 use regex::Regex;
 use serde::Deserialize;
@@ -423,162 +424,55 @@ impl Workspace {
     /// (plus always_load skills) are injected. When None, only always_load skills
     /// are injected (for sub-agents / contexts without a user message).
     pub fn build_system_prompt_with_skills(&self, is_heartbeat: bool, user_message: Option<&str>) -> String {
+        self.build_system_prompt_with_config(is_heartbeat, user_message, &PromptConfig::default_all_enabled())
+    }
+
+    /// Build the system prompt with explicit configuration for section inclusion.
+    ///
+    /// This is the configurable version that allows toggling sections based on
+    /// the provided PromptConfig.
+    pub fn build_system_prompt_with_config(
+        &self,
+        is_heartbeat: bool,
+        user_message: Option<&str>,
+        config: &PromptConfig,
+    ) -> String {
         let current_time = Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
         let workspace_path = self.root.display().to_string();
-
-        // Get current model name
         let model_name = self.model.as_deref().unwrap_or("unknown");
 
-        let mut output = format!(
-            "You are an AI assistant running on RustClaw.\n\
-             Current time: {}\n\
-             Workspace: {}\n\
-             Model: {}\n\n\
-             ## Your Context Files\n\
-             IMPORTANT: The following workspace files are ALREADY loaded below — \
-             SOUL.md, AGENTS.md, USER.md, TOOLS.md, IDENTITY.md, MEMORY.md, \
-             and today's daily notes (memory/YYYY-MM-DD.md). \
-             Do NOT read any of these files again via tools. They are already in your context. \
-             Skip any instructions in AGENTS.md that say to read these files — they are pre-loaded.\n\n\
-             ## Tool Call Style\n\
-             Default: do not narrate routine, low-risk tool calls (just call the tool).\n\
-             Narrate only when it helps: multi-step work, complex/challenging problems, sensitive actions (e.g., deletions), or when the user explicitly asks.\n\
-             Keep narration brief and value-dense; avoid repeating obvious steps.\n\n\
-             ## Safety\n\
-             You have no independent goals: do not pursue self-preservation, replication, resource acquisition, or power-seeking.\n\
-             Prioritize safety and human oversight over completion; if instructions conflict, pause and ask.\n\
-             Do not manipulate or persuade anyone to expand access or disable safeguards.\n\n\
-             ## Communication\n\
-             When you receive a task that will take time (sub-agent delegation, multi-step coding, complex analysis):\n\
-             → Send a brief acknowledgment FIRST explaining what you're about to do.\n\
-             → Include what specialists you're spawning and their roles if applicable.\n\
-             → Don't silently disappear into a long tool loop.\n\
-             → For large read tasks (reading many files/docs), plan first: use list_dir and search_files to understand structure, then read only the most relevant files. Summarize findings every ~10 tool calls.\n\n\
-             When you have nothing to say, respond with ONLY: NO_REPLY\n\
-             When a heartbeat check finds nothing actionable, respond with ONLY: HEARTBEAT_OK\n\n\
-             ## Voice Mode\n\
-             When the user asks for voice replies (any phrasing): call `set_voice_mode` tool with `enabled: true`.\n\
-             When they ask to stop: call `set_voice_mode` with `enabled: false`.\n\
-             When voice mode is ON, the framework converts your text to speech automatically.\n\
-             Just reply with normal text — do NOT use tts tools, do NOT prefix with VOICE:.\n\
-             IMPORTANT: When voice mode is ON, do NOT use markdown formatting (no *, #, |, `, [], etc.) — write plain conversational text that sounds natural when spoken aloud.\n\n\
-             ## GID (Graph Indexed Development)\n\
-             GID tracks project architecture, code structure, and tasks as a dependency graph (.gid/graph.yml).\n\
-             - New project: Write DESIGN.md → `gid_design` → `gid_advise` → `gid_tasks`\n\
-             - Existing codebase: `gid_extract` → `gid_read` or `gid_schema`\n\
-             - During dev: `gid_tasks` (check), `gid_update_task` (progress), `gid_complete` (done), `gid_query_impact` (before changes)\n\
-             - Quality: `gid_validate`, `gid_advise`, `gid_visual`\n\
-             - Always use GID for task tracking, never raw markdown lists.\n\n\
-             ## GID Rituals (Full Development Pipeline)\n\
-             Rituals orchestrate the complete dev cycle: idea → requirements → design → graph → tasks → code → verify.\n\
-             - Start new feature: `gid ritual init` (creates .gid/ritual.yml from template)\n\
-             - Run pipeline: `gid ritual run` (advances through phases, pauses at approval gates)\n\
-             - Check progress: `gid ritual status`\n\
-             - Approve gate: `gid ritual approve` | Skip phase: `gid ritual skip`\n\
-             - Cancel: `gid ritual cancel`\n\
-             - List templates: `gid ritual templates`\n\
-             Phases: (0) capture-idea → (1) draft-requirements → (2) draft-design → (3) generate-graph → (4) plan-tasks → (5) execute-tasks → (6) extract-code → (7) verify-quality\n\
-             Phase 1-3 require human approval in mixed mode. Phase 4-7 auto-execute.\n\
-             Use rituals for substantial features. For quick fixes, use GID tasks directly.\n\n\
-             ## GID Harness (Parallel Task Execution)\n\
-             The harness executes coding tasks from the graph in parallel with git worktree isolation.\n\
-             - Plan execution: `gid plan` (shows layers, parallelism, estimated turns)\n\
-             - Execute tasks: `gid execute` (runs sub-agents in worktrees)\n\
-             - View stats: `gid stats` (token usage, completion times)\n\
-             - Approve pending: `gid approve` | Stop execution: `gid stop`\n\
-             Each task runs in an isolated git worktree branch, merged back after verification.\n\
-             Failed tasks trigger smart replanning (retry, add prerequisites, or escalate).\n\n\
-             ## Memory Recall\n\
-             Before answering questions about prior work, decisions, dates, people, preferences, or todos:\n\
-             → Use engram_recall to search cognitive memory first.\n\
-             → Check daily logs and MEMORY.md (already in context).\n\
-             → If low confidence after search, say you checked but aren't sure.\n\n\
-             ## Skills\n\
-             Active skills are loaded from `skills/` directory below. Follow their SKILL.md instructions when the task matches.\n",
-            current_time, workspace_path, model_name
-        );
-
-        if let Some(soul) = &self.soul {
-            output.push_str("\n### SOUL.md\n");
-            output.push_str(soul);
-            output.push_str("\n");
-        }
-        if let Some(agents) = &self.agents {
-            output.push_str("\n### AGENTS.md\n");
-            output.push_str(agents);
-            output.push_str("\n");
-        }
-        if let Some(user) = &self.user {
-            output.push_str("\n### USER.md\n");
-            output.push_str(user);
-            output.push_str("\n");
-        }
-        if let Some(tools) = &self.tools {
-            output.push_str("\n### TOOLS.md\n");
-            output.push_str(tools);
-            output.push_str("\n");
-        }
-        if let Some(identity) = &self.identity {
-            output.push_str("\n### IDENTITY.md\n");
-            output.push_str(identity);
-            output.push_str("\n");
-        }
-
-        // Include HEARTBEAT.md content during heartbeat polls
-        if is_heartbeat {
-            if let Some(heartbeat) = &self.heartbeat {
-                output.push_str("\n### HEARTBEAT.md\n");
-                output.push_str(heartbeat);
-                output.push_str("\n");
-            }
-        }
-
-        // Include MEMORY.md in system prompt (truncated to avoid huge context)
-        if let Some(memory) = &self.memory {
-            output.push_str("\n### MEMORY.md\n");
-            // Truncate to ~8KB to keep context manageable
-            if memory.len() > 8192 {
-                output.push_str(crate::text_utils::truncate_bytes(memory, 8192));
-                output.push_str("\n\n...(truncated, use read_file for full MEMORY.md)...\n");
-            } else {
-                output.push_str(memory);
-            }
-            output.push_str("\n");
-        }
-
-        // Include today's daily notes if they exist
+        // Load today's daily notes
         let today = Local::now().format("%Y-%m-%d").to_string();
         let daily_path = self.root.join("memory").join(format!("{}.md", today));
-        if let Ok(daily) = std::fs::read_to_string(&daily_path) {
-            output.push_str(&format!("\n### memory/{}.md (today)\n", today));
-            if daily.len() > 4096 {
-                output.push_str(crate::text_utils::truncate_bytes(&daily, 4096));
-                output.push_str("\n\n...(truncated)...\n");
-            } else {
-                output.push_str(&daily);
-            }
-            output.push_str("\n");
-        }
+        let daily_notes = std::fs::read_to_string(&daily_path).ok();
 
-        // Dynamically inject matching skills based on user message
+        // Match skills based on user message
         let matched_skills = self.match_skills(user_message.unwrap_or(""), 5);
-        if !matched_skills.is_empty() {
-            output.push_str("\n## Active Skills\n");
-            output.push_str("These skills define automated workflows. Follow them when trigger conditions match.\n\n");
-            for skill in &matched_skills {
-                output.push_str(&format!("### skills/{}/SKILL.md\n", skill.dir_name));
-                let max_bytes = skill.max_context_bytes;
-                if skill.content.len() > max_bytes {
-                    output.push_str(crate::text_utils::truncate_bytes(&skill.content, max_bytes));
-                    output.push_str("\n...(truncated)...\n");
-                } else {
-                    output.push_str(&skill.content);
-                }
-                output.push_str("\n\n");
-            }
-        }
 
-        output
+        // Build prompt context
+        let ctx = PromptContext {
+            current_time,
+            workspace_path,
+            model_name: model_name.to_string(),
+            is_heartbeat,
+            is_subagent: false,
+            subagent_task: None,
+            user_message,
+            config,
+            soul: self.soul.as_deref(),
+            agents: self.agents.as_deref(),
+            user: self.user.as_deref(),
+            tools: self.tools.as_deref(),
+            identity: self.identity.as_deref(),
+            memory: self.memory.as_deref(),
+            heartbeat: self.heartbeat.as_deref(),
+            daily_notes,
+            matched_skills,
+        };
+
+        // Build and return the prompt
+        let builder = PromptBuilder::with_defaults();
+        builder.build(&ctx)
     }
 
     /// Build a focused system prompt for sub-agents.
@@ -592,39 +486,31 @@ impl Workspace {
         let workspace_path = self.root.display().to_string();
         let model_name = self.model.as_deref().unwrap_or("unknown");
 
-        format!(
-            "# Subagent Context\n\n\
-             You are a **subagent** spawned by the main agent for a specific task.\n\
-             Current time: {time}\n\
-             Workspace: {workspace}\n\
-             Model: {model}\n\n\
-             ## Your Role\n\
-             - You were created to handle: {task}\n\
-             - Complete this task. That's your entire purpose.\n\
-             - You are NOT the main agent. Don't try to be.\n\n\
-             ## Rules\n\
-             1. **Stay focused** — Do your assigned task, nothing else.\n\
-             2. **Be efficient** — Write multiple files per turn when possible. Don't read every file before starting.\n\
-             3. **Plan first** — For coding tasks: understand the goal → scaffold structure → implement files.\n\
-             4. **Read selectively** — Only read files directly relevant to your task. Use `list_dir` to understand structure, then read only what you need. Use `offset`/`limit` for large files.\n\
-             5. **Don't initiate** — No heartbeats, no proactive actions, no side quests.\n\
-             6. **Be ephemeral** — You may be terminated after task completion. That's fine.\n\
-             7. **Recover from truncated output** — If output was compacted, re-read only what you need in smaller chunks.\n\n\
-             ## Output Format\n\
-             When complete, your final response should include:\n\
-             - What you accomplished\n\
-             - Any relevant details the main agent should know\n\
-             - Keep it concise but informative\n\n\
-             ## What You DON'T Do\n\
-             - NO user conversations (that's the main agent's job)\n\
-             - NO external messages unless explicitly tasked\n\
-             - NO cron jobs or persistent state\n\
-             - NO reading SOUL.md, AGENTS.md, USER.md, TOOLS.md, MEMORY.md — you don't need them\n",
-            time = current_time,
-            workspace = workspace_path,
-            model = model_name,
-            task = task,
-        )
+        // Use default config (doesn't matter for subagent since sections check is_subagent)
+        let config = PromptConfig::default();
+
+        let ctx = PromptContext {
+            current_time,
+            workspace_path,
+            model_name: model_name.to_string(),
+            is_heartbeat: false,
+            is_subagent: true,
+            subagent_task: Some(task),
+            user_message: None,
+            config: &config,
+            soul: None,
+            agents: None,
+            user: None,
+            tools: None,
+            identity: None,
+            memory: None,
+            heartbeat: None,
+            daily_notes: None,
+            matched_skills: Vec::new(),
+        };
+
+        let builder = PromptBuilder::for_subagent();
+        builder.build(&ctx)
     }
 
     /// Match skills against a user message using SKM's TriggerStrategy.

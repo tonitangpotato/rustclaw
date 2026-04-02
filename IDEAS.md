@@ -7,6 +7,37 @@
 
 <!-- New ideas are prepended below this line -->
 
+## IDEA-20260402-03: Engineer Union 平台 — Layoff Tracker + 业务替代
+- **Date**: 2026-03-31 (初次讨论) → 2026-04-02 (正式录入)
+- **Source**: Voice message (3/31), 起因是 Block 等公司大规模裁员工程师
+- **Category**: product/business/community
+- **Tags**: #engineer #union #layoff #tracker #prediction #open-source #disruption #community
+- **Effort**: High
+
+### Summary
+一个面向软件工程师/AI工程师的"工会式"平台。核心逻辑：那些声称"AI 可以替代工程师"的公司，反过来说明他们的业务也不需要大公司才能做——小团队 + AI + 开源完全可以替代。平台帮工程师组队，用更小的成本重现这些公司的核心服务。
+
+### Key Points
+- **Layoff Tracker** — 实时追踪哪些 tech 公司裁员了（数据源：WARN 通知、新闻、LinkedIn 信号）
+- **Layoff Predictor** — 预测哪些公司即将裁员（信号：招聘冻结、财报、管理层变动、行业趋势）
+- **业务分析引擎** — 分析被裁公司的核心业务，拆解哪些服务可以被更小团队/开源方案替代
+- **组队平台** — 被裁/想创业的工程师在这里组队，认领要替代的业务方向
+- **核心叙事** — "你说 AI 能替代我们？好，那我们用 AI 替代你"
+
+### Potential Value
+- **社区价值** — 工程师群体的共鸣极强，特别是在 layoff 潮中，自带传播力
+- **商业模式** — 平台抽成（组队成功的项目）、付费 Predictor 数据、企业级 threat intelligence
+- **复合效应** — 每一个成功替代案例都是最好的 marketing
+- **防御性** — 社区 + 数据 + 网络效应 = 护城河
+
+### Connections
+- **Marketing Pipeline (IDEA-20260402-02)** — 做出来后需要自动宣传
+- **AgentVerse** — 可以作为 AgentVerse 上的一个垂直社区
+- **potato 的核心诉求** — 财务自由，这个项目如果成功，影响力 + 收入双收
+
+### Status: 💡 New
+---
+
 ## IDEA-20260402-02: Marketing Automation Pipeline（全流程自动化营销）
 - **Date**: 2026-04-02 10:46 ET
 - **Source**: Voice message
