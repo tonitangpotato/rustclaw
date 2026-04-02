@@ -762,6 +762,23 @@ CRITICAL CONSTRAINTS:
                 }
             }
 
+            // Layer 2: Check ritual scope constraints (path + bash policy)
+            if let Some(ref scope) = self.get_active_scope() {
+                if let Err(reason) = self.check_tool_call_scope(scope, &tc.name, &tc.input) {
+                    tracing::warn!(
+                        tool = %tc.name,
+                        reason = %reason,
+                        "ToolScope Layer 2 — blocked tool call"
+                    );
+                    tool_results.push((
+                        tc.id.clone(),
+                        format!("⚠️ {}", reason),
+                        true,
+                    ));
+                    continue;
+                }
+            }
+
             // Intercept set_voice_mode
             if tc.name == "set_voice_mode" {
                 let enabled = tc.input["enabled"].as_bool().unwrap_or(false);
@@ -1128,51 +1145,116 @@ CRITICAL CONSTRAINTS:
         Ok(response_text)
     }
 
-    /// Apply ritual ToolScope to filter tool definitions based on current phase.
+    /// Get the current ritual ToolScope, if any ritual is active.
     ///
-    /// If there's an active ritual in the workspace, reads the current phase
-    /// and filters tools accordingly. If no ritual is active, returns all tools.
-    fn apply_ritual_scope(&self, tools: Vec<crate::llm::ToolDefinition>) -> Vec<crate::llm::ToolDefinition> {
+    /// Returns None if no ritual is active (= no constraints).
+    fn get_active_scope(&self) -> Option<gid_core::ritual::ToolScope> {
         use gid_core::ritual::{default_scope_for_phase, rustclaw_tool_mapping};
 
-        // Check for active ritual state
         let ritual_state_path = self.workspace.root.join(".gid/ritual-state.json");
         let ritual_def_path = self.workspace.root.join(".gid/ritual.yml");
 
         if !ritual_state_path.exists() || !ritual_def_path.exists() {
-            return tools; // No active ritual — full access
+            return None;
         }
 
-        // Read ritual state to find current phase
-        let state: Option<gid_core::ritual::RitualState> = std::fs::read_to_string(&ritual_state_path)
+        let state: gid_core::ritual::RitualState = std::fs::read_to_string(&ritual_state_path)
             .ok()
-            .and_then(|s| serde_json::from_str(&s).ok());
+            .and_then(|s| serde_json::from_str(&s).ok())?;
 
-        let definition: Option<gid_core::ritual::RitualDefinition> = std::fs::read_to_string(&ritual_def_path)
+        let definition: gid_core::ritual::RitualDefinition = std::fs::read_to_string(&ritual_def_path)
             .ok()
-            .and_then(|s| serde_yaml::from_str(&s).ok());
+            .and_then(|s| serde_yaml::from_str(&s).ok())?;
 
-        let (state, definition) = match (state, definition) {
-            (Some(s), Some(d)) => (s, d),
-            _ => return tools, // Can't read state — fail open
-        };
-
-        // Only filter when ritual is actively running or waiting approval
         match &state.status {
             gid_core::ritual::RitualStatus::Running
             | gid_core::ritual::RitualStatus::WaitingApproval { .. } => {},
-            _ => return tools, // Completed/cancelled/failed — full access
+            _ => return None,
         }
 
-        // Get current phase ID
         let phase_id = definition.phases
             .get(state.current_phase)
             .map(|p| p.id.as_str())
             .unwrap_or("unknown");
 
-        // Get scope and filter
         let mapping = rustclaw_tool_mapping();
-        let scope = default_scope_for_phase(phase_id).with_tool_mapping(&mapping);
+        Some(default_scope_for_phase(phase_id).with_tool_mapping(&mapping))
+    }
+
+    /// Validate a tool call against the active ritual scope.
+    ///
+    /// Returns Ok(()) if allowed, Err(reason) if blocked.
+    /// This is the second enforcement layer: path constraints and bash policy.
+    /// (First layer is tool visibility filtering in apply_ritual_scope.)
+    fn check_tool_call_scope(
+        &self,
+        scope: &gid_core::ritual::ToolScope,
+        tool_name: &str,
+        input: &serde_json::Value,
+    ) -> Result<(), String> {
+        // Extract path for write/edit operations
+        let path = input.get("path")
+            .or_else(|| input.get("file_path"))
+            .and_then(|v| v.as_str());
+
+        match tool_name {
+            "write_file" | "edit_file" => {
+                if let Some(path) = path {
+                    // Normalize: strip workspace root if present
+                    let rel_path = path.strip_prefix(
+                        self.workspace.root.to_str().unwrap_or("")
+                    ).unwrap_or(path).trim_start_matches('/');
+
+                    if !scope.is_path_writable(rel_path) {
+                        return Err(format!(
+                            "Ritual scope violation: cannot write to '{}' in current phase. \
+                             Allowed paths: {:?}",
+                            rel_path, scope.writable_paths
+                        ));
+                    }
+                }
+            }
+            "read_file" => {
+                if let Some(path) = path {
+                    let rel_path = path.strip_prefix(
+                        self.workspace.root.to_str().unwrap_or("")
+                    ).unwrap_or(path).trim_start_matches('/');
+
+                    if !scope.is_path_readable(rel_path) {
+                        return Err(format!(
+                            "Ritual scope violation: cannot read '{}' in current phase.",
+                            rel_path
+                        ));
+                    }
+                }
+            }
+            "exec" => {
+                let command = input.get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                if !scope.is_bash_allowed(command) {
+                    return Err(format!(
+                        "Ritual scope violation: command '{}' not allowed in current phase. \
+                         Allowed: {:?}",
+                        command, scope.bash_policy
+                    ));
+                }
+            }
+            _ => {} // Other tools: no additional constraints
+        }
+
+        Ok(())
+    }
+
+    /// Apply ritual ToolScope to filter tool definitions based on current phase.
+    ///
+    /// Layer 1: Tool visibility — LLM doesn't see tools not in scope.
+    fn apply_ritual_scope(&self, tools: Vec<crate::llm::ToolDefinition>) -> Vec<crate::llm::ToolDefinition> {
+        let scope = match self.get_active_scope() {
+            Some(s) => s,
+            None => return tools,
+        };
 
         let original_count = tools.len();
         let filtered = scope.filter_tools(tools, |t| t.name.as_str());
@@ -1180,11 +1262,10 @@ CRITICAL CONSTRAINTS:
 
         if filtered_count < original_count {
             tracing::info!(
-                phase = phase_id,
                 total = original_count,
                 allowed = filtered_count,
                 removed = original_count - filtered_count,
-                "ToolScope active — filtered tools for ritual phase"
+                "ToolScope Layer 1 — filtered tool visibility"
             );
         }
 
