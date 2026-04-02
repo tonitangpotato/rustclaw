@@ -1,6 +1,6 @@
 ---
-name: idea-intake
-description: Process incoming ideas, links, and media into structured knowledge
+name: capture-idea
+description: Capture and structure incoming ideas, links, and media into discussion documents
 version: "1.0.0"
 author: potato
 triggers:

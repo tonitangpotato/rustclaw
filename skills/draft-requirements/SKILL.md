@@ -1,6 +1,6 @@
 ---
-name: requirements
-description: Generate structured requirements documents with goals and guards
+name: draft-requirements
+description: Draft structured requirements documents with goals and guards from discussion docs
 version: "2.0.0"
 author: potato
 triggers:

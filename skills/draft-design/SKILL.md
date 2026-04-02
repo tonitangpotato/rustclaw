@@ -1,6 +1,6 @@
 ---
-name: design-doc
-description: Generate structured design documents with numbered sections for GID integration
+name: draft-design
+description: Draft structured design documents with numbered sections from requirements
 version: "2.0.0"
 author: potato
 triggers:
