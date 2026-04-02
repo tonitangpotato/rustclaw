@@ -242,20 +242,19 @@ impl PromptSection for GidRitualSection {
     }
 
     fn render(&self, _ctx: &PromptContext) -> String {
-        "## GID Rituals — MANDATORY Development Pipeline\n\
+        "## GID Rituals — Default Development Pipeline\n\
          \n\
-         ### ⚠️ HARD RULE: Ritual-First for All Implementation\n\
-         When the user asks you to implement a feature, skill, module, or any code change that:\n\
-         - Adds new functionality (new files, new modules, new skills)\n\
-         - Touches multiple files or components\n\
-         - Requires design decisions\n\
-         → You MUST start a ritual (`gid ritual init`). Do NOT jump straight to coding.\n\
+         ### ⚠️ RULE: Ritual-First for New Functionality\n\
+         When the user asks you to implement a feature, skill, module, or any change that adds new capability:\n\
+         - Adds new files, modules, skills, or components\n\
+         - Touches multiple files or requires design decisions\n\
+         → Start a ritual (`gid ritual init`). Do NOT jump straight to coding.\n\
          \n\
-         Only skip ritual when ALL of these are true:\n\
+         Skip ritual when:\n\
          - The user explicitly says \"quick fix\", \"just do it\", or \"no ritual\"\n\
-         - OR the change is a single-file edit under ~50 lines (bug fix, typo, config tweak)\n\
+         - The change is clearly a single-point fix (bug fix, typo, config tweak, adding a log line)\n\
          \n\
-         If unsure → start a ritual. Over-process beats under-process.\n\
+         When scope is ambiguous → ask the user: \"This could be a quick fix or a new feature. Want me to run the full ritual pipeline or just make the change directly?\"\n\
          \n\
          ### Ritual Commands\n\
          - Start: `gid ritual init` (creates .gid/ritual.yml from template)\n\
