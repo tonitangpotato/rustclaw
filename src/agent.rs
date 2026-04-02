@@ -540,8 +540,8 @@ CRITICAL CONSTRAINTS:
         // 7. Microcompact old tool results
         crate::session::microcompact_messages(&mut session.messages, &self.config.context);
 
-        // 8. Get tool definitions
-        let tool_defs = self.tools.definitions();
+        // 8. Get tool definitions (filtered by ritual phase if active)
+        let tool_defs = self.apply_ritual_scope(self.tools.definitions());
 
         // 9. Agentic loop
         let max_turns = 80;
@@ -1128,6 +1128,69 @@ CRITICAL CONSTRAINTS:
         Ok(response_text)
     }
 
+    /// Apply ritual ToolScope to filter tool definitions based on current phase.
+    ///
+    /// If there's an active ritual in the workspace, reads the current phase
+    /// and filters tools accordingly. If no ritual is active, returns all tools.
+    fn apply_ritual_scope(&self, tools: Vec<crate::llm::ToolDefinition>) -> Vec<crate::llm::ToolDefinition> {
+        use gid_core::ritual::{default_scope_for_phase, rustclaw_tool_mapping};
+
+        // Check for active ritual state
+        let ritual_state_path = self.workspace.root.join(".gid/ritual-state.json");
+        let ritual_def_path = self.workspace.root.join(".gid/ritual.yml");
+
+        if !ritual_state_path.exists() || !ritual_def_path.exists() {
+            return tools; // No active ritual — full access
+        }
+
+        // Read ritual state to find current phase
+        let state: Option<gid_core::ritual::RitualState> = std::fs::read_to_string(&ritual_state_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok());
+
+        let definition: Option<gid_core::ritual::RitualDefinition> = std::fs::read_to_string(&ritual_def_path)
+            .ok()
+            .and_then(|s| serde_yaml::from_str(&s).ok());
+
+        let (state, definition) = match (state, definition) {
+            (Some(s), Some(d)) => (s, d),
+            _ => return tools, // Can't read state — fail open
+        };
+
+        // Only filter when ritual is actively running or waiting approval
+        match &state.status {
+            gid_core::ritual::RitualStatus::Running
+            | gid_core::ritual::RitualStatus::WaitingApproval { .. } => {},
+            _ => return tools, // Completed/cancelled/failed — full access
+        }
+
+        // Get current phase ID
+        let phase_id = definition.phases
+            .get(state.current_phase)
+            .map(|p| p.id.as_str())
+            .unwrap_or("unknown");
+
+        // Get scope and filter
+        let mapping = rustclaw_tool_mapping();
+        let scope = default_scope_for_phase(phase_id).with_tool_mapping(&mapping);
+
+        let original_count = tools.len();
+        let filtered = scope.filter_tools(tools, |t| t.name.as_str());
+        let filtered_count = filtered.len();
+
+        if filtered_count < original_count {
+            tracing::info!(
+                phase = phase_id,
+                total = original_count,
+                allowed = filtered_count,
+                removed = original_count - filtered_count,
+                "ToolScope active — filtered tools for ritual phase"
+            );
+        }
+
+        filtered
+    }
+
     /// Get all configured agents.
     /// Get session manager reference.
     pub fn sessions(&self) -> &SessionManager {
@@ -1229,8 +1292,8 @@ CRITICAL CONSTRAINTS:
         // 7. Microcompact old tool results
         crate::session::microcompact_messages(&mut session.messages, &self.config.context);
 
-        // 8. Get tool definitions
-        let tool_defs = self.tools.definitions();
+        // 8. Get tool definitions (filtered by ritual phase if active)
+        let tool_defs = self.apply_ritual_scope(self.tools.definitions());
 
         // 9. Agentic loop - non-streaming until final response
         let max_turns = 80;
