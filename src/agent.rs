@@ -557,18 +557,32 @@ CRITICAL CONSTRAINTS:
                 sent_response = true;
                 break;
             }
-            let response = self.llm_client
-                .read().await
-                .chat(&system_prompt, &session.messages, &tool_defs)
-                .await?;
+            // Race LLM call against cancellation token
+            let llm_guard = self.llm_client.read().await;
+            let llm_future = llm_guard.chat(&system_prompt, &session.messages, &tool_defs);
+            let response = tokio::select! {
+                res = llm_future => {
+                    drop(llm_guard);
+                    res?
+                },
+                _ = cancel_token.cancelled() => {
+                    drop(llm_guard);
+                    tracing::info!("Session {} cancelled during LLM call at turn {}", session_key, turn);
+                    let _ = tx.send(AgentEvent::Response("⛔ Stopped.".to_string())).await;
+                    sent_response = true;
+                    break;
+                }
+            };
 
             session.total_tokens +=
                 (response.usage.input_tokens + response.usage.output_tokens) as u64;
 
             tracing::info!(
-                "LLM response: tokens={}/{} stop={:?} tool_calls={} text_len={}",
+                "LLM response: in={} out={} cache_read={} cache_write={} stop={:?} tool_calls={} text_len={}",
                 response.usage.input_tokens,
                 response.usage.output_tokens,
+                response.usage.cache_read,
+                response.usage.cache_write,
                 response.stop_reason,
                 response.tool_calls.len(),
                 response.text.as_ref().map(|t| t.len()).unwrap_or(0)
@@ -621,6 +635,14 @@ CRITICAL CONSTRAINTS:
                 response.text.as_deref(),
                 response.tool_calls.clone(),
             ));
+
+            // Check for cancellation before executing tools
+            if cancel_token.is_cancelled() {
+                tracing::info!("Session {} cancelled before tool execution at turn {}", session_key, turn);
+                let _ = tx.send(AgentEvent::Response("⛔ Stopped.".to_string())).await;
+                sent_response = true;
+                break;
+            }
 
             // Execute each tool
             let (tool_results, tool_names) = self.execute_tool_batch(
@@ -957,8 +979,8 @@ CRITICAL CONSTRAINTS:
         // Get or create session
         let mut session = self.sessions.get_or_create(&session_key).await;
 
-        // Build system prompt from sub-agent's workspace (pass user message for skill matching)
-        let system_prompt = subagent.workspace.build_system_prompt_with_skills(false, Some(user_message));
+        // Build focused subagent system prompt (no workspace files, task-focused)
+        let system_prompt = subagent.workspace.build_subagent_system_prompt(user_message);
 
         // Add user message
         session.messages.push(Message::text("user", user_message));
@@ -986,11 +1008,13 @@ CRITICAL CONSTRAINTS:
                 (response.usage.input_tokens + response.usage.output_tokens) as u64;
 
             tracing::info!(
-                "Sub-agent '{}' turn {}: tokens={}/{} stop={:?} tool_calls={} text_len={}",
+                "Sub-agent '{}' turn {}: in={} out={} cache_read={} cache_write={} stop={:?} tool_calls={} text_len={}",
                 subagent.name,
                 turn,
                 response.usage.input_tokens,
                 response.usage.output_tokens,
+                response.usage.cache_read,
+                response.usage.cache_write,
                 response.stop_reason,
                 response.tool_calls.len(),
                 response.text.as_ref().map(|t| t.len()).unwrap_or(0)

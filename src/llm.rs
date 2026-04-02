@@ -213,7 +213,7 @@ impl TokenTracker {
 
         let total = self.total_input.load(Ordering::Relaxed) + self.total_output.load(Ordering::Relaxed);
 
-        tracing::debug!(
+        tracing::info!(
             "Token usage: input={} output={} cache_read={} cache_write={} (cumulative: {} requests, {} total tokens)",
             usage.input_tokens, usage.output_tokens, usage.cache_read, usage.cache_write,
             self.total_requests.load(Ordering::Relaxed),

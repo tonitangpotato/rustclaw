@@ -35,9 +35,13 @@ pub struct Config {
     #[serde(default)]
     pub memory: MemoryConfig,
 
-    /// Heartbeat interval in seconds (0 = disabled)
-    #[serde(default = "default_heartbeat_interval")]
-    pub heartbeat_interval: u64,
+    /// Heartbeat configuration
+    #[serde(default)]
+    pub heartbeat: HeartbeatConfig,
+
+    /// Legacy: heartbeat_interval in seconds (migrates to heartbeat.interval)
+    #[serde(default)]
+    heartbeat_interval: Option<u64>,
 
     /// Maximum messages to keep in session history (default: 40)
     #[serde(default = "default_max_session_messages")]
@@ -191,7 +195,60 @@ fn default_max_session_messages() -> usize {
 }
 
 fn default_heartbeat_interval() -> u64 {
-    1800 // 30 minutes
+    3600 // 1 hour
+}
+
+fn default_heartbeat_prompt() -> String {
+    "Read HEARTBEAT.md if it exists (workspace context). \
+     Follow it strictly. Do not infer or repeat old tasks from prior chats. \
+     If nothing needs attention, reply HEARTBEAT_OK."
+        .to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeartbeatConfig {
+    /// Whether heartbeat is enabled (default: true)
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Interval in seconds (default: 3600 = 1 hour)
+    #[serde(default = "default_heartbeat_interval")]
+    pub interval: u64,
+
+    /// Model override for heartbeat (use a cheaper model to save tokens)
+    /// If unset, uses the main LLM model
+    pub model: Option<String>,
+
+    /// Custom heartbeat prompt
+    #[serde(default = "default_heartbeat_prompt")]
+    pub prompt: String,
+
+    /// Quiet hours [start, end] in 24h format. No heartbeats during this window.
+    /// Example: [23, 8] means no heartbeats from 23:00 to 08:00
+    pub quiet_hours: Option<[u8; 2]>,
+}
+
+impl Default for HeartbeatConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval: default_heartbeat_interval(),
+            model: None,
+            prompt: default_heartbeat_prompt(),
+            quiet_hours: None,
+        }
+    }
+}
+
+impl Config {
+    /// Get effective heartbeat interval, respecting legacy `heartbeat_interval` field
+    pub fn effective_heartbeat_interval(&self) -> u64 {
+        if let Some(legacy) = self.heartbeat_interval {
+            legacy
+        } else {
+            self.heartbeat.interval
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

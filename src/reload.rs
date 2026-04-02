@@ -113,10 +113,22 @@ fn reload_config(path: &Path, tx: &ConfigSender) {
 fn diff_config(old: &Config, new: &Config) -> Vec<String> {
     let mut changes = Vec::new();
 
-    if old.heartbeat_interval != new.heartbeat_interval {
+    if old.heartbeat.interval != new.heartbeat.interval {
         changes.push(format!(
-            "heartbeat_interval: {}s → {}s",
-            old.heartbeat_interval, new.heartbeat_interval
+            "heartbeat.interval: {}s → {}s",
+            old.heartbeat.interval, new.heartbeat.interval
+        ));
+    }
+    if old.heartbeat.enabled != new.heartbeat.enabled {
+        changes.push(format!(
+            "heartbeat.enabled: {} → {}",
+            old.heartbeat.enabled, new.heartbeat.enabled
+        ));
+    }
+    if old.heartbeat.model != new.heartbeat.model {
+        changes.push(format!(
+            "heartbeat.model: {:?} → {:?}",
+            old.heartbeat.model, new.heartbeat.model
         ));
     }
 

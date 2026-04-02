@@ -2047,7 +2047,7 @@ impl Tool for SpawnSpecialistTool {
         let role = input["role"].as_str();
         let model_override = input["model"].as_str();
         let workspace_override = input["workspace"].as_str();
-        let max_iterations = input["max_iterations"].as_u64().unwrap_or(25) as u32;
+        let max_iterations = input["max_iterations"].as_u64().unwrap_or(80) as u32;
         let wait = input["wait"].as_bool().unwrap_or(true);
 
         // Generate a unique task/session ID

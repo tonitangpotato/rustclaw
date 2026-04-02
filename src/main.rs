@@ -287,7 +287,7 @@ async fn main() -> anyhow::Result<()> {
             // Start heartbeat
             heartbeat::start_heartbeat(
                 runner.clone(),
-                cfg.heartbeat_interval,
+                &cfg.heartbeat,
                 "heartbeat:main",
             )
             .await?;
@@ -642,7 +642,12 @@ memory:
   auto_store: true
   recall_limit: 5
 
-heartbeat_interval: 1800
+heartbeat:
+  enabled: true
+  interval: 3600
+  # model: claude-haiku-4-5  # uncomment to use cheaper model for heartbeats
+  # quiet_hours: [23, 8]     # uncomment for no heartbeats 23:00-08:00
+
 max_session_messages: 40
 
 dashboard:
