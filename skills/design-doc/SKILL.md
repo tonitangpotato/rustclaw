@@ -42,7 +42,12 @@ Design documents define **HOW** the system is built. Every section is numbered s
 
 ## Output Location
 
-`DESIGN.md` in the project root (or `docs/DESIGN.md` for internal-only designs).
+Depends on project structure:
+- **Simple project (single feature):** `.gid/design.md`
+- **Multi-feature project:** `.gid/features/{feature-name}/design.md`
+- **Internal/draft designs:** `docs/DESIGN-{name}.md` (gitignored, use `git add -f`)
+
+The `.gid/` location is canonical — `assemble_task_context()` resolves design docs from there via the feature node's `design_doc` metadata.
 
 ## The HOW Boundary
 

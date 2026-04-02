@@ -37,7 +37,11 @@ Requirements documents define **WHAT** the system must do (not HOW). Every crite
 
 ## Output Location
 
-`requirements.md` in the project root (or specified path).
+Depends on project structure:
+- **Simple project (single feature):** `.gid/requirements.md`
+- **Multi-feature project:** `.gid/features/{feature-name}/requirements.md`
+
+The `.gid/` location is canonical — `assemble_task_context()` resolves requirements from there via the feature node's `design_doc` metadata. Task nodes' `satisfies` references (e.g., `GOAL-1.1`) are resolved against their parent feature's requirements.md.
 
 ## Naming Convention
 
