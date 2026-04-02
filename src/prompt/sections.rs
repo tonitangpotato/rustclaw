@@ -246,8 +246,8 @@ impl PromptSection for GidRitualSection {
          - Approve gate: `gid ritual approve` | Skip phase: `gid ritual skip`\n\
          - Cancel: `gid ritual cancel`\n\
          - List templates: `gid ritual templates`\n\
-         Phases: (0) capture-idea → (1) draft-requirements → (2) draft-design → (3) generate-graph → (4) plan-tasks → (5) execute-tasks → (6) extract-code → (7) verify-quality\n\
-         Phase 1-3 require human approval in mixed mode. Phase 4-7 auto-execute.\n\
+         Phases: (0) capture-idea → (1) research → (2) draft-requirements → (3) draft-design → (4) generate-graph → (5) plan-tasks → (6) execute-tasks → (7) extract-code → (8) verify-quality\n\
+         Phases 1-4 require human approval. Phases 5-8 auto-execute.\n\
          Use rituals for substantial features. For quick fixes, use GID tasks directly."
             .to_string()
     }

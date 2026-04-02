@@ -31,6 +31,15 @@ kill -HUP $(pgrep -f "rustclaw.*run")
 - `coder` (Opus 4.6, builder role, 25 iterations, 100k budget)
 - `researcher` (Sonnet 4.5, research role, 15 iterations, 50k budget)
 
+### Shared Workspace (两个agent共享)
+- **OpenClaw workspace**: `/Users/potato/clawd/`
+- **RustClaw workspace**: `/Users/potato/rustclaw/`
+- **Global IDEAS.md**: `/Users/potato/rustclaw/IDEAS.md` — 跨项目idea收集
+- **OpenClaw projects**: `/Users/potato/clawd/projects/` — gid-rs, agentctl, swebench, autoalpha, causal-agent, xinfluencer, interview-prep
+- **RustClaw projects**: `/Users/potato/rustclaw/` — RustClaw本身就是项目
+- **Engram DB (shared)**: `/Users/potato/rustclaw/engram-memory.db`
+- 两个agent都可以直接读写对方路径下的文件和项目
+
 ### Source Code & Binary
 - **Binary**: `/Users/potato/rustclaw/target/release/rustclaw` (35MB, v0.1.0)
 - **Source**: `/Users/potato/rustclaw/` (same as workspace)
