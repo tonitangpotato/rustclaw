@@ -8,6 +8,8 @@ mod sections;
 
 pub use sections::*;
 
+use tracing::{debug, info};
+
 use crate::config::Config;
 use crate::workspace::MatchedSkill;
 
@@ -172,11 +174,27 @@ impl PromptBuilder {
 
         sections.sort_by_key(|s| s.priority());
 
-        sections
+        let included_ids: Vec<&str> = sections.iter().map(|s| s.id()).collect();
+        let result = sections
             .iter()
             .map(|s| s.render(ctx))
             .collect::<Vec<_>>()
-            .join("\n\n")
+            .join("\n\n");
+
+        // Estimate tokens (~4 chars per token for English/mixed content)
+        let estimated_tokens = result.len() / 4;
+        info!(
+            sections = included_ids.len(),
+            estimated_tokens,
+            "System prompt built"
+        );
+        debug!(
+            included = ?included_ids,
+            chars = result.len(),
+            "System prompt sections"
+        );
+
+        result
     }
 }
 
