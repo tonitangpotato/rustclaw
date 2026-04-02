@@ -7,6 +7,91 @@
 
 <!-- New ideas are prepended below this line -->
 
+## IDEA-20260402-02: Marketing Automation Pipeline（全流程自动化营销）
+- **Date**: 2026-04-02 10:46 ET
+- **Source**: Voice message
+- **Category**: business/automation
+- **Tags**: #marketing #automation #social-media #pipeline #growth #visibility
+- **Effort**: High
+
+### Summary
+将整个 marketing 过程流程化、自动化。目前已有 **xinfluencer**（X/Twitter influencer 发现 + 互动引擎）和 **usergrow**（用户增长分析，geo + causal inference + brand DNA），这两个工具应该作为整个自动化流水线的组成部分。但完整的 marketing pipeline 还缺很多环节需要补齐。
+
+### Key Points
+- 已有工具需要整合进统一流水线：
+  - **xinfluencer** (`/Users/potato/clawd/projects/xinfluencer/`) — X/Twitter 影响力发现、Monitor、Engage、CRM（Rust, v0.1 discover 已实现，v0.2 monitor/engage/CRM 有 DESIGN 待实现）
+  - **usergrow** (`/Users/potato/.openclaw/workspace-hackathon/usergrow/`) — 用户增长分析、brand DNA、causal inference、persona 生成、keyword graph（Rust, prototype）
+- **核心功能模块（从语音补充）：**
+  1. **社交媒体发帖** — 原创内容生成 + 多平台发布（X、HN、小红书、Reddit、ProductHunt、LinkedIn...）
+  2. **互动引擎** — 在别人帖子下 comment、reply，strategic engagement
+  3. **语言优化** — 让内容不被看出是 AI 生成（tone matching、平台风格适配、人味儿）
+  4. **高价值关系维护** — CRM 跟踪互动历史、reciprocity score、自动维护重要关系（xinfluencer CRM 设计已有，需实现）
+  5. **多渠道探索** — 持续发现新的 marketing 渠道（不只是已知平台）
+  6. **数据回收** — engagement metrics → 反馈到策略调整
+  7. **产品发布宣传** — 新产品/版本 → 自动触发宣传流程
+- **已有设计可复用：** xinfluencer DESIGN.md 已设计 Engagement Autopilot（strategic reply、follow active commenters）和 Relationship CRM（interaction frequency、reciprocity score、value score），这些可以直接作为 pipeline 的 engage + CRM 模块
+- 这和 3/31 讨论的"自动化流水线"一脉相承：idea intake → research → design → implement → test → **market** → iterate
+
+### Potential Value
+**直接商业价值**。marketing 是 potato 产品变现的瓶颈之一——东西做出来了但缺宣传。自动化这个环节可以：
+1. 让每个新产品/开源项目自动获得 visibility
+2. 持续建立 potato 的个人品牌（开发者影响力）
+3. 复合效应——影响力越大，后续产品推广成本越低
+
+### Connections
+- **IDEA-20260330-01**: Social media post intake（社交媒体帖子自动抓取分析）
+- **xinfluencer**: 已有 discover 功能，monitor/engage 是 marketing pipeline 的核心
+- **usergrow**: brand DNA + persona 分析可以指导内容策略
+- **Engineer Union / Layoff Predictor** (3/31 讨论): 如果做成产品，也需要这个 marketing pipeline 来推广
+- **AgentVerse**: 同理，做出来后需要自动宣传
+- **potato 的核心诉求** (3/31): "我真的需要去把很多环节都自动化"
+
+### Next Steps
+1. 梳理完整 pipeline 各环节（content → publish → engage → measure → optimize）
+2. 盘点现有工具能力 vs 缺口
+3. 设计统一的 orchestration 层（可能是 RustClaw skill 或独立 CLI）
+4. 写 requirements.md
+
+### Status: 💡 New
+---
+
+## IDEA-20260402-01: Engram Memory Benchmark (Cognitive-First)
+- **Date**: 2026-04-02 10:12 ET
+- **Source**: Voice message
+- **Category**: tooling/research
+- **Tags**: #engram #benchmark #memory #cognitive #evaluation #open-source
+- **Effort**: Medium
+
+### Summary
+为 Engram 设计并实现一套自己的 memory benchmark。因为 Engram 侧重 cognitive science（ACT-R 衰减、Hebbian 关联、情感记忆），和市面上纯 RAG 向的记忆系统（Hindsight、Mem0、Zep）评测维度不同，现有 benchmark（如 LongMemEval）无法评估 Engram 的核心优势。
+
+### Key Points
+- **为什么需要自建 bench** — LongMemEval 等现有 benchmark 侧重 "能不能找到正确信息"（retrieval accuracy），但 Engram 的核心差异在 cognitive dynamics：记忆衰减是否符合人类遗忘曲线、关联强化是否 work、情感权重是否影响 recall 优先级
+- **应评测的维度**（初步）：
+  - **Decay fidelity** — 记忆随时间衰减的曲线是否符合 ACT-R 幂律
+  - **Hebbian strengthening** — 共现记忆是否正确关联 & 互相增强
+  - **Emotional weighting** — 高情感记忆是否优先被 recall
+  - **Consolidation quality** — working→core 迁移是否保留重要信息
+  - **Cross-language recall** — 中英混合存储的检索准确性
+  - **Retrieval precision/recall** — 传统指标，和竞品对比的基准线
+  - **Latency** — 不同数据规模下的查询速度（Engram 的 90ms 优势）
+- **可以做成开源 benchmark** — 让其他 cognitive memory 系统也能跑，建立新赛道的评测标准
+- **和竞品对比** — 跑同样的 benchmark 对比 Engram vs Hindsight/Mem0/Zep，在 cognitive 维度上展示优势
+
+### Potential Value
+- **学术/开源影响力** — 定义新赛道的 benchmark = 定义赛道规则
+- **产品营销** — "我们不只是 recall 准，我们的记忆像人脑一样工作"
+- **开发指导** — 量化知道 Engram 哪里强哪里弱，指导 v3 改进方向
+- **crates.io 发布** — 可以作为独立 crate（`engram-bench`）
+
+### Connections
+- 直接关联 `engramai` v3 升级计划（MEMORY-SYSTEM-RESEARCH.md）
+- Hindsight 用 LongMemEval 跑出 91.4%，我们需要自己的维度来讲故事
+- 和 Engram 竞品调研（2026-04-02）互相 inform
+
+### Status: 💡 New
+---
+
 ## IDEA-20260330-04: AI 智能记账
 - **Date**: 2026-03-30 00:39 ET
 - **Source**: Voice message

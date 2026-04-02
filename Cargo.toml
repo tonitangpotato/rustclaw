@@ -30,7 +30,7 @@ serde_yaml = "0.9"
 engramai = "0.2.2"
 
 # GID (task graph)
-gid-core = "0.2.1"
+gid-core = { path = "/Users/potato/clawd/projects/gid-rs/crates/gid-core", features = ["full"] }
 
 # Skills management (using SKM - Agent Skill Engine)
 skm-core = "0.1"

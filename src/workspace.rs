@@ -469,6 +469,25 @@ impl Workspace {
              - During dev: `gid_tasks` (check), `gid_update_task` (progress), `gid_complete` (done), `gid_query_impact` (before changes)\n\
              - Quality: `gid_validate`, `gid_advise`, `gid_visual`\n\
              - Always use GID for task tracking, never raw markdown lists.\n\n\
+             ## GID Rituals (Full Development Pipeline)\n\
+             Rituals orchestrate the complete dev cycle: idea → requirements → design → graph → tasks → code → verify.\n\
+             - Start new feature: `gid ritual init` (creates .gid/ritual.yml from template)\n\
+             - Run pipeline: `gid ritual run` (advances through phases, pauses at approval gates)\n\
+             - Check progress: `gid ritual status`\n\
+             - Approve gate: `gid ritual approve` | Skip phase: `gid ritual skip`\n\
+             - Cancel: `gid ritual cancel`\n\
+             - List templates: `gid ritual templates`\n\
+             Phases: (0) capture-idea → (1) draft-requirements → (2) draft-design → (3) generate-graph → (4) plan-tasks → (5) execute-tasks → (6) extract-code → (7) verify-quality\n\
+             Phase 1-3 require human approval in mixed mode. Phase 4-7 auto-execute.\n\
+             Use rituals for substantial features. For quick fixes, use GID tasks directly.\n\n\
+             ## GID Harness (Parallel Task Execution)\n\
+             The harness executes coding tasks from the graph in parallel with git worktree isolation.\n\
+             - Plan execution: `gid plan` (shows layers, parallelism, estimated turns)\n\
+             - Execute tasks: `gid execute` (runs sub-agents in worktrees)\n\
+             - View stats: `gid stats` (token usage, completion times)\n\
+             - Approve pending: `gid approve` | Stop execution: `gid stop`\n\
+             Each task runs in an isolated git worktree branch, merged back after verification.\n\
+             Failed tasks trigger smart replanning (retry, add prerequisites, or escalate).\n\n\
              ## Memory Recall\n\
              Before answering questions about prior work, decisions, dates, people, preferences, or todos:\n\
              → Use engram_recall to search cognitive memory first.\n\
