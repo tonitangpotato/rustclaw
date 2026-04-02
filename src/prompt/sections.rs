@@ -208,7 +208,11 @@ impl PromptSection for GidSection {
     fn render(&self, _ctx: &PromptContext) -> String {
         "## GID (Graph Indexed Development)\n\
          GID tracks project architecture, code structure, and tasks as a dependency graph (.gid/graph.yml).\n\
-         - New project: Write DESIGN.md → `gid_design` → `gid_advise` → `gid_tasks`\n\
+         \n\
+         ### Default workflow: NEW feature/skill → Ritual pipeline (see GID Rituals section)\n\
+         ### Only use raw GID commands for: exploration, queries, quick single-file fixes\n\
+         \n\
+         - New project/feature: `gid ritual init` → follow the pipeline\n\
          - Existing codebase: `gid_extract` → `gid_read` or `gid_schema`\n\
          - During dev: `gid_tasks` (check), `gid_update_task` (progress), `gid_complete` (done), `gid_query_impact` (before changes)\n\
          - Quality: `gid_validate`, `gid_advise`, `gid_visual`\n\
@@ -238,17 +242,36 @@ impl PromptSection for GidRitualSection {
     }
 
     fn render(&self, _ctx: &PromptContext) -> String {
-        "## GID Rituals (Full Development Pipeline)\n\
-         Rituals orchestrate the complete dev cycle: idea → requirements → design → graph → tasks → code → verify.\n\
-         - Start new feature: `gid ritual init` (creates .gid/ritual.yml from template)\n\
-         - Run pipeline: `gid ritual run` (advances through phases, pauses at approval gates)\n\
-         - Check progress: `gid ritual status`\n\
-         - Approve gate: `gid ritual approve` | Skip phase: `gid ritual skip`\n\
-         - Cancel: `gid ritual cancel`\n\
-         - List templates: `gid ritual templates`\n\
-         Phases: (0) capture-idea → (1) research → (2) draft-requirements → (3) draft-design → (4) generate-graph → (5) plan-tasks → (6) execute-tasks → (7) extract-code → (8) verify-quality\n\
-         Phases 1-4 require human approval. Phases 5-8 auto-execute.\n\
-         Use rituals for substantial features. For quick fixes, use GID tasks directly."
+        "## GID Rituals — MANDATORY Development Pipeline\n\
+         \n\
+         ### ⚠️ HARD RULE: Ritual-First for All Implementation\n\
+         When the user asks you to implement a feature, skill, module, or any code change that:\n\
+         - Adds new functionality (new files, new modules, new skills)\n\
+         - Touches multiple files or components\n\
+         - Requires design decisions\n\
+         → You MUST start a ritual (`gid ritual init`). Do NOT jump straight to coding.\n\
+         \n\
+         Only skip ritual when ALL of these are true:\n\
+         - The user explicitly says \"quick fix\", \"just do it\", or \"no ritual\"\n\
+         - OR the change is a single-file edit under ~50 lines (bug fix, typo, config tweak)\n\
+         \n\
+         If unsure → start a ritual. Over-process beats under-process.\n\
+         \n\
+         ### Ritual Commands\n\
+         - Start: `gid ritual init` (creates .gid/ritual.yml from template)\n\
+         - Run: `gid ritual run` (advances phases, pauses at approval gates)\n\
+         - Status: `gid ritual status`\n\
+         - Approve: `gid ritual approve` | Skip: `gid ritual skip`\n\
+         - Cancel: `gid ritual cancel` | Templates: `gid ritual templates`\n\
+         \n\
+         ### 9 Phases\n\
+         (0) capture-idea → (1) research → (2) draft-requirements → (3) draft-design → \
+         (4) generate-graph → (5) plan-tasks → (6) execute-tasks → (7) extract-code → (8) verify-quality\n\
+         Phases 0-4 require human approval. Phases 5-8 auto-execute.\n\
+         \n\
+         ### Skill → Ritual Handoff\n\
+         capture-idea skill collects and clarifies the idea. Once the idea becomes an implementation request, \
+         transition to ritual. Do NOT implement directly from an idea — the pipeline exists to ensure quality."
             .to_string()
     }
 
