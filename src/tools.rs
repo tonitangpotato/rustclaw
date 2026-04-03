@@ -176,8 +176,12 @@ impl ToolRegistry {
         let gid_pathbuf = PathBuf::from(path.as_str());
         self.register(Box::new(GidDesignTool::new(graph.clone(), gid_pathbuf.clone())));
         self.register(Box::new(GidPlanTool::new(graph.clone())));
+        self.register(Box::new(GidRitualInitTool::new(gid_pathbuf.clone())));
+        self.register(Box::new(GidRitualRunTool::new(gid_pathbuf.clone())));
         self.register(Box::new(GidRitualStatusTool::new(gid_pathbuf.clone())));
         self.register(Box::new(GidRitualApproveTool::new(gid_pathbuf.clone())));
+        self.register(Box::new(GidRitualSkipTool::new(gid_pathbuf.clone())));
+        self.register(Box::new(GidRitualCancelTool::new(gid_pathbuf.clone())));
         self.register(Box::new(GidStatsTool::new(gid_pathbuf)));
 
         self
@@ -3595,6 +3599,307 @@ impl Tool for GidStatsTool {
 
         Ok(ToolResult {
             output,
+            is_error: false,
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GID Ritual Init Tool — Initialize a ritual from a template
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct GidRitualInitTool {
+    gid_path: PathBuf,
+}
+
+impl GidRitualInitTool {
+    fn new(gid_path: PathBuf) -> Self {
+        Self { gid_path }
+    }
+}
+
+#[async_trait]
+impl Tool for GidRitualInitTool {
+    fn name(&self) -> &str {
+        "gid_ritual_init"
+    }
+
+    fn description(&self) -> &str {
+        "Initialize a new ritual from a template (full-dev-cycle, quick-impl, bugfix). Creates .gid/ritual.yml. MUST be called before gid_ritual_run."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "template": {
+                    "type": "string",
+                    "enum": ["full-dev-cycle", "quick-impl", "bugfix"],
+                    "description": "Template name to initialize from"
+                }
+            },
+            "required": ["template"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        use gid_core::ritual::TemplateRegistry;
+
+        let template_name = input["template"].as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing 'template' parameter"))?;
+
+        // Check if ritual already exists
+        let ritual_path = self.gid_path.join("ritual.yml");
+        if ritual_path.exists() {
+            return Ok(ToolResult {
+                output: format!("Ritual already exists at {}. Cancel or delete it first.", ritual_path.display()),
+                is_error: true,
+            });
+        }
+
+        // Find template file via registry
+        let registry = TemplateRegistry::new();
+        let templates = registry.list().unwrap_or_default();
+        let found = templates.iter().find(|t| t.name == template_name);
+        
+        if found.is_none() {
+            let available: Vec<String> = templates.iter().map(|t| t.name.clone()).collect();
+            return Ok(ToolResult {
+                output: format!("Template '{}' not found. Available: {}", template_name, available.join(", ")),
+                is_error: true,
+            });
+        }
+
+        let template_info = found.unwrap();
+        let phase_count = template_info.phase_count;
+
+        // Copy template file to ritual.yml
+        std::fs::copy(&template_info.source, &ritual_path)?;
+
+        Ok(ToolResult {
+            output: format!(
+                "✓ Ritual '{}' initialized ({} phases)\n\nRun gid_ritual_run to start.",
+                template_name, phase_count
+            ),
+            is_error: false,
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GID Ritual Run Tool — Execute the next phase of the ritual
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct GidRitualRunTool {
+    gid_path: PathBuf,
+}
+
+impl GidRitualRunTool {
+    fn new(gid_path: PathBuf) -> Self {
+        Self { gid_path }
+    }
+}
+
+#[async_trait]
+impl Tool for GidRitualRunTool {
+    fn name(&self) -> &str {
+        "gid_ritual_run"
+    }
+
+    fn description(&self) -> &str {
+        "Run the next phase of the current ritual. Call repeatedly to advance through phases. Returns phase result and next action needed."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {}
+        })
+    }
+
+    async fn execute(&self, _input: Value) -> anyhow::Result<ToolResult> {
+        use gid_core::ritual::{RitualDefinition, RitualEngine, RitualState, RitualStatus};
+
+        let ritual_path = self.gid_path.join("ritual.yml");
+        if !ritual_path.exists() {
+            return Ok(ToolResult {
+                output: "No ritual found. Use gid_ritual_init first.".to_string(),
+                is_error: true,
+            });
+        }
+
+        // Load template dirs for definition loading
+        let mut template_dirs = vec![self.gid_path.join("rituals")];
+        if let Some(home) = dirs::home_dir() {
+            template_dirs.push(home.join(".gid/rituals"));
+        }
+
+        let definition = RitualDefinition::load(&ritual_path, &template_dirs)?;
+        let project_root = self.gid_path.parent()
+            .unwrap_or(&self.gid_path)
+            .to_path_buf();
+
+        // Check for existing state (resume) or create new
+        let state_path = self.gid_path.join("ritual-state.json");
+        let mut engine = if state_path.exists() {
+            RitualEngine::resume_with_llm_client(definition, &project_root, None)?
+        } else {
+            RitualEngine::with_llm_client(definition, &project_root, None)?
+        };
+
+        // Run one phase
+        let status = engine.run().await?;
+
+        let output = match &status {
+            RitualStatus::Running => {
+                let state = engine.state();
+                let phase_id = state.phase_states.get(state.current_phase)
+                    .map(|p| p.phase_id.as_str())
+                    .unwrap_or("unknown");
+                format!("⚙️ Phase '{}' completed. Call gid_ritual_run again for next phase.", phase_id)
+            }
+            RitualStatus::WaitingApproval { phase_id, message, .. } => {
+                format!("⏸ Phase '{}' needs approval.\n{}\n\nUse gid_ritual_approve to continue.", phase_id, message)
+            }
+            RitualStatus::Completed { .. } => {
+                "✅ Ritual completed successfully!".to_string()
+            }
+            RitualStatus::Failed { phase_id, error, .. } => {
+                format!("❌ Phase '{}' failed: {}\n\nUse gid_ritual_skip to skip, or fix and gid_ritual_run to retry.", phase_id, error)
+            }
+            RitualStatus::Cancelled => {
+                "⊘ Ritual was cancelled.".to_string()
+            }
+            RitualStatus::Paused => {
+                "⏸ Ritual is paused. Call gid_ritual_run to resume.".to_string()
+            }
+        };
+
+        Ok(ToolResult {
+            output,
+            is_error: matches!(status, RitualStatus::Failed { .. }),
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GID Ritual Skip Tool — Skip the current phase
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct GidRitualSkipTool {
+    gid_path: PathBuf,
+}
+
+impl GidRitualSkipTool {
+    fn new(gid_path: PathBuf) -> Self {
+        Self { gid_path }
+    }
+}
+
+#[async_trait]
+impl Tool for GidRitualSkipTool {
+    fn name(&self) -> &str {
+        "gid_ritual_skip"
+    }
+
+    fn description(&self) -> &str {
+        "Skip the current ritual phase (e.g., if it failed and you want to proceed)."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {}
+        })
+    }
+
+    async fn execute(&self, _input: Value) -> anyhow::Result<ToolResult> {
+        use gid_core::ritual::{RitualDefinition, RitualEngine, RitualState};
+
+        let ritual_path = self.gid_path.join("ritual.yml");
+        let state_path = self.gid_path.join("ritual-state.json");
+
+        if !state_path.exists() {
+            return Ok(ToolResult {
+                output: "No ritual in progress.".to_string(),
+                is_error: true,
+            });
+        }
+
+        let mut template_dirs = vec![self.gid_path.join("rituals")];
+        if let Some(home) = dirs::home_dir() {
+            template_dirs.push(home.join(".gid/rituals"));
+        }
+
+        let definition = RitualDefinition::load(&ritual_path, &template_dirs)?;
+        let project_root = self.gid_path.parent()
+            .unwrap_or(&self.gid_path)
+            .to_path_buf();
+
+        let mut engine = RitualEngine::resume_with_llm_client(definition, &project_root, None)?;
+        let skipped_phase = engine.state().phase_states.get(engine.state().current_phase)
+            .map(|p| p.phase_id.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        
+        engine.skip_current()?;
+
+        Ok(ToolResult {
+            output: format!("⊘ Skipped phase '{}'. Call gid_ritual_run to continue.", skipped_phase),
+            is_error: false,
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GID Ritual Cancel Tool — Cancel the current ritual
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct GidRitualCancelTool {
+    gid_path: PathBuf,
+}
+
+impl GidRitualCancelTool {
+    fn new(gid_path: PathBuf) -> Self {
+        Self { gid_path }
+    }
+}
+
+#[async_trait]
+impl Tool for GidRitualCancelTool {
+    fn name(&self) -> &str {
+        "gid_ritual_cancel"
+    }
+
+    fn description(&self) -> &str {
+        "Cancel the current ritual. State is preserved for inspection."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {}
+        })
+    }
+
+    async fn execute(&self, _input: Value) -> anyhow::Result<ToolResult> {
+        use gid_core::ritual::{RitualState};
+
+        let state_path = self.gid_path.join("ritual-state.json");
+
+        if !state_path.exists() {
+            return Ok(ToolResult {
+                output: "No ritual in progress.".to_string(),
+                is_error: true,
+            });
+        }
+
+        let content = std::fs::read_to_string(&state_path)?;
+        let mut state: RitualState = serde_json::from_str(&content)?;
+        state.status = gid_core::ritual::RitualStatus::Cancelled;
+        std::fs::write(&state_path, serde_json::to_string_pretty(&state)?)?;
+
+        Ok(ToolResult {
+            output: "⊘ Ritual cancelled. State preserved in ritual-state.json.".to_string(),
             is_error: false,
         })
     }
