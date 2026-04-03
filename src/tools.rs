@@ -3675,49 +3675,29 @@ impl Tool for GidRitualInitTool {
             });
         }
 
-        // Find template via registry
+        // Load template directly from gid-core (handles both built-in and file-based)
         let registry = TemplateRegistry::new();
-        let templates = registry.list().unwrap_or_default();
-        let found = templates.iter().find(|t| t.name == template_name);
-        
-        if found.is_none() {
-            let available: Vec<String> = templates.iter().map(|t| t.name.clone()).collect();
-            return Ok(ToolResult {
-                output: format!("Template '{}' not found. Available: {}", template_name, available.join(", ")),
-                is_error: true,
-            });
-        }
-
-        let template_info = found.unwrap();
-        let phase_count = template_info.phase_count;
-
-        // If source is a real file, copy it; otherwise serialize built-in template
-        let source = &template_info.source;
-        if source.exists() {
-            std::fs::copy(source, &ritual_path)?;
-        } else {
-            // Built-in template — use gid CLI to init (most reliable)
-            let output = std::process::Command::new("gid")
-                .args(["ritual", "init", "--template", template_name])
-                .current_dir(self.gid_path.parent().unwrap_or(&self.gid_path))
-                .output();
-            match output {
-                Ok(o) if o.status.success() => {}
-                Ok(o) => {
-                    let stderr = String::from_utf8_lossy(&o.stderr);
-                    return Ok(ToolResult {
-                        output: format!("gid ritual init failed: {}", stderr),
-                        is_error: true,
-                    });
-                }
-                Err(e) => {
-                    return Ok(ToolResult {
-                        output: format!("Failed to run gid CLI: {}", e),
-                        is_error: true,
-                    });
-                }
+        let definition = match registry.load(template_name) {
+            Ok(def) => def,
+            Err(_) => {
+                let available: Vec<String> = registry.list()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|t| t.name.clone())
+                    .collect();
+                return Ok(ToolResult {
+                    output: format!("Template '{}' not found. Available: {}", template_name, available.join(", ")),
+                    is_error: true,
+                });
             }
-        }
+        };
+
+        let phase_count = definition.phases.len();
+
+        // Serialize to YAML and write
+        let yaml = serde_yaml::to_string(&definition)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize template: {}", e))?;
+        std::fs::write(&ritual_path, &yaml)?;
 
         Ok(ToolResult {
             output: format!(
