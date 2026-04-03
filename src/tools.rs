@@ -269,8 +269,20 @@ impl ToolRegistry {
             if config.enabled {
                 let ritual_active = self.is_ritual_active(workspace);
 
-                let file_path = input["path"].as_str()
+                // Normalize path to relative (LLM may pass absolute paths)
+                let raw_path = input["path"].as_str()
                     .or_else(|| input["file_path"].as_str());
+                let file_path = raw_path.map(|p| {
+                    let workspace_str = workspace.to_str().unwrap_or("");
+                    if !workspace_str.is_empty() && p.starts_with(workspace_str) {
+                        // Strip workspace prefix: /Users/potato/rustclaw/src/foo.rs → src/foo.rs
+                        p.strip_prefix(workspace_str)
+                            .unwrap_or(p)
+                            .trim_start_matches('/')
+                    } else {
+                        p
+                    }
+                });
                 let command = input["command"].as_str();
 
                 tracing::debug!(
