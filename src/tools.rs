@@ -110,6 +110,7 @@ impl ToolRegistry {
     /// Tools are scoped to the given workspace root.
     pub fn for_subagent(workspace_root: &str) -> Self {
         let mut registry = Self::new();
+        registry.workspace_root = Some(std::path::PathBuf::from(workspace_root));
         registry.register(Box::new(ExecTool));
         registry.register(Box::new(ReadFileTool::new(workspace_root)));
         registry.register(Box::new(WriteFileTool::new(workspace_root)));

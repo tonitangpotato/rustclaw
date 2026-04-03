@@ -20,4 +20,17 @@ ritual:
         type: regex
       - pattern: "^rustc\\b"
         type: regex
+      # Block shell-based file modifications to gated paths
+      - pattern: "\\bsed\\s+-i.*\\bsrc/"
+        type: regex
+      - pattern: "\\btee\\b.*\\bsrc/"
+        type: regex
+      - pattern: ">\\s*src/"
+        type: regex
+      - pattern: "\\bcp\\b.*\\bsrc/"
+        type: regex
+      - pattern: "\\bmv\\b.*\\bsrc/"
+        type: regex
+      - pattern: "\\brm\\b.*\\bsrc/"
+        type: regex
     verify_command: "cargo build 2>&1 && cargo test 2>&1"
