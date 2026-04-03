@@ -290,6 +290,9 @@ async fn main() -> anyhow::Result<()> {
                 reload::start_config_watcher(&config, cfg.clone())?;
             reload::start_sighup_listener(config.clone(), config_tx.clone()).await;
 
+            // Clone config receiver for orchestrator hot-reload before passing to runner
+            let orch_config_rx = config_rx.clone();
+
             // Wire config changes to agent runner (hot-reload model, etc.)
             runner.start_config_reload_listener(config_rx);
 
@@ -312,9 +315,11 @@ async fn main() -> anyhow::Result<()> {
                 cron::start_cron(cron_jobs, runner.clone()).await?;
             }
 
-            // Start orchestrator tick loop (if enabled)
+            // Start orchestrator tick loop and config reload listener (if enabled)
             if let Some(ref orch_ref) = orch {
                 let tick_interval = cfg.orchestrator.tick_interval;
+                // Wire config hot-reload to orchestrator (specialists, tick_interval, max_concurrent)
+                orchestrator::start_config_reload_listener(orch_clone.clone(), orch_config_rx).await;
                 let orch_clone = orch_ref.clone();
                 let runner_clone = runner.clone();
                 tokio::spawn(async move {
