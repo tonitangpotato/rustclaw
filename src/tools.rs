@@ -66,17 +66,27 @@ pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
     llm_client: Option<Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>>,
     workspace_root: Option<std::path::PathBuf>,
+    /// Shared mutable slot for ritual notify — set per-request with chat context,
+    /// read by StartRitualTool at execution time.
+    pub ritual_notify: Arc<std::sync::Mutex<Option<crate::ritual_runner::NotifyFn>>>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        Self { tools: Vec::new(), llm_client: None, workspace_root: None }
+        Self {
+            tools: Vec::new(),
+            llm_client: None,
+            workspace_root: None,
+            ritual_notify: Arc::new(std::sync::Mutex::new(None)),
+        }
     }
 
     /// Set the LLM client for ritual tools.
     pub fn set_llm_client(&mut self, client: Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>) {
         self.llm_client = Some(client);
     }
+
+
 
     /// Register all default tools.
     pub fn with_defaults(workspace_root: &str, config: &crate::config::Config) -> Self {
@@ -198,7 +208,9 @@ impl ToolRegistry {
         self.register(Box::new(StartRitualTool::new(
             self.workspace_root.clone().unwrap_or_else(|| gid_pathbuf.parent().unwrap_or(std::path::Path::new(".")).to_path_buf()),
             self.llm_client.clone(),
+            self.ritual_notify.clone(),
         )));
+
         self.register(Box::new(GidStatsTool::new(gid_pathbuf.clone())));
 
         // Additional gid-core tools (execute, semantify, complexity, working memory, ignore, scope)
@@ -4073,14 +4085,17 @@ impl Tool for GidScopeTool {
 struct StartRitualTool {
     workspace_root: PathBuf,
     llm_client: Option<Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>>,
+    /// Shared notify slot — telegram.rs sets this per-request with chat_id context
+    notify_slot: Arc<std::sync::Mutex<Option<crate::ritual_runner::NotifyFn>>>,
 }
 
 impl StartRitualTool {
     fn new(
         workspace_root: PathBuf,
         llm_client: Option<Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>>,
+        notify_slot: Arc<std::sync::Mutex<Option<crate::ritual_runner::NotifyFn>>>,
     ) -> Self {
-        Self { workspace_root, llm_client }
+        Self { workspace_root, llm_client, notify_slot }
     }
 }
 
@@ -4126,11 +4141,15 @@ impl Tool for StartRitualTool {
             }
         };
 
-        // Create a simple log-based notify (no chat_id available in tool context)
-        let notify: crate::ritual_runner::NotifyFn = Arc::new(move |msg: String| {
-            tracing::info!(ritual_notify = %msg, "Ritual progress");
-            Box::pin(async {})
-        });
+        // Read notify from shared slot (set by telegram.rs per-request), fallback to log-only
+        let notify: crate::ritual_runner::NotifyFn = self.notify_slot
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .unwrap_or_else(|| Arc::new(move |msg: String| {
+                tracing::info!(ritual_notify = %msg, "Ritual progress");
+                Box::pin(async {})
+            }));
 
         let runner = crate::ritual_runner::RitualRunner::new(
             self.workspace_root.clone(),

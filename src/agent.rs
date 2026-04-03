@@ -46,7 +46,7 @@ pub struct AgentRunner {
     memory: Arc<MemoryManager>,
     sessions: SessionManager,
     hooks: Arc<RwLock<HookRegistry>>,
-    tools: ToolRegistry,
+    pub tools: ToolRegistry,
     llm_client: Arc<RwLock<Box<dyn LlmClient>>>,
     /// Optional LLM client for summarization (uses cheaper model)
     summary_llm: Option<Box<dyn LlmClient>>,

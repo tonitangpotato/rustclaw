@@ -61,7 +61,21 @@ impl RitualRunner {
     }
 
     /// Start a new ritual with a task description.
+    /// Returns error if another ritual is already in progress.
     pub async fn start(&self, task: String) -> Result<RitualState> {
+        // Check for existing active ritual
+        if self.state_path.exists() {
+            let existing = self.load_state()?;
+            if !existing.phase.is_terminal() && existing.phase != gid_core::ritual::V2Phase::Idle {
+                return Err(anyhow::anyhow!(
+                    "Another ritual is already in progress (phase: {}, task: \"{}\"). \
+                     Use `/ritual cancel` first, or `/ritual status` to check.",
+                    existing.phase.display_name(),
+                    gid_core::ritual::truncate(&existing.task, 80),
+                ));
+            }
+        }
+
         let state = RitualState::new();
         let event = RitualEvent::Start { task };
         self.run_loop(state, event).await
@@ -379,10 +393,16 @@ impl RitualRunner {
             },
         ];
 
+        // implement phase benefits from stronger model; others use sonnet
+        let model = match name {
+            "implement" => "opus",
+            _ => "sonnet",
+        };
+
         let result = gid_client.run_skill(
             &skill_prompt,
             tools,
-            "sonnet",
+            model,
             &self.project_root,
         ).await;
 

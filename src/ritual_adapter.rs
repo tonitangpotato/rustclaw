@@ -34,13 +34,14 @@ impl GidLlmClient for RitualLlmAdapter {
         model: &str,
         working_dir: &Path,
     ) -> Result<SkillResult> {
-        // Resolve model aliases
-        let resolved_model = match model {
+        // Resolve model aliases to full model names
+        let resolved_model: &str = match model {
             "sonnet" => "claude-sonnet-4-5-20250929",
             "opus" => "claude-opus-4-6",
             "haiku" => "claude-haiku-3-5-20241022",
             other => other,
         };
+        tracing::info!("Ritual skill using model: {} (resolved from '{}')", resolved_model, model);
 
         // Convert gid-core ToolDefinition → RustClaw ToolDefinition
         let rc_tools: Vec<llm::ToolDefinition> = tools.iter().map(|t| {
@@ -67,16 +68,18 @@ impl GidLlmClient for RitualLlmAdapter {
         let mut total_tool_calls = 0usize;
         let mut total_tokens = 0u64;
         let mut final_text = String::new();
+        let mut artifacts: Vec<std::path::PathBuf> = Vec::new();
         let handler = SkillToolHandler { working_dir: working_dir.to_path_buf() };
 
         // Mini agent loop — up to 20 turns
         for _turn in 0..20 {
             let response = {
                 let client = self.client.read().await;
-                client.chat(
+                client.chat_with_model(
                     &system,
                     &messages,
                     &rc_tools,
+                    resolved_model,
                 ).await?
             };
 
@@ -112,6 +115,13 @@ impl GidLlmClient for RitualLlmAdapter {
             let mut tool_results = Vec::new();
             for tc in &response.tool_calls {
                 total_tool_calls += 1;
+
+                // Track file artifacts from Write/Edit tools
+                if (tc.name == "Write" || tc.name == "Edit") && !tc.input.get("path").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+                    let path = tc.input["path"].as_str().unwrap_or("");
+                    artifacts.push(working_dir.join(path));
+                }
+
                 let result = handler.handle(&tc.name, &tc.input).await;
                 let (content, is_error) = match result {
                     Ok(output) => (output, false),
@@ -128,7 +138,7 @@ impl GidLlmClient for RitualLlmAdapter {
 
         Ok(SkillResult {
             output: final_text,
-            artifacts_created: vec![],
+            artifacts_created: artifacts,
             tool_calls_made: total_tool_calls,
             tokens_used: total_tokens,
         })

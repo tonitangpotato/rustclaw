@@ -386,6 +386,18 @@ pub trait LlmClient: Send + Sync {
         tools: &[ToolDefinition],
     ) -> anyhow::Result<LlmResponse>;
 
+    /// Chat with an explicit model override (e.g. ritual phases using different models).
+    /// Default implementation ignores model_override and delegates to chat().
+    async fn chat_with_model(
+        &self,
+        system: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        _model_override: &str,
+    ) -> anyhow::Result<LlmResponse> {
+        self.chat(system, messages, tools).await
+    }
+
     /// Stream chat response, sending chunks through the channel.
     /// Returns immediately, chunks arrive via the returned receiver.
     async fn chat_stream(
@@ -684,8 +696,18 @@ impl LlmClient for AnthropicClient {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> anyhow::Result<LlmResponse> {
+        self.chat_with_model(system, messages, tools, &self.model).await
+    }
+
+    async fn chat_with_model(
+        &self,
+        system: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        model_override: &str,
+    ) -> anyhow::Result<LlmResponse> {
         let mut body = serde_json::json!({
-            "model": self.model,
+            "model": model_override,
             "max_tokens": self.max_tokens,
             "system": self.build_system_value(system),
             "messages": serde_json::to_value(messages)?,
@@ -740,7 +762,7 @@ impl LlmClient for AnthropicClient {
 
             tracing::info!(
                 "LLM request attempt {}/{} → model={} url={}/v1/messages auth={}",
-                attempt, total_retries, self.model, self.base_url, auth_label
+                attempt, total_retries, model_override, self.base_url, auth_label
             );
 
             let req = self

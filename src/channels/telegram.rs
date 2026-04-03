@@ -201,6 +201,11 @@ impl TelegramBot {
         let user_id = message["from"]["id"].as_i64().unwrap_or(0);
         let mut text = message["text"].as_str().unwrap_or("").to_string();
         let chat_type = message["chat"]["type"].as_str().unwrap_or("private");
+
+        // Set ritual notify for this request so start_ritual tool can send Telegram messages
+        if let Ok(mut guard) = self.runner.tools.ritual_notify.lock() {
+            *guard = Some(self.make_notify_fn(chat_id));
+        }
         
         // Determine if this is a group chat
         let is_group = chat_type == "group" || chat_type == "supergroup";
@@ -783,26 +788,13 @@ Choose a model:", current),
                             if let Err(e) = runner.save_state(&state) {
                                 tracing::error!("Failed to save final ritual state: {}", e);
                             }
-                            let status_msg = match state.phase {
-                                gid_core::ritual::V2Phase::Done => {
-                                    "✅ Ritual completed successfully!".to_string()
-                                }
-                                gid_core::ritual::V2Phase::Escalated => {
-                                    format!(
-                                        "⚠️ Ritual escalated. Use `/ritual retry` to retry.\nError: {}",
-                                        state.error_context.as_deref().unwrap_or("unknown")
-                                    )
-                                }
-                                gid_core::ritual::V2Phase::Cancelled => {
-                                    "🛑 Ritual was cancelled.".to_string()
-                                }
-                                other => {
-                                    format!("Ritual ended in unexpected phase: {}", other.display_name())
-                                }
-                            };
-                            let _ = bot.send_message(chat_id, &status_msg, None).await;
+                            // Terminal notification already sent by run_loop's send_terminal_notification()
+                            // Only log here — no duplicate message to user
+                            tracing::info!("Ritual finished in {} phase", state.phase.display_name());
                         }
                         Err(e) => {
+                            // This is an executor-level error (not a ritual phase failure)
+                            // send_terminal_notification won't fire, so we must notify
                             let _ = bot.send_message(
                                 chat_id,
                                 &format!("❌ Ritual failed: {}", e),
