@@ -317,14 +317,13 @@ impl RitualRunner {
         let adapter = RitualLlmAdapter::new(self.llm_client.clone());
         let gid_client: Arc<dyn GidLlmClient> = adapter.into_arc();
 
-        // Build skill prompt from name and context
-        let skill_prompt = format!(
-            "# Skill: {}\n\n## Task\n{}\n\n## Instructions\n\
-             Execute the '{}' skill. Use the provided tools to read existing files, \
-             write new or modified files, and run commands as needed.\n\
-             Work in the project directory. Be thorough and complete.",
-            name, context, name
-        );
+        // Load skill-specific prompt (file-based, with built-in fallback)
+        let base_prompt = self.load_skill_prompt(name);
+        let skill_prompt = if context.is_empty() {
+            base_prompt
+        } else {
+            format!("## USER TASK\n{}\n\n## INSTRUCTIONS\n{}", context, base_prompt)
+        };
 
         // Define standard tools for skill execution
         let tools = vec![
@@ -389,6 +388,50 @@ impl RitualRunner {
                     error: format!("{}", e),
                 })
             }
+        }
+    }
+
+        /// Load skill prompt from file or built-in fallback.
+    /// Priority: .gid/skills/{name}.md → ~/rustclaw/skills/{name}/SKILL.md → built-in
+    fn load_skill_prompt(&self, skill_name: &str) -> String {
+        // Project-local skill
+        let gid_skill = self.project_root.join(".gid").join("skills").join(format!("{}.md", skill_name));
+        if gid_skill.exists() {
+            if let Ok(content) = std::fs::read_to_string(&gid_skill) {
+                return content;
+            }
+        }
+
+        // RustClaw skills directory
+        let home = std::env::var("HOME").unwrap_or_default();
+        let rustclaw_skill = PathBuf::from(&home)
+            .join("rustclaw").join("skills").join(skill_name).join("SKILL.md");
+        if rustclaw_skill.exists() {
+            if let Ok(content) = std::fs::read_to_string(&rustclaw_skill) {
+                return content;
+            }
+        }
+
+        // Built-in fallbacks with specific guidance
+        match skill_name {
+            "draft-design" => "Read the project structure and the user's task description. \
+                Create a DESIGN.md document with: Overview, Goals/Non-goals, Design, \
+                Implementation Plan, Testing Strategy, Open Questions. \
+                Keep it concise (500-1500 words). Write to DESIGN.md.".into(),
+            "update-design" => "Read the existing DESIGN.md and the user's task. \
+                Make MINIMAL targeted edits — add a new section or update the relevant section only. \
+                Do NOT rewrite the entire document. Use Edit tool to modify specific sections. \
+                If the change is trivial (e.g., adding a command), add a brief bullet point.".into(),
+            "generate-graph" | "design-to-graph" => "Read DESIGN.md. Generate a GID graph in YAML format \
+                and write it to .gid/graph.yml. Include component nodes, file nodes, and task nodes.".into(),
+            "update-graph" => "Read the existing .gid/graph.yml and the task description. \
+                Add or update ONLY the relevant nodes/edges. Do NOT regenerate the entire graph. \
+                Use Edit tool for targeted changes. For small features, just add 1-3 task nodes.".into(),
+            "implement" => "Implement the described changes. Read relevant source files, \
+                make the necessary code changes. Follow existing patterns. \
+                Be precise — edit only the files that need to change.".into(),
+            _ => format!("Execute the '{}' skill using the provided tools. \
+                Read existing files, make targeted changes, run commands as needed.", skill_name),
         }
     }
 

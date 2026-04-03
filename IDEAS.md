@@ -7,6 +7,40 @@
 
 <!-- New ideas are prepended below this line -->
 
+## IDEA-20260403-01: 自动化 Skill 优化系统
+- **Date**: 2026-04-03
+- **Source**: Text (potato)
+- **Category**: tech/product
+- **Tags**: #skills #automation #optimization #self-improvement #meta-learning #rustclaw
+- **Effort**: Medium
+
+### Summary
+让 RustClaw 的 skill 系统能自动优化自身。现有 skills 是手写的 SKILL.md，`src/skills.rs` 有 auto-generation 能力但未充分利用。核心思路：agent 在使用 skill 时收集效果数据（成功率、token 消耗、用户满意度），自动识别哪些 skill 效果差 → 改写/调参 → A/B test → 保留更好的版本。
+
+### Key Points
+- **效果追踪** — 每次 skill 触发后，记录：是否成功完成、token 消耗、用户反馈（explicit: 好评/差评，implicit: 是否被要求重做）
+- **自动识别弱 skill** — 成功率低、token 消耗高、频繁被重做的 skill 标记为需优化
+- **自动改写** — LLM 分析失败 case，生成改进版 SKILL.md（更清晰的指令、更好的步骤拆分、补充遗漏场景）
+- **版本管理** — skill 有版本历史，可以 rollback 到之前版本
+- **Trigger 优化** — 分析 false positive（触发了但不该触发）和 false negative（该触发但没触发），自动调整 trigger patterns/keywords
+- **新 skill 生成** — 识别重复出现的工作模式（如"每次都要先搜 engram 再查文件"），自动提炼为新 skill
+- **与 `src/skills.rs` 现有能力整合** — SkillGenerator 已有 complexity 评估和 auto-gen 逻辑，但缺乏闭环优化
+
+### Potential Value
+- **降低维护成本** — skill 不再需要手动调优，agent 自己学会什么 work 什么不 work
+- **持续改进** — 随着使用数据积累，skill 质量单调递增
+- **可复制** — 优化后的 skill 可以 export 给其他 RustClaw 实例
+- **Meta-learning** — 这本身就是一个 "学会学习" 的系统，对 agent 生态有示范意义
+
+### Connections
+- 现有 `src/skills.rs` SkillGenerator — 已有 auto-gen 框架，缺闭环
+- Engram behavioral stats (`engram_behavior_stats`) — 可作为效果数据源
+- Engram soul suggestions (`engram_soul_suggestions`) — 类似理念，但针对 SOUL.md 而非 skills
+- SKM (Skill Engine) — trigger matching 层，优化 trigger 需要与 skm 协作
+
+### Status: 💡 New
+---
+
 ## IDEA-20260402-03: Engineer Union 平台 — Layoff Tracker + 业务替代
 - **Date**: 2026-03-31 (初次讨论) → 2026-04-02 (正式录入)
 - **Source**: Voice message (3/31), 起因是 Block 等公司大规模裁员工程师
