@@ -897,7 +897,7 @@ pub async fn start_dashboard(
         .route("/message", post(post_message))
         .route("/tokens", get(get_tokens))
         .route("/orchestrator", get(get_orchestrator))
-        .route("/sessions/:id/export", get(export_session));
+        .route("/sessions/{id}/export", get(export_session));
 
     let app = Router::new()
         .route("/", get(get_dashboard_html))
