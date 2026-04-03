@@ -3623,6 +3623,114 @@ impl Tool for GidStatsTool {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Ritual LLM Adapter — bridges agentctl-auth → gid-core LlmClient trait
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct RitualLlmAdapter {
+    client: agentctl_auth::ClaudeClient,
+}
+
+impl RitualLlmAdapter {
+    fn try_new() -> Option<Self> {
+        let pool_path = dirs::home_dir()?.join(".agentctl/auth.toml");
+        let pool = agentctl_auth::AuthPool::load(&pool_path).ok()?;
+        let client = agentctl_auth::ClaudeClient::builder()
+            .pool(&pool)
+            .build()
+            .ok()?;
+        Some(Self { client })
+    }
+}
+
+struct RitualToolHandler {
+    working_dir: std::path::PathBuf,
+}
+
+#[async_trait]
+impl agentctl_auth::ToolHandler for RitualToolHandler {
+    async fn handle(&self, name: &str, input: &serde_json::Value) -> anyhow::Result<agentctl_auth::ToolOutput> {
+        match name {
+            "Read" => {
+                let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let full_path = self.working_dir.join(path);
+                match std::fs::read_to_string(&full_path) {
+                    Ok(content) => {
+                        let c = if content.len() > 50_000 { format!("{}\n[truncated]", &content[..50_000]) } else { content };
+                        Ok(agentctl_auth::ToolOutput { content: c, is_error: false })
+                    }
+                    Err(e) => Ok(agentctl_auth::ToolOutput { content: format!("Error: {}", e), is_error: true }),
+                }
+            }
+            "Write" => {
+                let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                let full_path = self.working_dir.join(path);
+                if let Some(parent) = full_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match std::fs::write(&full_path, content) {
+                    Ok(_) => Ok(agentctl_auth::ToolOutput { content: format!("Wrote {}", path), is_error: false }),
+                    Err(e) => Ok(agentctl_auth::ToolOutput { content: format!("Error: {}", e), is_error: true }),
+                }
+            }
+            "Bash" => {
+                let command = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                let output = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(command)
+                    .current_dir(&self.working_dir)
+                    .output();
+                match output {
+                    Ok(o) => {
+                        let stdout = String::from_utf8_lossy(&o.stdout);
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        let combined = format!("{}{}", stdout, stderr);
+                        let truncated = if combined.len() > 20_000 { format!("{}\n[truncated]", &combined[..20_000]) } else { combined };
+                        Ok(agentctl_auth::ToolOutput { content: truncated, is_error: !o.status.success() })
+                    }
+                    Err(e) => Ok(agentctl_auth::ToolOutput { content: format!("Error: {}", e), is_error: true }),
+                }
+            }
+            _ => Ok(agentctl_auth::ToolOutput { content: format!("Unknown tool: {}", name), is_error: true }),
+        }
+    }
+}
+
+#[async_trait]
+impl gid_core::ritual::llm::LlmClient for RitualLlmAdapter {
+    async fn run_skill(
+        &self,
+        skill_prompt: &str,
+        tools: Vec<gid_core::ritual::llm::ToolDefinition>,
+        model: &str,
+        working_dir: &std::path::Path,
+    ) -> anyhow::Result<gid_core::ritual::llm::SkillResult> {
+        // Convert gid-core tools → agentctl-auth tools
+        let ac_tools: Vec<agentctl_auth::Tool> = tools.iter().map(|t| {
+            agentctl_auth::Tool::new(&t.name, &t.description, t.input_schema.clone())
+        }).collect();
+
+        let handler = RitualToolHandler { working_dir: working_dir.to_path_buf() };
+
+        let result = self.client.run_agent_loop(
+            model,
+            skill_prompt,
+            "Execute the skill as described in the system prompt.",
+            &ac_tools,
+            20, // max turns
+            &handler,
+        ).await?;
+
+        Ok(gid_core::ritual::llm::SkillResult {
+            output: result.final_text,
+            artifacts_created: vec![],
+            tool_calls_made: result.tool_calls.len(),
+            tokens_used: result.total_input_tokens + result.total_output_tokens,
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // GID Ritual Init Tool — Initialize a ritual from a template
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -3762,12 +3870,16 @@ impl Tool for GidRitualRunTool {
             .unwrap_or(&self.gid_path)
             .to_path_buf();
 
+        // Create LLM client adapter (agentctl-auth → gid-core LlmClient)
+        let llm_client: Option<Arc<dyn gid_core::ritual::llm::LlmClient>> =
+            RitualLlmAdapter::try_new().map(|a| Arc::new(a) as Arc<dyn gid_core::ritual::llm::LlmClient>);
+
         // Check for existing state (resume) or create new
         let state_path = self.gid_path.join("ritual-state.json");
         let mut engine = if state_path.exists() {
-            RitualEngine::resume_with_llm_client(definition, &project_root, None)?
+            RitualEngine::resume_with_llm_client(definition, &project_root, llm_client)?
         } else {
-            RitualEngine::with_llm_client(definition, &project_root, None)?
+            RitualEngine::with_llm_client(definition, &project_root, llm_client)?
         };
 
         // Run one phase

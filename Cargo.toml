@@ -31,6 +31,7 @@ engramai = "0.2.2"
 
 # GID (task graph)
 gid-core = { path = "/Users/potato/clawd/projects/gid-rs/crates/gid-core", features = ["full"] }
+agentctl-auth = { path = "/Users/potato/clawd/projects/agentctl/crates/agentctl-auth" }
 
 # Skills management (using SKM - Agent Skill Engine)
 skm-core = "0.1"
