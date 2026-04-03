@@ -486,12 +486,11 @@ async fn get_dashboard_html() -> impl IntoResponse {
     Html(DASHBOARD_HTML)
 }
 
-/// Export a session as a markdown file.
+/// Export a session as a downloadable markdown file.
 async fn export_session(
     State(state): State<Arc<DashboardState>>,
     Path(key): Path<String>,
 ) -> Response {
-    // Strip trailing "/export" if the wildcard captured it
     let key = key.strip_suffix("/export").unwrap_or(&key);
 
     let session = match state.runner.sessions().get_session(key).await {
@@ -508,22 +507,20 @@ async fn export_session(
     };
 
     let now = chrono::Utc::now().to_rfc3339();
-    let message_count = session.messages.len();
-    let total_tokens = session.total_tokens;
 
     let mut md = String::new();
     md.push_str(&format!("# Session Export: {}\n\n", key));
-    md.push_str(&format!("Exported: {}  \n", now));
-    md.push_str(&format!("Messages: {}  \n", message_count));
-    md.push_str(&format!("Total Tokens: {}  \n", total_tokens));
-    md.push_str(&format!("Created: {}  \n", session.created_at));
-    md.push_str(&format!("Updated: {}  \n\n---\n\n", session.updated_at));
+    md.push_str(&format!("- **Exported:** {}\n", now));
+    md.push_str(&format!("- **Messages:** {}\n", session.messages.len()));
+    md.push_str(&format!("- **Total Tokens:** {}\n", session.total_tokens));
+    md.push_str(&format!("- **Created:** {}\n", session.created_at));
+    md.push_str(&format!("- **Updated:** {}\n\n---\n\n", session.updated_at));
 
     for msg in &session.messages {
         let role = match msg.role.as_str() {
-            "user" => "User",
-            "assistant" => "Assistant",
-            "system" => "System",
+            "user" => "👤 User",
+            "assistant" => "🤖 Assistant",
+            "system" => "⚙️ System",
             other => other,
         };
 
@@ -536,31 +533,38 @@ async fn export_session(
                     md.push_str("\n\n");
                 }
                 ContentBlock::ToolUse { id: _, name, input } => {
-                    md.push_str(&format!("**Tool Use:** `{}`\n\n", name));
+                    md.push_str(&format!("**Tool Call:** `{}`\n\n", name));
                     let json_str = serde_json::to_string_pretty(input)
                         .unwrap_or_else(|_| input.to_string());
                     md.push_str(&format!("```json\n{}\n```\n\n", json_str));
                 }
-                ContentBlock::ToolResult { tool_use_id: _, content, .. } => {
+                ContentBlock::ToolResult {
+                    tool_use_id: _,
+                    content,
+                    is_error,
+                } => {
+                    let label = if *is_error { "❌ Error" } else { "✅ Result" };
                     let truncated = if content.len() > 500 {
                         let end = content.floor_char_boundary(500);
                         format!("{}…", &content[..end])
                     } else {
                         content.clone()
                     };
-                    md.push_str(&format!("> Result: {}\n\n", truncated));
+                    md.push_str(&format!("> **{}:** {}\n\n", label, truncated));
                 }
             }
         }
+
+        md.push_str("---\n\n");
     }
 
-    // Sanitize key for filename: replace non-alphanumeric (except dash/underscore) with underscore
-    let sanitized_key: String = key
+    // Sanitize key for filename
+    let sanitized: String = key
         .chars()
         .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
         .collect();
 
-    let filename = format!("session-{}.md", sanitized_key);
+    let filename = format!("session-{}.md", sanitized);
 
     (
         [
