@@ -179,7 +179,11 @@ impl ToolRegistry {
         self.register(Box::new(GidExtractTool::new(graph.clone(), path.clone())));
         self.register(Box::new(GidSchemaTool));
         // Design, planning, ritual, and execution tools
-        let gid_pathbuf = PathBuf::from(path.as_str());
+        // path is graph_path (e.g. ".gid/graph.yml"), we need the .gid/ directory
+        let gid_pathbuf = PathBuf::from(path.as_str())
+            .parent()
+            .unwrap_or(std::path::Path::new(".gid"))
+            .to_path_buf();
         self.register(Box::new(GidDesignTool::new(graph.clone(), gid_pathbuf.clone())));
         self.register(Box::new(GidPlanTool::new(graph.clone())));
         self.register(Box::new(GidRitualInitTool::new(gid_pathbuf.clone())));

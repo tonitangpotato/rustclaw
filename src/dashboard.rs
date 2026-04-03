@@ -485,43 +485,50 @@ async fn get_dashboard_html() -> impl IntoResponse {
     Html(DASHBOARD_HTML)
 }
 
-/// Export a session as a downloadable Markdown file.
+/// Export a session as a downloadable markdown file.
 async fn export_session(
-    Path(session_id): Path<String>,
     State(state): State<Arc<DashboardState>>,
+    Path(id): Path<String>,
 ) -> Response {
-    let Some(session) = state.runner.sessions().get_session(&session_id).await else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("Session '{}' not found", session_id),
-            }),
-        )
-            .into_response();
+    // URL-decode the session key
+    let key = match urlencoding::decode(&id) {
+        Ok(k) => k.into_owned(),
+        Err(_) => id,
     };
 
-    // Build markdown content
+    // Fetch the session
+    let session = state.runner.sessions().get_session(&key).await;
+    let session = match session {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Session '{}' not found", key),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Build markdown
     let mut md = String::new();
-    md.push_str(&format!("# Session Export: {}\n\n", session.key));
+    md.push_str(&format!("# Session Export: {}\n", session.key));
     md.push_str(&format!("- **Created**: {}\n", session.created_at));
-    md.push_str(&format!("- **Updated**: {}\n", session.updated_at));
-    md.push_str(&format!(
-        "- **Channel**: {}\n",
-        session.channel.as_deref().unwrap_or("unknown")
-    ));
+    md.push_str(&format!("- **Updated**: {}  \n", session.updated_at));
     md.push_str(&format!("- **Total Tokens**: {}\n", session.total_tokens));
     md.push_str(&format!("- **Messages**: {}\n", session.messages.len()));
     md.push_str("\n---\n");
 
     for msg in &session.messages {
-        let role_header = match msg.role.as_str() {
-            "user" => "## 🧑 User".to_string(),
-            "assistant" => "## 🤖 Assistant".to_string(),
-            "system" => "## ⚙️ System".to_string(),
-            other => format!("## {}", other),
+        let role_display = match msg.role.as_str() {
+            "user" => "User",
+            "assistant" => "Assistant",
+            "system" => "System",
+            other => other,
         };
 
-        md.push_str(&format!("\n{}\n\n", role_header));
+        md.push_str(&format!("\n## [{}] **{}**\n\n", session.updated_at, role_display));
 
         for block in &msg.content {
             match block {
@@ -530,16 +537,17 @@ async fn export_session(
                     md.push('\n');
                 }
                 crate::llm::ContentBlock::ToolUse { name, .. } => {
-                    md.push_str(&format!("**Tool Call**: {}\n", name));
+                    md.push_str(&format!("[Tool: {}]\n", name));
                 }
-                crate::llm::ContentBlock::ToolResult { content, .. } => {
-                    let truncated = if content.len() > 500 {
-                        let end = content.floor_char_boundary(500);
-                        format!("{}…", &content[..end])
+                crate::llm::ContentBlock::ToolResult { content, is_error, .. } => {
+                    let prefix = if *is_error { "Tool Error" } else { "Tool Result" };
+                    let truncated = if content.len() > 200 {
+                        let end = content.floor_char_boundary(200);
+                        format!("{}...", &content[..end])
                     } else {
                         content.clone()
                     };
-                    md.push_str(&format!("**Tool Result**: {}\n", truncated));
+                    md.push_str(&format!("[{}: {}]\n", prefix, truncated));
                 }
             }
         }
@@ -547,24 +555,16 @@ async fn export_session(
         md.push_str("\n---\n");
     }
 
-    // Sanitize session id for filename
-    let safe_id: String = session_id
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect();
-
-    let filename = format!("session-{}.md", safe_id);
+    // Sanitize key for filename (replace non-alphanumeric with _)
+    let safe_key: String = key.chars().map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' }).collect();
 
     (
         StatusCode::OK,
         [
-            (
-                header::CONTENT_TYPE,
-                "text/markdown; charset=utf-8".to_string(),
-            ),
+            (header::CONTENT_TYPE, "text/markdown".to_string()),
             (
                 header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{}\"", filename),
+                format!("attachment; filename=\"session-{}.md\"", safe_key),
             ),
         ],
         md,
@@ -767,7 +767,13 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
                 } else {
                     list.innerHTML = data.sessions.map(s => `
                         <div class="bg-gray-700 rounded p-2 text-sm">
-                            <div class="font-mono text-claw-500">${s.key}</div>
+                            <div class="flex items-center justify-between">
+                                <div class="font-mono text-claw-500">${s.key}</div>
+                                <a href="/api/sessions/${encodeURIComponent(s.key)}/export" 
+                                   class="text-gray-400 hover:text-white transition-colors" title="Export as Markdown">
+                                    ⬇
+                                </a>
+                            </div>
                             <div class="text-gray-400">${s.message_count} messages • ${s.total_tokens} tokens</div>
                         </div>
                     `).join('');
@@ -891,7 +897,7 @@ pub async fn start_dashboard(
         .route("/message", post(post_message))
         .route("/tokens", get(get_tokens))
         .route("/orchestrator", get(get_orchestrator))
-        .route("/sessions/{id}/export", get(export_session));
+        .route("/sessions/:id/export", get(export_session));
 
     let app = Router::new()
         .route("/", get(get_dashboard_html))
