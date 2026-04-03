@@ -3,9 +3,11 @@
 //! Tools are registered in a registry and dispatched by the agent loop.
 //! Each tool implements the Tool trait and provides its JSON schema for LLM.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio::sync::RwLock;
 use engramai::MemoryType;
 use serde::Serialize;
 use serde_json::Value;
@@ -170,6 +172,13 @@ impl ToolRegistry {
         // Code graph extraction tools
         self.register(Box::new(GidExtractTool::new(graph.clone(), path.clone())));
         self.register(Box::new(GidSchemaTool));
+        // Design, planning, ritual, and execution tools
+        let gid_pathbuf = PathBuf::from(path.as_str());
+        self.register(Box::new(GidDesignTool::new(graph.clone(), gid_pathbuf.clone())));
+        self.register(Box::new(GidPlanTool::new(graph.clone())));
+        self.register(Box::new(GidRitualStatusTool::new(gid_pathbuf.clone())));
+        self.register(Box::new(GidRitualApproveTool::new(gid_pathbuf.clone())));
+        self.register(Box::new(GidStatsTool::new(gid_pathbuf)));
 
         self
     }
@@ -3199,6 +3208,393 @@ impl Tool for GidSchemaTool {
 
         Ok(ToolResult {
             output: schema,
+            is_error: false,
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GID Design Tool — AI-assisted graph generation from design docs
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct GidDesignTool {
+    graph: Arc<RwLock<Graph>>,
+    gid_path: PathBuf,
+}
+
+impl GidDesignTool {
+    fn new(graph: Arc<RwLock<Graph>>, gid_path: PathBuf) -> Self {
+        Self { graph, gid_path }
+    }
+}
+
+#[async_trait]
+impl Tool for GidDesignTool {
+    fn name(&self) -> &str {
+        "gid_design"
+    }
+
+    fn description(&self) -> &str {
+        "Generate a graph design prompt from the current graph, or parse YAML output into graph nodes/edges. Use --parse to merge generated YAML into the graph."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "parse": {
+                    "type": "boolean",
+                    "description": "If true, parse YAML from 'yaml_content' and merge into graph"
+                },
+                "yaml_content": {
+                    "type": "string",
+                    "description": "YAML content to parse (required when parse=true)"
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Additional context for design prompt generation"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let parse = input["parse"].as_bool().unwrap_or(false);
+
+        if parse {
+            let yaml_content = input["yaml_content"].as_str()
+                .ok_or_else(|| anyhow::anyhow!("Missing 'yaml_content' for --parse mode"))?;
+
+            // Parse the YAML into nodes and edges
+            let parsed: serde_yaml::Value = serde_yaml::from_str(yaml_content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse YAML: {}", e))?;
+
+            let mut graph = self.graph.write().await;
+            let mut added_nodes = 0;
+            let mut added_edges = 0;
+
+            // Parse nodes
+            if let Some(nodes) = parsed.get("nodes").and_then(|n| n.as_sequence()) {
+                for node_val in nodes {
+                    if let Ok(node) = serde_yaml::from_value::<Node>(node_val.clone()) {
+                        if graph.get_node(&node.id).is_none() {
+                            graph.add_node(node);
+                            added_nodes += 1;
+                        }
+                    }
+                }
+            }
+
+            // Parse edges
+            if let Some(edges) = parsed.get("edges").and_then(|e| e.as_sequence()) {
+                for edge_val in edges {
+                    if let Ok(edge) = serde_yaml::from_value::<Edge>(edge_val.clone()) {
+                        graph.add_edge(edge);
+                        added_edges += 1;
+                    }
+                }
+            }
+
+            // Save
+            gid_save_graph(&graph, &self.gid_path)?;
+
+            Ok(ToolResult {
+                output: format!("Merged: {} nodes added, {} edges added", added_nodes, added_edges),
+                is_error: false,
+            })
+        } else {
+            // Generate design prompt
+            let graph = self.graph.read().await;
+            let context = input["context"].as_str().unwrap_or("");
+
+            let node_count = graph.nodes.len();
+            let edge_count = graph.edges.len();
+
+            let prompt = format!(
+                "Generate graph nodes and edges in YAML format for the following project.\n\n\
+                 Current graph has {} nodes and {} edges.\n\n\
+                 Context: {}\n\n\
+                 Output format:\n\
+                 ```yaml\n\
+                 nodes:\n\
+                 - id: <id>\n\
+                   title: <description>\n\
+                   status: todo\n\
+                   tags: [<tag>]\n\
+                 edges:\n\
+                 - from: <id>\n\
+                   to: <id>\n\
+                   relation: depends_on\n\
+                 ```\n\n\
+                 Then call gid_design with parse=true and the YAML content.",
+                node_count, edge_count, context
+            );
+
+            Ok(ToolResult {
+                output: prompt,
+                is_error: false,
+            })
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GID Plan Tool — Show execution plan from graph
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct GidPlanTool {
+    graph: Arc<RwLock<Graph>>,
+}
+
+impl GidPlanTool {
+    fn new(graph: Arc<RwLock<Graph>>) -> Self {
+        Self { graph }
+    }
+}
+
+#[async_trait]
+impl Tool for GidPlanTool {
+    fn name(&self) -> &str {
+        "gid_plan"
+    }
+
+    fn description(&self) -> &str {
+        "Create an execution plan from the current graph. Shows layers, task ordering, and parallelism."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {}
+        })
+    }
+
+    async fn execute(&self, _input: Value) -> anyhow::Result<ToolResult> {
+        use gid_core::harness::create_plan;
+
+        let graph = self.graph.read().await;
+        let plan = create_plan(&graph)?;
+
+        let mut output = format!("Execution Plan: {} tasks in {} layers\n\n", plan.total_tasks, plan.layers.len());
+
+        for (i, layer) in plan.layers.iter().enumerate() {
+            output.push_str(&format!("Layer {} ({} tasks, parallel):\n", i, layer.tasks.len()));
+            for task_info in &layer.tasks {
+                output.push_str(&format!("  - {} — {}\n", task_info.id, task_info.title));
+            }
+            output.push('\n');
+        }
+
+        Ok(ToolResult {
+            output,
+            is_error: false,
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GID Ritual Status Tool — Show current ritual state
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct GidRitualStatusTool {
+    gid_path: PathBuf,
+}
+
+impl GidRitualStatusTool {
+    fn new(gid_path: PathBuf) -> Self {
+        Self { gid_path }
+    }
+}
+
+#[async_trait]
+impl Tool for GidRitualStatusTool {
+    fn name(&self) -> &str {
+        "gid_ritual_status"
+    }
+
+    fn description(&self) -> &str {
+        "Show current ritual status: which phase is active, what's completed, what's pending approval."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {}
+        })
+    }
+
+    async fn execute(&self, _input: Value) -> anyhow::Result<ToolResult> {
+        use gid_core::ritual::{RitualState, RitualStatus, PhaseStatus};
+
+        let state_path = self.gid_path.join("ritual-state.json");
+        if !state_path.exists() {
+            return Ok(ToolResult {
+                output: "No ritual in progress (no ritual-state.json found)".to_string(),
+                is_error: false,
+            });
+        }
+
+        let content = std::fs::read_to_string(&state_path)?;
+        let state: RitualState = serde_json::from_str(&content)?;
+
+        let mut output = format!("Ritual: {}\nStatus: {:?}\n\nPhases:\n", state.ritual_name, state.status);
+
+        for (i, phase) in state.phase_states.iter().enumerate() {
+            let icon = match &phase.status {
+                PhaseStatus::Completed => "✅",
+                PhaseStatus::Failed => "❌",
+                PhaseStatus::Skipped { .. } => "⊘",
+                PhaseStatus::Running => "⚙️",
+                PhaseStatus::Pending => "⬜",
+                PhaseStatus::WaitingApproval => "⏸",
+            };
+            output.push_str(&format!("  {} [{}] {}\n", icon, i, phase.phase_id));
+        }
+
+        if matches!(state.status, RitualStatus::WaitingApproval { .. }) {
+            output.push_str("\n⏸ Waiting for approval. Use gid_ritual_approve to continue.");
+        }
+
+        Ok(ToolResult {
+            output,
+            is_error: false,
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GID Ritual Approve Tool — Approve/skip/reject current phase
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct GidRitualApproveTool {
+    gid_path: PathBuf,
+}
+
+impl GidRitualApproveTool {
+    fn new(gid_path: PathBuf) -> Self {
+        Self { gid_path }
+    }
+}
+
+#[async_trait]
+impl Tool for GidRitualApproveTool {
+    fn name(&self) -> &str {
+        "gid_ritual_approve"
+    }
+
+    fn description(&self) -> &str {
+        "Approve, skip, or reject the current ritual phase waiting for approval."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["approve", "skip", "reject"],
+                    "description": "Action to take on the current phase"
+                }
+            },
+            "required": ["action"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        use gid_core::ritual::{RitualState, RitualStatus};
+
+        let action = input["action"].as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing 'action' parameter"))?;
+
+        let state_path = self.gid_path.join("ritual-state.json");
+        if !state_path.exists() {
+            return Ok(ToolResult {
+                output: "No ritual in progress".to_string(),
+                is_error: true,
+            });
+        }
+
+        let content = std::fs::read_to_string(&state_path)?;
+        let state: RitualState = serde_json::from_str(&content)?;
+
+        if !matches!(state.status, RitualStatus::WaitingApproval { .. }) {
+            return Ok(ToolResult {
+                output: format!("Ritual is not waiting for approval (status: {:?})", state.status),
+                is_error: true,
+            });
+        }
+
+        // Write approval command to execution-state.json
+        let cmd_path = self.gid_path.join("execution-state.json");
+        let cmd = serde_json::json!({
+            "command": action,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        });
+        std::fs::write(&cmd_path, serde_json::to_string_pretty(&cmd)?)?;
+
+        Ok(ToolResult {
+            output: format!("Ritual phase {}: {}", action, 
+                if let RitualStatus::WaitingApproval { phase_id, .. } = &state.status { phase_id } else { "unknown" }),
+            is_error: false,
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GID Execute Stats Tool — Show execution statistics from log
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct GidStatsTool {
+    gid_path: PathBuf,
+}
+
+impl GidStatsTool {
+    fn new(gid_path: PathBuf) -> Self {
+        Self { gid_path }
+    }
+}
+
+#[async_trait]
+impl Tool for GidStatsTool {
+    fn name(&self) -> &str {
+        "gid_stats"
+    }
+
+    fn description(&self) -> &str {
+        "Show execution statistics from the most recent harness run (tasks completed/failed, tokens, duration)."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {}
+        })
+    }
+
+    async fn execute(&self, _input: Value) -> anyhow::Result<ToolResult> {
+        use gid_core::harness::TelemetryLogger;
+
+        let logger = TelemetryLogger::new(&self.gid_path);
+        let stats = logger.compute_stats()?;
+
+        let output = format!(
+            "Execution Stats:\n\
+             Tasks completed: {}\n\
+             Tasks failed: {}\n\
+             Total turns: {}\n\
+             Avg turns/task: {:.1}\n\
+             Total tokens: {}\n\
+             Duration: {}s",
+            stats.tasks_completed,
+            stats.tasks_failed,
+            stats.total_turns,
+            stats.avg_turns_per_task,
+            stats.total_tokens,
+            stats.duration_secs,
+        );
+
+        Ok(ToolResult {
+            output,
             is_error: false,
         })
     }
