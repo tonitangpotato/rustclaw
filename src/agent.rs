@@ -1284,6 +1284,16 @@ CRITICAL CONSTRAINTS:
         &self.sessions
     }
 
+    /// Get the workspace root path.
+    pub fn workspace_root(&self) -> &std::path::Path {
+        &self.workspace.root
+    }
+
+    /// Get a shared reference to the LLM client.
+    pub fn llm_client(&self) -> Arc<RwLock<Box<dyn LlmClient>>> {
+        self.llm_client.clone()
+    }
+
     /// Get embedding service status (for dashboard).
     pub fn embedding_status(&self) -> String {
         self.memory.embedding_status()

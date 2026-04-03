@@ -605,12 +605,222 @@ Choose a model:", current),
                     /new — Start a new conversation\n\
                     /stop — Stop current task\n\
                     /sessions — List recent active sessions\n\
+                    /ritual — Run a development ritual (multi-phase pipeline)\n\
                     /help — Show this help";
                 self.send_message(chat_id, msg, None).await?;
                 Ok(true)
             }
+            "/ritual" => {
+                let arg = text.strip_prefix("/ritual").unwrap_or("").trim();
+                // Strip @botname if present (e.g. /ritual@mybotname task)
+                let arg = if arg.starts_with('@') {
+                    arg.split_once(' ').map(|(_, rest)| rest.trim()).unwrap_or("")
+                } else {
+                    arg
+                };
+                self.handle_ritual_command(chat_id, arg).await?;
+                Ok(true)
+            }
             _ => Ok(false), // Not a known command, pass to agent
         }
+    }
+
+    /// Handle /ritual subcommands.
+    async fn handle_ritual_command(&self, chat_id: i64, arg: &str) -> anyhow::Result<()> {
+        use gid_core::ritual::{
+            V2State as RitualState, V2Event as RitualEvent,
+        };
+
+        let project_root = self.runner.workspace_root().to_path_buf();
+        let llm_client = self.runner.llm_client();
+
+        match arg {
+            "status" => {
+                let state_path = project_root.join(".gid/ritual-state.json");
+                if state_path.exists() {
+                    match std::fs::read_to_string(&state_path)
+                        .ok()
+                        .and_then(|s| serde_json::from_str::<RitualState>(&s).ok())
+                    {
+                        Some(state) => {
+                            let msg = format!(
+                                "📊 **Ritual Status**\n\n\
+                                 • Phase: `{}`\n\
+                                 • Task: {}\n\
+                                 • Verify retries: {}\n\
+                                 • Started: {}\n\
+                                 • Updated: {}",
+                                state.phase.display_name(),
+                                if state.task.is_empty() { "(none)" } else { &state.task },
+                                state.verify_retries,
+                                state.started_at.format("%Y-%m-%d %H:%M:%S UTC"),
+                                state.updated_at.format("%Y-%m-%d %H:%M:%S UTC"),
+                            );
+                            self.send_message(chat_id, &msg, None).await?;
+                        }
+                        None => {
+                            self.send_message(chat_id, "⚠️ Could not parse ritual state.", None).await?;
+                        }
+                    }
+                } else {
+                    self.send_message(chat_id, "No active ritual.", None).await?;
+                }
+            }
+            "cancel" => {
+                let runner = crate::ritual_runner::RitualRunner::new(
+                    project_root,
+                    llm_client,
+                    self.make_notify_fn(chat_id),
+                );
+                let state = runner.load_state()?;
+                if state.phase.is_terminal() || state.phase == gid_core::ritual::V2Phase::Idle {
+                    self.send_message(chat_id, "No active ritual to cancel.", None).await?;
+                } else {
+                    match runner.send_event(RitualEvent::UserCancel).await {
+                        Ok(state) => {
+                            self.send_message(
+                                chat_id,
+                                &format!("🛑 Ritual cancelled (was in {} phase).", state.phase.display_name()),
+                                None,
+                            ).await?;
+                        }
+                        Err(e) => {
+                            self.send_message(chat_id, &format!("❌ Cancel failed: {}", e), None).await?;
+                        }
+                    }
+                }
+            }
+            "retry" => {
+                let runner = crate::ritual_runner::RitualRunner::new(
+                    project_root,
+                    llm_client,
+                    self.make_notify_fn(chat_id),
+                );
+                let state = runner.load_state()?;
+                if state.phase != gid_core::ritual::V2Phase::Escalated {
+                    self.send_message(
+                        chat_id,
+                        "⚠️ Retry is only available when ritual is in Escalated state.",
+                        None,
+                    ).await?;
+                } else {
+                    self.send_message(chat_id, "🔄 Retrying ritual...", None).await?;
+                    let bot = self.clone();
+                    tokio::spawn(async move {
+                        match runner.send_event(RitualEvent::UserRetry).await {
+                            Ok(state) => {
+                                let msg = format!("Ritual retry finished in {} phase.", state.phase.display_name());
+                                let _ = bot.send_message(chat_id, &msg, None).await;
+                            }
+                            Err(e) => {
+                                let _ = bot.send_message(chat_id, &format!("❌ Retry failed: {}", e), None).await;
+                            }
+                        }
+                    });
+                }
+            }
+            "skip" => {
+                let runner = crate::ritual_runner::RitualRunner::new(
+                    project_root,
+                    llm_client,
+                    self.make_notify_fn(chat_id),
+                );
+                let state = runner.load_state()?;
+                if state.phase.is_terminal() || state.phase == gid_core::ritual::V2Phase::Idle {
+                    self.send_message(chat_id, "No active ritual to skip phase.", None).await?;
+                } else {
+                    self.send_message(
+                        chat_id,
+                        &format!("⏭️ Skipping {} phase...", state.phase.display_name()),
+                        None,
+                    ).await?;
+                    let bot = self.clone();
+                    tokio::spawn(async move {
+                        match runner.send_event(RitualEvent::UserSkipPhase).await {
+                            Ok(state) => {
+                                let msg = format!("Skipped to {} phase.", state.phase.display_name());
+                                let _ = bot.send_message(chat_id, &msg, None).await;
+                            }
+                            Err(e) => {
+                                let _ = bot.send_message(chat_id, &format!("❌ Skip failed: {}", e), None).await;
+                            }
+                        }
+                    });
+                }
+            }
+            "" => {
+                self.send_message(
+                    chat_id,
+                    "🔧 **Ritual Commands**\n\n\
+                     `/ritual <task>` — Start a new development ritual\n\
+                     `/ritual status` — Show current ritual status\n\
+                     `/ritual cancel` — Cancel the active ritual\n\
+                     `/ritual retry` — Retry from escalated state\n\
+                     `/ritual skip` — Skip current phase",
+                    None,
+                ).await?;
+            }
+            task => {
+                // Start new ritual with task description
+                self.send_message(chat_id, &format!("🚀 Starting ritual: \"{}\"", task), None).await?;
+                let bot = self.clone();
+                let task_string = task.to_string();
+                tokio::spawn(async move {
+                    let runner = crate::ritual_runner::RitualRunner::new(
+                        project_root,
+                        llm_client,
+                        bot.make_notify_fn(chat_id),
+                    );
+                    match runner.start(task_string).await {
+                        Ok(state) => {
+                            // Save final state
+                            if let Err(e) = runner.save_state(&state) {
+                                tracing::error!("Failed to save final ritual state: {}", e);
+                            }
+                            let status_msg = match state.phase {
+                                gid_core::ritual::V2Phase::Done => {
+                                    "✅ Ritual completed successfully!".to_string()
+                                }
+                                gid_core::ritual::V2Phase::Escalated => {
+                                    format!(
+                                        "⚠️ Ritual escalated. Use `/ritual retry` to retry.\nError: {}",
+                                        state.error_context.as_deref().unwrap_or("unknown")
+                                    )
+                                }
+                                gid_core::ritual::V2Phase::Cancelled => {
+                                    "🛑 Ritual was cancelled.".to_string()
+                                }
+                                other => {
+                                    format!("Ritual ended in unexpected phase: {}", other.display_name())
+                                }
+                            };
+                            let _ = bot.send_message(chat_id, &status_msg, None).await;
+                        }
+                        Err(e) => {
+                            let _ = bot.send_message(
+                                chat_id,
+                                &format!("❌ Ritual failed: {}", e),
+                                None,
+                            ).await;
+                        }
+                    }
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Create a notify callback that sends Telegram messages to the given chat.
+    fn make_notify_fn(&self, chat_id: i64) -> crate::ritual_runner::NotifyFn {
+        let bot = self.clone();
+        Arc::new(move |msg: String| {
+            let bot = bot.clone();
+            Box::pin(async move {
+                if let Err(e) = bot.send_message(chat_id, &msg, None).await {
+                    tracing::error!("Failed to send ritual notification: {}", e);
+                }
+            })
+        })
     }
 
     /// Handle an inline button callback query.

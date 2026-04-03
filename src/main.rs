@@ -32,6 +32,7 @@ mod events;mod stt;
 mod message_queue;
 mod text_utils;
 mod ritual_adapter;
+mod ritual_runner;
 mod tools;
 pub mod tool_stats;
 mod tts;

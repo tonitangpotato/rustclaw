@@ -1,0 +1,489 @@
+//! Ritual Runner — bridges gid-core's v2 pure function state machine with RustClaw's infrastructure.
+//!
+//! Drives the transition loop: transition(state, event) → (new_state, actions),
+//! executing each action via the appropriate executor (LLM, shell, filesystem, Telegram).
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use anyhow::Result;
+use gid_core::ritual::{
+    V2State as RitualState, V2Phase as RitualPhase, V2Event as RitualEvent,
+    V2Action as RitualAction, V2ProjectState as ProjectState,
+    ImplementStrategy, transition, truncate,
+};
+
+/// Callback for sending notifications (Telegram messages).
+pub type NotifyFn = Arc<dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
+
+/// Executes the ritual state machine loop, bridging gid-core's pure transitions
+/// with RustClaw's IO capabilities (LLM, shell, filesystem, notifications).
+pub struct RitualRunner {
+    project_root: PathBuf,
+    state_path: PathBuf,
+    llm_client: Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>,
+    notify: NotifyFn,
+}
+
+impl RitualRunner {
+    pub fn new(
+        project_root: PathBuf,
+        llm_client: Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>,
+        notify: NotifyFn,
+    ) -> Self {
+        let state_path = project_root.join(".gid/ritual-state.json");
+        Self {
+            project_root,
+            state_path,
+            llm_client,
+            notify,
+        }
+    }
+
+    /// Load persisted state or create new Idle state.
+    pub fn load_state(&self) -> Result<RitualState> {
+        if self.state_path.exists() {
+            let data = std::fs::read_to_string(&self.state_path)?;
+            let state: RitualState = serde_json::from_str(&data)?;
+            Ok(state)
+        } else {
+            Ok(RitualState::new())
+        }
+    }
+
+    /// Save state to disk.
+    pub fn save_state(&self, state: &RitualState) -> Result<()> {
+        if let Some(parent) = self.state_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let data = serde_json::to_string_pretty(state)?;
+        std::fs::write(&self.state_path, data)?;
+        Ok(())
+    }
+
+    /// Start a new ritual with a task description.
+    pub async fn start(&self, task: String) -> Result<RitualState> {
+        let state = RitualState::new();
+        let event = RitualEvent::Start { task };
+        self.run_loop(state, event).await
+    }
+
+    /// Send a user event (Cancel, Retry, SkipPhase) to the current ritual.
+    pub async fn send_event(&self, event: RitualEvent) -> Result<RitualState> {
+        let state = self.load_state()?;
+        self.run_loop(state, event).await
+    }
+
+    /// The core loop: transition → execute actions → get event → repeat until terminal.
+    async fn run_loop(&self, mut state: RitualState, mut event: RitualEvent) -> Result<RitualState> {
+        loop {
+            let (new_state, actions) = transition(&state, event);
+            state = new_state;
+
+            // Execute fire-and-forget actions first (Notify, SaveState, UpdateGraph, Cleanup)
+            self.execute_fire_and_forget_with_state(&actions, &state).await;
+
+            if state.phase.is_terminal() {
+                break;
+            }
+
+            // Execute the single event-producing action
+            event = match self.execute_event_producing(&actions).await {
+                Ok(evt) => evt,
+                Err(e) => RitualEvent::SkillFailed {
+                    phase: state.phase.display_name().to_string(),
+                    error: format!("Executor error: {}", e),
+                },
+            };
+        }
+        Ok(state)
+    }
+
+    /// Execute fire-and-forget actions (Notify, SaveState, UpdateGraph, Cleanup).
+    async fn execute_fire_and_forget_with_state(&self, actions: &[RitualAction], state: &RitualState) {
+        for action in actions {
+            match action {
+                RitualAction::Notify { message } => {
+                    let notify = self.notify.clone();
+                    let msg = message.clone();
+                    notify(msg).await;
+                }
+                RitualAction::SaveState => {
+                    if let Err(e) = self.save_state(state) {
+                        tracing::error!("Failed to save ritual state: {}", e);
+                    }
+                }
+                RitualAction::UpdateGraph { description } => {
+                    self.update_graph(description).await;
+                }
+                RitualAction::Cleanup => {
+                    self.cleanup().await;
+                }
+                _ => {} // Event-producing actions handled separately
+            }
+        }
+    }
+
+    /// Find and execute the single event-producing action from the action list.
+    async fn execute_event_producing(&self, actions: &[RitualAction]) -> Result<RitualEvent> {
+        for action in actions {
+            match action {
+                RitualAction::DetectProject => {
+                    return self.detect_project().await;
+                }
+                RitualAction::RunSkill { name, context } => {
+                    return self.run_skill(name, context).await;
+                }
+                RitualAction::RunShell { command } => {
+                    return self.run_shell(command).await;
+                }
+                RitualAction::RunPlanning => {
+                    return self.run_planning().await;
+                }
+                RitualAction::RunHarness { tasks } => {
+                    tracing::warn!(
+                        "RunHarness not yet implemented ({} tasks), falling back to SingleLlm",
+                        tasks.len()
+                    );
+                    let context = format!(
+                        "Implement all of the following tasks:\n{}",
+                        tasks.iter().enumerate()
+                            .map(|(i, t)| format!("{}. {}", i + 1, t))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    );
+                    return self.run_skill("implement", &context).await;
+                }
+                _ => {} // Fire-and-forget handled above
+            }
+        }
+        Err(anyhow::anyhow!("No event-producing action found in actions"))
+    }
+
+    /// Scan filesystem to detect project state.
+    async fn detect_project(&self) -> Result<RitualEvent> {
+        let root = &self.project_root;
+
+        let has_design = root.join("DESIGN.md").exists()
+            || root.join(".gid/DESIGN.md").exists();
+
+        let has_graph = root.join(".gid/graph.yml").exists()
+            || root.join("graph.yml").exists();
+
+        let has_cargo = root.join("Cargo.toml").exists();
+        let has_package_json = root.join("package.json").exists();
+        let has_pyproject = root.join("pyproject.toml").exists();
+
+        let has_source = root.join("src").exists()
+            || root.join("lib").exists()
+            || root.join("app").exists();
+
+        let has_tests = root.join("tests").exists()
+            || root.join("test").exists()
+            || root.join("spec").exists();
+
+        // Detect language
+        let language = if has_cargo {
+            Some("rust".to_string())
+        } else if has_package_json {
+            Some("typescript".to_string())
+        } else if has_pyproject {
+            Some("python".to_string())
+        } else {
+            None
+        };
+
+        // Count source files (basic scan)
+        let source_file_count = if root.join("src").exists() {
+            count_files_recursive(&root.join("src")).await
+        } else {
+            0
+        };
+
+        // Detect verify command
+        let verify_command = if has_cargo {
+            Some("cargo build && cargo test".to_string())
+        } else if has_package_json {
+            Some("npm test".to_string())
+        } else if has_pyproject {
+            Some("python -m pytest".to_string())
+        } else {
+            None
+        };
+
+        let project_state = ProjectState {
+            has_design,
+            has_graph,
+            has_source,
+            has_tests,
+            language,
+            source_file_count,
+            verify_command,
+        };
+
+        tracing::info!(
+            "Project detected: design={}, graph={}, source={} ({} files), tests={}, lang={:?}",
+            project_state.has_design,
+            project_state.has_graph,
+            project_state.has_source,
+            project_state.source_file_count,
+            project_state.has_tests,
+            project_state.language,
+        );
+
+        Ok(RitualEvent::ProjectDetected(project_state))
+    }
+
+    /// Run a skill phase using the RitualLlmAdapter.
+    async fn run_skill(&self, name: &str, context: &str) -> Result<RitualEvent> {
+        use crate::ritual_adapter::RitualLlmAdapter;
+        use gid_core::ritual::llm::{LlmClient as GidLlmClient, ToolDefinition};
+
+        let adapter = RitualLlmAdapter::new(self.llm_client.clone());
+        let gid_client: Arc<dyn GidLlmClient> = adapter.into_arc();
+
+        // Build skill prompt from name and context
+        let skill_prompt = format!(
+            "# Skill: {}\n\n## Task\n{}\n\n## Instructions\n\
+             Execute the '{}' skill. Use the provided tools to read existing files, \
+             write new or modified files, and run commands as needed.\n\
+             Work in the project directory. Be thorough and complete.",
+            name, context, name
+        );
+
+        // Define standard tools for skill execution
+        let tools = vec![
+            ToolDefinition {
+                name: "Read".into(),
+                description: "Read a file from disk".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "File path relative to project root" }
+                    },
+                    "required": ["path"]
+                }),
+            },
+            ToolDefinition {
+                name: "Write".into(),
+                description: "Write content to a file".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "File path relative to project root" },
+                        "content": { "type": "string", "description": "File content to write" }
+                    },
+                    "required": ["path", "content"]
+                }),
+            },
+            ToolDefinition {
+                name: "Bash".into(),
+                description: "Run a bash command".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "description": "Bash command to execute" }
+                    },
+                    "required": ["command"]
+                }),
+            },
+        ];
+
+        let result = gid_client.run_skill(
+            &skill_prompt,
+            tools,
+            "sonnet",
+            &self.project_root,
+        ).await;
+
+        match result {
+            Ok(skill_result) => {
+                tracing::info!(
+                    "Skill '{}' completed: {} tool calls, {} tokens",
+                    name, skill_result.tool_calls_made, skill_result.tokens_used
+                );
+                Ok(RitualEvent::SkillCompleted {
+                    phase: name.to_string(),
+                    artifacts: skill_result.artifacts_created.iter().map(|p| p.display().to_string()).collect(),
+                })
+            }
+            Err(e) => {
+                tracing::error!("Skill '{}' failed: {}", name, e);
+                Ok(RitualEvent::SkillFailed {
+                    phase: name.to_string(),
+                    error: format!("{}", e),
+                })
+            }
+        }
+    }
+
+    /// Run a shell command (for verify phase).
+    async fn run_shell(&self, command: &str) -> Result<RitualEvent> {
+        tracing::info!("Running shell command: {}", command);
+
+        let output = tokio::process::Command::new("bash")
+            .arg("-c")
+            .arg(command)
+            .current_dir(&self.project_root)
+            .output()
+            .await?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let exit_code = output.status.code().unwrap_or(-1);
+
+        tracing::info!("Shell exit code: {}", exit_code);
+
+        if output.status.success() {
+            Ok(RitualEvent::ShellCompleted {
+                stdout: truncate(&stdout, 2000),
+                exit_code,
+            })
+        } else {
+            Ok(RitualEvent::ShellFailed {
+                stderr: truncate(&format!("{}\n{}", stderr, stdout), 2000),
+                exit_code,
+            })
+        }
+    }
+
+    /// Run planning phase — LLM decides SingleLlm vs MultiAgent strategy.
+    async fn run_planning(&self) -> Result<RitualEvent> {
+        use crate::ritual_adapter::RitualLlmAdapter;
+        use gid_core::ritual::llm::{LlmClient as GidLlmClient, ToolDefinition};
+
+        let adapter = RitualLlmAdapter::new(self.llm_client.clone());
+        let gid_client: Arc<dyn GidLlmClient> = adapter.into_arc();
+
+        // Read DESIGN.md if available for planning context
+        let design_content = match tokio::fs::read_to_string(
+            self.project_root.join("DESIGN.md")
+        ).await {
+            Ok(content) => content,
+            Err(_) => {
+                tokio::fs::read_to_string(self.project_root.join(".gid/DESIGN.md"))
+                    .await
+                    .unwrap_or_default()
+            }
+        };
+
+        let planning_prompt = format!(
+            "# Implementation Planning\n\n\
+             Analyze the following design and decide on an implementation strategy.\n\n\
+             ## Design\n{}\n\n\
+             ## Instructions\n\
+             Based on the design, decide:\n\
+             1. **SingleLlm**: One agent implements everything sequentially (for small/medium tasks)\n\
+             2. **MultiAgent**: Split into parallel tasks (for large tasks with independent components)\n\n\
+             Respond with ONLY a JSON object:\n\
+             - For single: `{{\"strategy\": \"single\"}}`\n\
+             - For multi: `{{\"strategy\": \"multi\", \"tasks\": [\"task1\", \"task2\", ...]}}`",
+            truncate(&design_content, 4000)
+        );
+
+        let tools = vec![
+            ToolDefinition {
+                name: "Read".into(),
+                description: "Read a file from disk".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "File path relative to project root" }
+                    },
+                    "required": ["path"]
+                }),
+            },
+        ];
+
+        let result = gid_client.run_skill(
+            &planning_prompt,
+            tools,
+            "sonnet",
+            &self.project_root,
+        ).await;
+
+        match result {
+            Ok(skill_result) => {
+                // Try to parse the LLM output as a strategy decision
+                let strategy = parse_strategy(&skill_result.output);
+                tracing::info!("Planning decided strategy: {:?}", strategy);
+                Ok(RitualEvent::PlanDecided(strategy))
+            }
+            Err(e) => {
+                tracing::warn!("Planning failed, defaulting to SingleLlm: {}", e);
+                Ok(RitualEvent::PlanDecided(ImplementStrategy::SingleLlm))
+            }
+        }
+    }
+
+    /// Best-effort update of graph nodes.
+    async fn update_graph(&self, description: &str) {
+        let graph_path = self.project_root.join(".gid/graph.yml");
+        if graph_path.exists() {
+            tracing::info!("UpdateGraph (best-effort): {}", truncate(description, 100));
+            // Best-effort: just log for now. Full graph update would require
+            // parsing graph.yml and updating node statuses.
+        } else {
+            tracing::debug!("No graph.yml found, skipping UpdateGraph");
+        }
+    }
+
+    /// Clean up ritual artifacts.
+    async fn cleanup(&self) {
+        // Remove ritual state file
+        if self.state_path.exists() {
+            if let Err(e) = tokio::fs::remove_file(&self.state_path).await {
+                tracing::warn!("Failed to remove ritual-state.json: {}", e);
+            }
+        }
+        // Remove ritual.yml if present
+        let ritual_yml = self.project_root.join(".gid/ritual.yml");
+        if ritual_yml.exists() {
+            if let Err(e) = tokio::fs::remove_file(&ritual_yml).await {
+                tracing::warn!("Failed to remove ritual.yml: {}", e);
+            }
+        }
+    }
+}
+
+/// Parse the LLM output to determine implementation strategy.
+fn parse_strategy(output: &str) -> ImplementStrategy {
+    // Try to find JSON in the output
+    if let Some(start) = output.find('{') {
+        if let Some(end) = output.rfind('}') {
+            let json_str = &output[start..=end];
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
+                if val.get("strategy").and_then(|s| s.as_str()) == Some("multi") {
+                    if let Some(tasks) = val.get("tasks").and_then(|t| t.as_array()) {
+                        let task_list: Vec<String> = tasks
+                            .iter()
+                            .filter_map(|t| t.as_str().map(|s| s.to_string()))
+                            .collect();
+                        if !task_list.is_empty() {
+                            return ImplementStrategy::MultiAgent { tasks: task_list };
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ImplementStrategy::SingleLlm
+}
+
+/// Recursively count files in a directory.
+async fn count_files_recursive(dir: &Path) -> usize {
+    let mut count = 0;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        if let Ok(mut entries) = tokio::fs::read_dir(&current).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
