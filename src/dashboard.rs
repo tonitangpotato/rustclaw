@@ -26,6 +26,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::agent::AgentRunner;
 use crate::config::Config;
+use crate::llm::ContentBlock;
 
 /// Dashboard configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -485,6 +486,95 @@ async fn get_dashboard_html() -> impl IntoResponse {
     Html(DASHBOARD_HTML)
 }
 
+/// Export a session as a markdown file.
+async fn export_session(
+    State(state): State<Arc<DashboardState>>,
+    Path(key): Path<String>,
+) -> Response {
+    // Strip trailing "/export" if the wildcard captured it
+    let key = key.strip_suffix("/export").unwrap_or(&key);
+
+    let session = match state.runner.sessions().get_session(key).await {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Session '{}' not found", key),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let message_count = session.messages.len();
+    let total_tokens = session.total_tokens;
+
+    let mut md = String::new();
+    md.push_str(&format!("# Session Export: {}\n\n", key));
+    md.push_str(&format!("Exported: {}  \n", now));
+    md.push_str(&format!("Messages: {}  \n", message_count));
+    md.push_str(&format!("Total Tokens: {}  \n", total_tokens));
+    md.push_str(&format!("Created: {}  \n", session.created_at));
+    md.push_str(&format!("Updated: {}  \n\n---\n\n", session.updated_at));
+
+    for msg in &session.messages {
+        let role = match msg.role.as_str() {
+            "user" => "User",
+            "assistant" => "Assistant",
+            "system" => "System",
+            other => other,
+        };
+
+        md.push_str(&format!("## {}\n\n", role));
+
+        for block in &msg.content {
+            match block {
+                ContentBlock::Text { text } => {
+                    md.push_str(text);
+                    md.push_str("\n\n");
+                }
+                ContentBlock::ToolUse { id: _, name, input } => {
+                    md.push_str(&format!("**Tool Use:** `{}`\n\n", name));
+                    let json_str = serde_json::to_string_pretty(input)
+                        .unwrap_or_else(|_| input.to_string());
+                    md.push_str(&format!("```json\n{}\n```\n\n", json_str));
+                }
+                ContentBlock::ToolResult { tool_use_id: _, content, .. } => {
+                    let truncated = if content.len() > 500 {
+                        let end = content.floor_char_boundary(500);
+                        format!("{}…", &content[..end])
+                    } else {
+                        content.clone()
+                    };
+                    md.push_str(&format!("> Result: {}\n\n", truncated));
+                }
+            }
+        }
+    }
+
+    // Sanitize key for filename: replace non-alphanumeric (except dash/underscore) with underscore
+    let sanitized_key: String = key
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+
+    let filename = format!("session-{}.md", sanitized_key);
+
+    (
+        [
+            (header::CONTENT_TYPE, "text/markdown; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                &format!("attachment; filename=\"{}\"", filename),
+            ),
+        ],
+        md,
+    )
+        .into_response()
+}
+
 // ─── Dashboard HTML ──────────────────────────────────────────
 
 const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
@@ -806,7 +896,7 @@ pub async fn start_dashboard(
         .route("/message", post(post_message))
         .route("/tokens", get(get_tokens))
         .route("/orchestrator", get(get_orchestrator))
-;
+        .route("/sessions/{*key}/export", get(export_session));
 
     let app = Router::new()
         .route("/", get(get_dashboard_html))
