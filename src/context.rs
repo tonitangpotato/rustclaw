@@ -54,9 +54,15 @@ impl MessageContext {
             let msg_id_str = reply.message_id
                 .map(|id| format!(" (msg_id:{})", id))
                 .unwrap_or_default();
+            // Include sender username if available for better identification
+            let username_str = reply.sender_username
+                .as_ref()
+                .map(|u| format!(" (@{})", u))
+                .unwrap_or_default();
             parts.push(format!(
-                "Replying to {}{}:\n> {}",
+                "Replying to {}{}{}:\n> {}",
                 quoted_sender,
+                username_str,
                 msg_id_str,
                 reply.text.lines().collect::<Vec<_>>().join("\n> ")
             ));
@@ -85,7 +91,122 @@ pub enum ChatType {
 pub struct QuotedMessage {
     pub text: String,
     pub sender_name: Option<String>,
+    pub sender_username: Option<String>,
+    pub sender_id: Option<String>,
     pub message_id: Option<i64>,
+}
+
+impl QuotedMessage {
+    /// Parse a QuotedMessage from a Telegram `reply_to_message` JSON value.
+    ///
+    /// Extracts text, sender info, and message ID from the Telegram message object.
+    /// Handles text messages, captions, stickers, photos, voice, documents, video, and audio.
+    pub fn from_telegram_json(msg: &serde_json::Value) -> Option<Self> {
+        let text = msg.get("text")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
+        let caption = msg.get("caption")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // Use text if available, otherwise caption (for photos/documents with captions)
+        let content = if !text.is_empty() {
+            text
+        } else if !caption.is_empty() {
+            caption
+        } else {
+            // Describe non-text message types
+            if msg.get("sticker").is_some() {
+                let emoji = msg["sticker"]["emoji"].as_str().unwrap_or("🏷");
+                format!("[Sticker: {}]", emoji)
+            } else if msg.get("photo").is_some() {
+                "[Photo]".to_string()
+            } else if msg.get("voice").is_some() {
+                "[Voice message]".to_string()
+            } else if msg.get("document").is_some() {
+                let name = msg["document"]["file_name"].as_str().unwrap_or("file");
+                format!("[Document: {}]", name)
+            } else if msg.get("video").is_some() {
+                "[Video]".to_string()
+            } else if msg.get("audio").is_some() {
+                "[Audio]".to_string()
+            } else {
+                "[Message]".to_string()
+            }
+        };
+
+        let sender_name = msg.get("from")
+            .and_then(|f| f.get("first_name"))
+            .and_then(|n| n.as_str())
+            .map(String::from);
+
+        let sender_username = msg.get("from")
+            .and_then(|f| f.get("username"))
+            .and_then(|u| u.as_str())
+            .map(String::from);
+
+        let sender_id = msg.get("from")
+            .and_then(|f| f.get("id"))
+            .and_then(|id| id.as_i64())
+            .map(|id| id.to_string());
+
+        let message_id = msg.get("message_id")
+            .and_then(|id| id.as_i64());
+
+        Some(QuotedMessage {
+            text: content,
+            sender_name,
+            sender_username,
+            sender_id,
+            message_id,
+        })
+    }
+
+    /// Parse a QuotedMessage from a Discord referenced message.
+    ///
+    /// Takes the author name, author ID, message content, and message ID
+    /// from a Discord message struct.
+    pub fn from_discord(
+        author_name: &str,
+        author_id: &str,
+        content: &str,
+        message_id: u64,
+    ) -> Self {
+        // Discord content may be empty if it's an attachment/embed-only message
+        let text = if content.is_empty() {
+            "[Attachment/Embed]".to_string()
+        } else {
+            content.to_string()
+        };
+
+        QuotedMessage {
+            text,
+            sender_name: Some(author_name.to_string()),
+            sender_username: None,
+            sender_id: Some(author_id.to_string()),
+            message_id: Some(message_id as i64),
+        }
+    }
+
+    /// Return a copy with text truncated to a maximum number of characters.
+    /// Useful for keeping context prefixes concise.
+    pub fn truncated(&self, max_chars: usize) -> Self {
+        let truncated_text = if self.text.len() > max_chars {
+            let boundary = self.text.floor_char_boundary(max_chars);
+            format!("{}…", &self.text[..boundary])
+        } else {
+            self.text.clone()
+        };
+        QuotedMessage {
+            text: truncated_text,
+            sender_name: self.sender_name.clone(),
+            sender_username: self.sender_username.clone(),
+            sender_id: self.sender_id.clone(),
+            message_id: self.message_id,
+        }
+    }
 }
 
 /// Channel capability declaration — set once at startup.
@@ -309,6 +430,8 @@ mod tests {
             reply_to: Some(QuotedMessage {
                 text: "Original message".into(),
                 sender_name: Some("bot".into()),
+                sender_username: None,
+                sender_id: None,
                 message_id: Some(999),
             }),
             ..Default::default()
@@ -316,6 +439,41 @@ mod tests {
         let prefix = ctx.format_prefix("telegram");
         assert!(prefix.contains("Replying to bot (msg_id:999):"));
         assert!(prefix.contains("> Original message"));
+    }
+
+    #[test]
+    fn test_message_context_prefix_with_reply_username() {
+        let ctx = MessageContext {
+            sender_name: Some("potato".into()),
+            reply_to: Some(QuotedMessage {
+                text: "Hello there".into(),
+                sender_name: Some("bot".into()),
+                sender_username: Some("mybot".into()),
+                sender_id: None,
+                message_id: Some(42),
+            }),
+            ..Default::default()
+        };
+        let prefix = ctx.format_prefix("telegram");
+        assert!(prefix.contains("Replying to bot (@mybot) (msg_id:42):"));
+        assert!(prefix.contains("> Hello there"));
+    }
+
+    #[test]
+    fn test_message_context_prefix_reply_multiline() {
+        let ctx = MessageContext {
+            sender_name: Some("user".into()),
+            reply_to: Some(QuotedMessage {
+                text: "Line one\nLine two\nLine three".into(),
+                sender_name: Some("other".into()),
+                sender_username: None,
+                sender_id: None,
+                message_id: None,
+            }),
+            ..Default::default()
+        };
+        let prefix = ctx.format_prefix("discord");
+        assert!(prefix.contains("> Line one\n> Line two\n> Line three"));
     }
 
     #[test]
@@ -350,5 +508,256 @@ mod tests {
         assert!(s.contains("RustClaw v0.1.0"));
         assert!(s.contains("Darwin"));
         assert!(s.contains("claude-opus-4-6"));
+    }
+
+    // ===== QuotedMessage::from_telegram_json tests =====
+
+    #[test]
+    fn test_telegram_reply_text_message() {
+        let json = serde_json::json!({
+            "message_id": 123,
+            "from": {
+                "id": 456,
+                "first_name": "Alice",
+                "username": "alice123"
+            },
+            "text": "Hello, world!"
+        });
+        let quoted = QuotedMessage::from_telegram_json(&json).unwrap();
+        assert_eq!(quoted.text, "Hello, world!");
+        assert_eq!(quoted.sender_name.as_deref(), Some("Alice"));
+        assert_eq!(quoted.sender_username.as_deref(), Some("alice123"));
+        assert_eq!(quoted.sender_id.as_deref(), Some("456"));
+        assert_eq!(quoted.message_id, Some(123));
+    }
+
+    #[test]
+    fn test_telegram_reply_caption_message() {
+        let json = serde_json::json!({
+            "message_id": 789,
+            "from": { "id": 100, "first_name": "Bob" },
+            "photo": [{"file_id": "abc"}],
+            "caption": "Look at this photo!"
+        });
+        let quoted = QuotedMessage::from_telegram_json(&json).unwrap();
+        assert_eq!(quoted.text, "Look at this photo!");
+        assert_eq!(quoted.sender_name.as_deref(), Some("Bob"));
+        assert_eq!(quoted.sender_username, None);
+    }
+
+    #[test]
+    fn test_telegram_reply_sticker() {
+        let json = serde_json::json!({
+            "message_id": 50,
+            "from": { "id": 1, "first_name": "Eve" },
+            "sticker": { "emoji": "😂", "file_id": "stk1" }
+        });
+        let quoted = QuotedMessage::from_telegram_json(&json).unwrap();
+        assert_eq!(quoted.text, "[Sticker: 😂]");
+    }
+
+    #[test]
+    fn test_telegram_reply_photo_no_caption() {
+        let json = serde_json::json!({
+            "message_id": 51,
+            "from": { "id": 2, "first_name": "Frank" },
+            "photo": [{"file_id": "ph1"}]
+        });
+        let quoted = QuotedMessage::from_telegram_json(&json).unwrap();
+        assert_eq!(quoted.text, "[Photo]");
+    }
+
+    #[test]
+    fn test_telegram_reply_voice() {
+        let json = serde_json::json!({
+            "message_id": 52,
+            "from": { "id": 3, "first_name": "Grace" },
+            "voice": { "file_id": "v1", "duration": 5 }
+        });
+        let quoted = QuotedMessage::from_telegram_json(&json).unwrap();
+        assert_eq!(quoted.text, "[Voice message]");
+    }
+
+    #[test]
+    fn test_telegram_reply_document() {
+        let json = serde_json::json!({
+            "message_id": 53,
+            "from": { "id": 4, "first_name": "Hank" },
+            "document": { "file_id": "d1", "file_name": "report.pdf" }
+        });
+        let quoted = QuotedMessage::from_telegram_json(&json).unwrap();
+        assert_eq!(quoted.text, "[Document: report.pdf]");
+    }
+
+    #[test]
+    fn test_telegram_reply_video() {
+        let json = serde_json::json!({
+            "message_id": 54,
+            "from": { "id": 5, "first_name": "Ivy" },
+            "video": { "file_id": "vid1" }
+        });
+        let quoted = QuotedMessage::from_telegram_json(&json).unwrap();
+        assert_eq!(quoted.text, "[Video]");
+    }
+
+    #[test]
+    fn test_telegram_reply_audio() {
+        let json = serde_json::json!({
+            "message_id": 55,
+            "from": { "id": 6, "first_name": "Jack" },
+            "audio": { "file_id": "aud1" }
+        });
+        let quoted = QuotedMessage::from_telegram_json(&json).unwrap();
+        assert_eq!(quoted.text, "[Audio]");
+    }
+
+    #[test]
+    fn test_telegram_reply_empty_message() {
+        let json = serde_json::json!({
+            "message_id": 56,
+            "from": { "id": 7, "first_name": "Kim" }
+        });
+        let quoted = QuotedMessage::from_telegram_json(&json).unwrap();
+        assert_eq!(quoted.text, "[Message]");
+    }
+
+    #[test]
+    fn test_telegram_reply_no_sender() {
+        let json = serde_json::json!({
+            "message_id": 57,
+            "text": "Anonymous message"
+        });
+        let quoted = QuotedMessage::from_telegram_json(&json).unwrap();
+        assert_eq!(quoted.text, "Anonymous message");
+        assert!(quoted.sender_name.is_none());
+        assert!(quoted.sender_username.is_none());
+        assert!(quoted.sender_id.is_none());
+    }
+
+    // ===== QuotedMessage::from_discord tests =====
+
+    #[test]
+    fn test_discord_reply_text() {
+        let quoted = QuotedMessage::from_discord("Alice", "12345", "Hello Discord!", 99999);
+        assert_eq!(quoted.text, "Hello Discord!");
+        assert_eq!(quoted.sender_name.as_deref(), Some("Alice"));
+        assert_eq!(quoted.sender_id.as_deref(), Some("12345"));
+        assert_eq!(quoted.message_id, Some(99999));
+    }
+
+    #[test]
+    fn test_discord_reply_empty_content() {
+        let quoted = QuotedMessage::from_discord("Bob", "67890", "", 11111);
+        assert_eq!(quoted.text, "[Attachment/Embed]");
+        assert_eq!(quoted.sender_name.as_deref(), Some("Bob"));
+    }
+
+    // ===== QuotedMessage::truncated tests =====
+
+    #[test]
+    fn test_truncated_short_text() {
+        let q = QuotedMessage {
+            text: "Short".into(),
+            sender_name: Some("A".into()),
+            sender_username: None,
+            sender_id: None,
+            message_id: Some(1),
+        };
+        let t = q.truncated(100);
+        assert_eq!(t.text, "Short");
+    }
+
+    #[test]
+    fn test_truncated_long_text() {
+        let q = QuotedMessage {
+            text: "This is a very long message that should be truncated for brevity in the context prefix".into(),
+            sender_name: Some("A".into()),
+            sender_username: None,
+            sender_id: None,
+            message_id: Some(1),
+        };
+        let t = q.truncated(20);
+        assert!(t.text.len() <= 24); // 20 chars + "…" (3 bytes)
+        assert!(t.text.ends_with('…'));
+    }
+
+    // ===== Full integration: Telegram reply-to context formatting =====
+
+    #[test]
+    fn test_telegram_reply_context_integration() {
+        let reply_json = serde_json::json!({
+            "message_id": 100,
+            "from": {
+                "id": 200,
+                "first_name": "RustClaw",
+                "username": "rustclawbot"
+            },
+            "text": "Here's the info you requested"
+        });
+        let quoted = QuotedMessage::from_telegram_json(&reply_json).unwrap();
+        let ctx = MessageContext {
+            sender_name: Some("potato".into()),
+            sender_username: Some("potatosoupup".into()),
+            sender_id: Some("300".into()),
+            chat_type: ChatType::Group {
+                title: Some("Dev Chat".into()),
+            },
+            reply_to: Some(quoted),
+            message_id: Some(101),
+        };
+        let prefix = ctx.format_prefix("telegram");
+        assert!(prefix.contains("TELEGRAM potato (@potatosoupup) id:300"));
+        assert!(prefix.contains("in group \"Dev Chat\""));
+        assert!(prefix.contains("Replying to RustClaw (@rustclawbot) (msg_id:100):"));
+        assert!(prefix.contains("> Here's the info you requested"));
+    }
+
+    // ===== Full integration: Discord reply-to context formatting =====
+
+    #[test]
+    fn test_discord_reply_context_integration() {
+        let quoted = QuotedMessage::from_discord(
+            "SomeUser",
+            "111222333",
+            "What's the weather like?",
+            444555666,
+        );
+        let ctx = MessageContext {
+            sender_name: Some("Replier".into()),
+            sender_id: Some("777888999".into()),
+            chat_type: ChatType::Group {
+                title: Some("General".into()),
+            },
+            reply_to: Some(quoted),
+            message_id: Some(444555667),
+            ..Default::default()
+        };
+        let prefix = ctx.format_prefix("discord");
+        assert!(prefix.contains("DISCORD Replier id:777888999"));
+        assert!(prefix.contains("in group \"General\""));
+        assert!(prefix.contains("Replying to SomeUser (msg_id:444555666):"));
+        assert!(prefix.contains("> What's the weather like?"));
+    }
+
+    #[test]
+    fn test_discord_reply_context_dm() {
+        let quoted = QuotedMessage::from_discord(
+            "BotName",
+            "100200300",
+            "I can help with that!",
+            900800700,
+        );
+        let ctx = MessageContext {
+            sender_name: Some("User".into()),
+            sender_id: Some("400500600".into()),
+            chat_type: ChatType::Direct,
+            reply_to: Some(quoted),
+            ..Default::default()
+        };
+        let prefix = ctx.format_prefix("discord");
+        assert!(prefix.contains("DISCORD User id:400500600"));
+        assert!(!prefix.contains("in group"));
+        assert!(prefix.contains("Replying to BotName (msg_id:900800700):"));
+        assert!(prefix.contains("> I can help with that!"));
     }
 }

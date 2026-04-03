@@ -312,13 +312,8 @@ impl TelegramBot {
             } else {
                 crate::context::ChatType::Direct
             },
-            reply_to: message.get("reply_to_message").and_then(|m| {
-                Some(crate::context::QuotedMessage {
-                    text: m["text"].as_str().unwrap_or("").to_string(),
-                    sender_name: m["from"]["first_name"].as_str().map(String::from),
-                    message_id: m["message_id"].as_i64(),
-                })
-            }),
+            reply_to: message.get("reply_to_message")
+                .and_then(crate::context::QuotedMessage::from_telegram_json),
             message_id,
         };
 
