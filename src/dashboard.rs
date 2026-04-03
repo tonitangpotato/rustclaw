@@ -485,6 +485,93 @@ async fn get_dashboard_html() -> impl IntoResponse {
     Html(DASHBOARD_HTML)
 }
 
+/// Export a session as a downloadable Markdown file.
+async fn export_session(
+    Path(session_id): Path<String>,
+    State(state): State<Arc<DashboardState>>,
+) -> Response {
+    let Some(session) = state.runner.sessions().get_session(&session_id).await else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Session '{}' not found", session_id),
+            }),
+        )
+            .into_response();
+    };
+
+    // Build markdown content
+    let mut md = String::new();
+    md.push_str(&format!("# Session Export: {}\n\n", session.key));
+    md.push_str(&format!("- **Created**: {}\n", session.created_at));
+    md.push_str(&format!("- **Updated**: {}\n", session.updated_at));
+    md.push_str(&format!(
+        "- **Channel**: {}\n",
+        session.channel.as_deref().unwrap_or("unknown")
+    ));
+    md.push_str(&format!("- **Total Tokens**: {}\n", session.total_tokens));
+    md.push_str(&format!("- **Messages**: {}\n", session.messages.len()));
+    md.push_str("\n---\n");
+
+    for msg in &session.messages {
+        let role_header = match msg.role.as_str() {
+            "user" => "## 🧑 User".to_string(),
+            "assistant" => "## 🤖 Assistant".to_string(),
+            "system" => "## ⚙️ System".to_string(),
+            other => format!("## {}", other),
+        };
+
+        md.push_str(&format!("\n{}\n\n", role_header));
+
+        for block in &msg.content {
+            match block {
+                crate::llm::ContentBlock::Text { text } => {
+                    md.push_str(text);
+                    md.push('\n');
+                }
+                crate::llm::ContentBlock::ToolUse { name, .. } => {
+                    md.push_str(&format!("**Tool Call**: {}\n", name));
+                }
+                crate::llm::ContentBlock::ToolResult { content, .. } => {
+                    let truncated = if content.len() > 500 {
+                        let end = content.floor_char_boundary(500);
+                        format!("{}…", &content[..end])
+                    } else {
+                        content.clone()
+                    };
+                    md.push_str(&format!("**Tool Result**: {}\n", truncated));
+                }
+            }
+        }
+
+        md.push_str("\n---\n");
+    }
+
+    // Sanitize session id for filename
+    let safe_id: String = session_id
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+
+    let filename = format!("session-{}.md", safe_id);
+
+    (
+        StatusCode::OK,
+        [
+            (
+                header::CONTENT_TYPE,
+                "text/markdown; charset=utf-8".to_string(),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", filename),
+            ),
+        ],
+        md,
+    )
+        .into_response()
+}
+
 // ─── Dashboard HTML ──────────────────────────────────────────
 
 const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
@@ -803,7 +890,8 @@ pub async fn start_dashboard(
         .route("/config", get(get_config))
         .route("/message", post(post_message))
         .route("/tokens", get(get_tokens))
-        .route("/orchestrator", get(get_orchestrator));
+        .route("/orchestrator", get(get_orchestrator))
+        .route("/sessions/{id}/export", get(export_session));
 
     let app = Router::new()
         .route("/", get(get_dashboard_html))

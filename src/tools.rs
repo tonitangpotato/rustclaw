@@ -3671,7 +3671,7 @@ impl Tool for GidRitualInitTool {
             });
         }
 
-        // Find template file via registry
+        // Find template via registry
         let registry = TemplateRegistry::new();
         let templates = registry.list().unwrap_or_default();
         let found = templates.iter().find(|t| t.name == template_name);
@@ -3687,8 +3687,33 @@ impl Tool for GidRitualInitTool {
         let template_info = found.unwrap();
         let phase_count = template_info.phase_count;
 
-        // Copy template file to ritual.yml
-        std::fs::copy(&template_info.source, &ritual_path)?;
+        // If source is a real file, copy it; otherwise serialize built-in template
+        let source = &template_info.source;
+        if source.exists() {
+            std::fs::copy(source, &ritual_path)?;
+        } else {
+            // Built-in template — use gid CLI to init (most reliable)
+            let output = std::process::Command::new("gid")
+                .args(["ritual", "init", "--template", template_name])
+                .current_dir(self.gid_path.parent().unwrap_or(&self.gid_path))
+                .output();
+            match output {
+                Ok(o) if o.status.success() => {}
+                Ok(o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    return Ok(ToolResult {
+                        output: format!("gid ritual init failed: {}", stderr),
+                        is_error: true,
+                    });
+                }
+                Err(e) => {
+                    return Ok(ToolResult {
+                        output: format!("Failed to run gid CLI: {}", e),
+                        is_error: true,
+                    });
+                }
+            }
+        }
 
         Ok(ToolResult {
             output: format!(
