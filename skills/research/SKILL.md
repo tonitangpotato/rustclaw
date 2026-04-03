@@ -132,6 +132,20 @@ Which approach to use and why.
 
 ## Research Process
 
+### Step 0: Codebase Discovery (MANDATORY before any research)
+```
+→ find . -type f \( -name "*.rs" -o -name "*.ts" -o -name "*.py" \) | xargs grep -li "{feature_keywords}" 2>/dev/null
+→ find . -path "*/packages/*" -o -path "*/crates/*" -o -path "*/src/*" | grep -i "{feature_name}"
+→ Check if implementation already exists under a different name/path
+→ If files found:
+   - Read them to understand what's already built
+   - Document in research output: "## Existing Implementation" section
+   - Assess: is this task already done? partially done? needs different approach?
+   - If fully implemented: STOP research, report "already exists at {path}"
+→ If nothing found: proceed to Step 1
+```
+**Why this step exists**: We once reimplemented a TypeScript MCP server in Rust because we didn't check `packages/mcp/` first. This step is free (no LLM, just grep) and prevents wasted work.
+
 ### Step 1: Competitive Analysis
 ```
 → web_search("{feature} alternatives")
