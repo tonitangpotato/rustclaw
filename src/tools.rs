@@ -64,11 +64,17 @@ pub trait Tool: Send + Sync {
 /// Registry that manages all available tools.
 pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
+    llm_client: Option<Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        Self { tools: Vec::new() }
+        Self { tools: Vec::new(), llm_client: None }
+    }
+
+    /// Set the LLM client for ritual tools.
+    pub fn set_llm_client(&mut self, client: Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>) {
+        self.llm_client = Some(client);
     }
 
     /// Register all default tools.
@@ -187,7 +193,12 @@ impl ToolRegistry {
         self.register(Box::new(GidDesignTool::new(graph.clone(), gid_pathbuf.clone())));
         self.register(Box::new(GidPlanTool::new(graph.clone())));
         self.register(Box::new(GidRitualInitTool::new(gid_pathbuf.clone())));
-        self.register(Box::new(GidRitualRunTool::new(gid_pathbuf.clone())));
+        let ritual_run = if let Some(ref client) = self.llm_client {
+            GidRitualRunTool::new(gid_pathbuf.clone()).with_llm_client(client.clone())
+        } else {
+            GidRitualRunTool::new(gid_pathbuf.clone())
+        };
+        self.register(Box::new(ritual_run));
         self.register(Box::new(GidRitualStatusTool::new(gid_pathbuf.clone())));
         self.register(Box::new(GidRitualApproveTool::new(gid_pathbuf.clone())));
         self.register(Box::new(GidRitualSkipTool::new(gid_pathbuf.clone())));
@@ -3717,11 +3728,17 @@ impl Tool for GidRitualInitTool {
 
 struct GidRitualRunTool {
     gid_path: PathBuf,
+    llm_client: Option<Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>>,
 }
 
 impl GidRitualRunTool {
     fn new(gid_path: PathBuf) -> Self {
-        Self { gid_path }
+        Self { gid_path, llm_client: None }
+    }
+
+    fn with_llm_client(mut self, client: Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>) -> Self {
+        self.llm_client = Some(client);
+        self
     }
 }
 
@@ -3764,10 +3781,14 @@ impl Tool for GidRitualRunTool {
             .unwrap_or(&self.gid_path)
             .to_path_buf();
 
-        // Use gid-core's ApiLlmClient (shared with gid-cli, uses agentctl-auth)
-        let llm_client: Option<Arc<dyn gid_core::ritual::llm::LlmClient>> =
+        // Use RustClaw's own LLM client (OAuth refresh, 11-retry, rate limit handling)
+        let llm_client: Option<Arc<dyn gid_core::ritual::llm::LlmClient>> = if let Some(ref rc_client) = self.llm_client {
+            Some(crate::ritual_adapter::RitualLlmAdapter::new(rc_client.clone()).into_arc())
+        } else {
+            // Fallback to agentctl-auth for standalone use
             gid_core::ritual::ApiLlmClient::try_from_pool()
-                .map(|c| c.into_arc() as Arc<dyn gid_core::ritual::llm::LlmClient>);
+                .map(|c| c.into_arc() as Arc<dyn gid_core::ritual::llm::LlmClient>)
+        };
 
         // Check for existing state (resume) or create new
         let state_path = self.gid_path.join("ritual-state.json");

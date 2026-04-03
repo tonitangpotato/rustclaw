@@ -578,12 +578,37 @@ Choose a model:", current),
                 }
                 Ok(true)
             }
+            "/sessions" => {
+                let summaries = self.runner.sessions().list_session_summaries(5).await;
+                if summaries.is_empty() {
+                    self.send_message(chat_id, "No active sessions.", None).await?;
+                } else {
+                    let mut msg = String::from("📋 **Recent Sessions**\n\n");
+                    for (i, s) in summaries.iter().enumerate() {
+                        let time = if s.updated_at.len() >= 19 {
+                            &s.updated_at[..19]
+                        } else {
+                            &s.updated_at
+                        };
+                        msg.push_str(&format!(
+                            "{}. `{}`\n   📨 {} msgs • 🕐 {}\n\n",
+                            i + 1,
+                            s.key,
+                            s.message_count,
+                            time.replace('T', " "),
+                        ));
+                    }
+                    self.send_message(chat_id, msg.trim(), None).await?;
+                }
+                Ok(true)
+            }
             "/help" => {
                 let msg = "🐾 **RustClaw Commands**\n\n\
                     /model — Show or switch AI model\n\
                     /status — Show bot status\n\
                     /new — Start a new conversation\n\
                     /stop — Stop current task\n\
+                    /sessions — List recent active sessions\n\
                     /help — Show this help";
                 self.send_message(chat_id, msg, None).await?;
                 Ok(true)

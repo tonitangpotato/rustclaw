@@ -66,6 +66,8 @@ pub struct AgentRunner {
     pub message_queues: crate::message_queue::SessionQueues,
     /// Per-session cancellation tokens for /stop support
     cancellation_tokens: Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio_util::sync::CancellationToken>>>,
+    /// Tool call frequency and duration statistics
+    pub tool_stats: Arc<crate::tool_stats::ToolStatsTracker>,
 }
 
 /// Persist large tool results to disk, replacing content with preview.
@@ -148,6 +150,7 @@ impl AgentRunner {
             voice_mode,
             message_queues: crate::message_queue::SessionQueues::new(),
             cancellation_tokens: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            tool_stats: Arc::new(crate::tool_stats::ToolStatsTracker::new()),
         }
     }
 
@@ -793,7 +796,10 @@ CRITICAL CONSTRAINTS:
             }
 
             // Execute tool with sandbox enforcement
+            let _tool_start = std::time::Instant::now();
             let result = self.execute_tool_sandboxed(&tc.name, tc.input.clone()).await;
+            let _tool_duration_ms = _tool_start.elapsed().as_millis() as u64;
+            self.tool_stats.record(&tc.name, _tool_duration_ms);
 
             match result {
                 Ok(tool_result) => {

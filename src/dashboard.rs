@@ -341,6 +341,13 @@ async fn get_tokens(State(_state): State<Arc<DashboardState>>) -> impl IntoRespo
     })
 }
 
+/// Get tool call statistics (top 10 by call count).
+async fn get_tool_stats(
+    State(state): State<Arc<DashboardState>>,
+) -> Json<Vec<crate::tool_stats::ToolStatSnapshot>> {
+    Json(state.runner.tool_stats.top_n(10))
+}
+
 /// Get orchestrator status.
 async fn get_orchestrator(State(state): State<Arc<DashboardState>>) -> impl IntoResponse {
     if !state.config.orchestrator.enabled {
@@ -677,6 +684,16 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
             </div>
         </div>
 
+        <!-- Tool Stats Panel -->
+        <div class="mt-6 bg-gray-800 rounded-lg border border-gray-700">
+            <div class="p-4 border-b border-gray-700">
+                <h2 class="text-lg font-semibold">🔧 Top Tools</h2>
+            </div>
+            <div id="tool-stats-list" class="p-4 space-y-2 max-h-64 overflow-y-auto">
+                <div class="text-gray-500 text-sm">No tool calls recorded</div>
+            </div>
+        </div>
+
         <!-- Message Injection -->
         <div class="mt-6 bg-gray-800 rounded-lg border border-gray-700">
             <div class="p-4 border-b border-gray-700">
@@ -855,16 +872,43 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
             resultDiv.classList.remove('hidden');
         }
 
+        async function updateToolStats() {
+            try {
+                const data = await fetchApi('/tool-stats');
+                const container = document.getElementById('tool-stats-list');
+                if (data.length === 0) {
+                    container.innerHTML = '<div class="text-gray-500 text-sm">No tool calls recorded</div>';
+                } else {
+                    container.innerHTML = data.map((t, i) => `
+                        <div class="flex items-center justify-between bg-gray-700 rounded p-2 text-sm">
+                            <div class="flex items-center gap-2">
+                                <span class="text-gray-500 w-5 text-right">${i + 1}.</span>
+                                <span class="font-mono text-claw-500">${t.name}</span>
+                            </div>
+                            <div class="flex gap-4 text-gray-400">
+                                <span>${t.call_count} calls</span>
+                                <span>${t.avg_duration_ms.toFixed(0)}ms avg</span>
+                            </div>
+                        </div>
+                    `).join('');
+                }
+            } catch (e) {
+                console.error('Failed to fetch tool stats:', e);
+            }
+        }
+
         // Initial load
         updateStatus();
         updateSessions();
         updateAgents();
+        updateToolStats();
         loadConfig();
 
         // Refresh every 5 seconds
         setInterval(updateStatus, 5000);
         setInterval(updateSessions, 10000);
         setInterval(updateAgents, 10000);
+        setInterval(updateToolStats, 10000);
     </script>
 </body>
 </html>
@@ -900,7 +944,8 @@ pub async fn start_dashboard(
         .route("/message", post(post_message))
         .route("/tokens", get(get_tokens))
         .route("/orchestrator", get(get_orchestrator))
-        .route("/sessions/{id}/export", get(export_session));
+        .route("/sessions/{id}/export", get(export_session))
+        .route("/tool-stats", get(get_tool_stats));
 
     let app = Router::new()
         .route("/", get(get_dashboard_html))

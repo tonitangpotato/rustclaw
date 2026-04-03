@@ -435,6 +435,52 @@ impl SessionManager {
             self.sessions.read().await.len()
         }
     }
+
+    /// List lightweight session summaries (no message content loaded).
+    pub async fn list_session_summaries(&self, limit: usize) -> Vec<SessionSummary> {
+        if let Some(pool) = &self.pool {
+            match sqlx::query_as::<_, SessionSummaryRow>(
+                "SELECT key, updated_at, total_tokens, channel, user_id,
+                        json_array_length(messages) as msg_count
+                 FROM sessions ORDER BY updated_at DESC LIMIT ?",
+            )
+            .bind(limit as i64)
+            .fetch_all(pool)
+            .await
+            {
+                Ok(rows) => rows
+                    .into_iter()
+                    .map(|row| SessionSummary {
+                        key: row.key,
+                        updated_at: row.updated_at,
+                        message_count: row.msg_count.max(0) as usize,
+                        total_tokens: row.total_tokens.max(0) as u64,
+                        channel: row.channel,
+                    })
+                    .collect(),
+                Err(e) => {
+                    tracing::error!("Failed to list session summaries: {}", e);
+                    vec![]
+                }
+            }
+        } else {
+            // In-memory fallback
+            let sessions = self.sessions.read().await;
+            let mut summaries: Vec<SessionSummary> = sessions
+                .values()
+                .map(|s| SessionSummary {
+                    key: s.key.clone(),
+                    updated_at: s.updated_at.clone(),
+                    message_count: s.messages.len(),
+                    total_tokens: s.total_tokens,
+                    channel: s.channel.clone(),
+                })
+                .collect();
+            summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            summaries.truncate(limit);
+            summaries
+        }
+    }
 }
 
 /// Summarize old messages using the LLM.
@@ -478,6 +524,26 @@ pub async fn summarize_old_messages(
     session.apply_summary(&summary, count);
 
     Ok(true)
+}
+
+/// Lightweight session summary (no message content).
+#[derive(Debug, Clone)]
+pub struct SessionSummary {
+    pub key: String,
+    pub updated_at: String,
+    pub message_count: usize,
+    pub total_tokens: u64,
+    pub channel: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct SessionSummaryRow {
+    key: String,
+    updated_at: String,
+    total_tokens: i64,
+    channel: Option<String>,
+    user_id: Option<String>,
+    msg_count: i32,
 }
 
 /// SQLite row mapping.

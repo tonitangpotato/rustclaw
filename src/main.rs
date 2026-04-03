@@ -31,7 +31,9 @@ mod tool_result_storage;mod skills;
 mod events;mod stt;
 mod message_queue;
 mod text_utils;
+mod ritual_adapter;
 mod tools;
+pub mod tool_stats;
 mod tts;
 mod user_model;
 mod voice_mode;
@@ -222,6 +224,13 @@ async fn main() -> anyhow::Result<()> {
                 tools::ToolRegistry::with_defaults_and_memory(&workspace_dir, mem.clone(), &cfg)
                     .with_spawn_specialist(runner_handle.clone(), None)
             };
+
+            // Create LLM client Arc for sharing with ritual tools
+            let shared_llm = {
+                let client = crate::llm::create_client(&cfg.llm).expect("Failed to create LLM client for ritual");
+                std::sync::Arc::new(tokio::sync::RwLock::new(client))
+            };
+            tools.set_llm_client(shared_llm);
 
             // Register GID tools if enabled
             if cfg.gid.enabled {
