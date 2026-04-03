@@ -167,12 +167,33 @@ impl SkillToolHandler {
                 tokio::fs::write(&full, content).await?;
                 Ok(format!("Written {} bytes to {}", content.len(), path))
             }
+            "Edit" => {
+                let path = input.get("path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
+                let old_text = input.get("oldText")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'oldText'"))?;
+                let new_text = input.get("newText")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'newText'"))?;
+                let full = self.working_dir.join(path);
+                let content = tokio::fs::read_to_string(&full).await
+                    .map_err(|e| anyhow::anyhow!("Edit read {}: {}", full.display(), e))?;
+                if let Some(pos) = content.find(old_text) {
+                    let new_content = format!("{}{}{}", &content[..pos], new_text, &content[pos + old_text.len()..]);
+                    tokio::fs::write(&full, &new_content).await?;
+                    Ok(format!("Edited {} ({} chars replaced)", path, old_text.len()))
+                } else {
+                    Err(anyhow::anyhow!("Could not find exact text in {}. The oldText must match exactly including whitespace.", path))
+                }
+            }
             "Bash" => {
                 let command = input.get("command")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow::anyhow!("Missing 'command'"))?;
                 let output = tokio::process::Command::new("bash")
-                    .arg("-c")
+                    .arg("-lc")
                     .arg(command)
                     .current_dir(&self.working_dir)
                     .output()

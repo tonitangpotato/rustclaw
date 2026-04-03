@@ -275,16 +275,19 @@ impl RitualRunner {
             0
         };
 
-        // Detect verify command
-        let verify_command = if has_cargo {
-            Some("cargo build && cargo test".to_string())
-        } else if has_package_json {
-            Some("npm test".to_string())
-        } else if has_pyproject {
-            Some("python -m pytest".to_string())
-        } else {
-            None
-        };
+        // Detect verify command — prefer .gid/config.yml, fallback to language default
+        let gating_config = gid_core::ritual::load_gating_config(root);
+        let verify_command = gating_config.verify_command.or_else(|| {
+            if has_cargo {
+                Some("cargo build && cargo test".to_string())
+            } else if has_package_json {
+                Some("npm test".to_string())
+            } else if has_pyproject {
+                Some("python -m pytest".to_string())
+            } else {
+                None
+            }
+        });
 
         let project_state = ProjectState {
             has_design,
@@ -340,14 +343,27 @@ impl RitualRunner {
             },
             ToolDefinition {
                 name: "Write".into(),
-                description: "Write content to a file".into(),
+                description: "Write entire content to a file (creates or overwrites)".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "File path relative to project root" },
-                        "content": { "type": "string", "description": "File content to write" }
+                        "content": { "type": "string", "description": "Full file content to write" }
                     },
                     "required": ["path", "content"]
+                }),
+            },
+            ToolDefinition {
+                name: "Edit".into(),
+                description: "Replace exact text in a file. oldText must match exactly (including whitespace). Use for precise, surgical edits instead of rewriting entire files.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "File path relative to project root" },
+                        "oldText": { "type": "string", "description": "Exact text to find and replace" },
+                        "newText": { "type": "string", "description": "New text to replace with" }
+                    },
+                    "required": ["path", "oldText", "newText"]
                 }),
             },
             ToolDefinition {
@@ -496,22 +512,11 @@ impl RitualRunner {
              Respond with ONLY a JSON object:\n\
              - For single: `{{\"strategy\": \"single\"}}`\n\
              - For multi: `{{\"strategy\": \"multi\", \"tasks\": [\"task1\", \"task2\", ...]}}`",
-            truncate(&design_content, 4000)
+            truncate(&design_content, 15000)
         );
 
-        let tools = vec![
-            ToolDefinition {
-                name: "Read".into(),
-                description: "Read a file from disk".into(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "File path relative to project root" }
-                    },
-                    "required": ["path"]
-                }),
-            },
-        ];
+        // No tools needed for planning — DESIGN.md content is already in the prompt
+        let tools = vec![];
 
         let result = gid_client.run_skill(
             &planning_prompt,
