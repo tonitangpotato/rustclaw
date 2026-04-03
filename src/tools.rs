@@ -267,24 +267,41 @@ impl ToolRegistry {
         if let Some(ref workspace) = self.workspace_root {
             let config = gid_core::ritual::load_gating_config(workspace);
             if config.enabled {
-                // Check if a ritual is active (state file exists and phase is non-terminal)
                 let ritual_active = self.is_ritual_active(workspace);
 
                 let file_path = input["path"].as_str()
                     .or_else(|| input["file_path"].as_str());
                 let command = input["command"].as_str();
 
+                tracing::debug!(
+                    tool = name,
+                    path = ?file_path,
+                    command = ?command,
+                    ritual_active = ritual_active,
+                    "Tool gating check"
+                );
+
                 let result = gid_core::ritual::check_gating(
                     &config, name, file_path, command, ritual_active,
                 );
 
-                if let gid_core::ritual::GatingResult::Blocked { reason } = result {
-                    tracing::info!(tool = name, "Tool gating blocked operation");
-                    return Ok(ToolResult {
-                        output: reason,
-                        is_error: true,
-                    });
+                match &result {
+                    gid_core::ritual::GatingResult::Blocked { reason } => {
+                        tracing::warn!(tool = name, path = ?file_path, "Tool gating BLOCKED: {}", reason);
+                        return Ok(ToolResult {
+                            output: reason.clone(),
+                            is_error: true,
+                        });
+                    }
+                    gid_core::ritual::GatingResult::Allowed => {
+                        // Only log for write tools to avoid noise
+                        if matches!(name, "write_file" | "edit_file" | "exec") {
+                            tracing::debug!(tool = name, path = ?file_path, "Tool gating ALLOWED");
+                        }
+                    }
                 }
+            } else {
+                tracing::debug!("Tool gating DISABLED in config");
             }
         }
 

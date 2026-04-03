@@ -654,7 +654,7 @@ Choose a model:", current),
                         .and_then(|s| serde_json::from_str::<RitualState>(&s).ok())
                     {
                         Some(state) => {
-                            let msg = format!(
+                            let mut msg = format!(
                                 "📊 **Ritual Status**\n\n\
                                  • Phase: `{}`\n\
                                  • Task: {}\n\
@@ -667,6 +667,20 @@ Choose a model:", current),
                                 state.started_at.format("%Y-%m-%d %H:%M:%S UTC"),
                                 state.updated_at.format("%Y-%m-%d %H:%M:%S UTC"),
                             );
+                            // Add per-phase token usage
+                            if !state.phase_tokens.is_empty() {
+                                let total: u64 = state.phase_tokens.values().sum();
+                                msg.push_str(&format!("\n\n🪙 **Tokens Used** (total: {})", format_token_count(total)));
+                                // Sort phases logically
+                                let phase_order = ["initializing", "design", "planning", "graph", "implement", "verify"];
+                                let mut entries: Vec<(&String, &u64)> = state.phase_tokens.iter().collect();
+                                entries.sort_by_key(|(k, _)| {
+                                    phase_order.iter().position(|p| *p == k.as_str()).unwrap_or(99)
+                                });
+                                for (phase, tokens) in &entries {
+                                    msg.push_str(&format!("\n  • {} → {}", phase, format_token_count(**tokens)));
+                                }
+                            }
                             self.send_message(chat_id, &msg, None).await?;
                         }
                         None => {
@@ -1495,6 +1509,17 @@ Choose a model:", current),
                 }
             }
         }
+    }
+}
+
+/// Format token count with K/M suffix for readability.
+fn format_token_count(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}K", tokens as f64 / 1_000.0)
+    } else {
+        format!("{}", tokens)
     }
 }
 

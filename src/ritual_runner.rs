@@ -103,13 +103,19 @@ impl RitualRunner {
             }
 
             // Execute the single event-producing action
-            event = match self.execute_event_producing(&actions).await {
-                Ok(evt) => evt,
-                Err(e) => RitualEvent::SkillFailed {
+            let (evt, tokens_used) = match self.execute_event_producing(&actions).await {
+                Ok(pair) => pair,
+                Err(e) => (RitualEvent::SkillFailed {
                     phase: state.phase.display_name().to_string(),
                     error: format!("Executor error: {}", e),
-                },
+                }, 0),
             };
+            // Record tokens used by this phase
+            if tokens_used > 0 {
+                let phase_name = state.phase.display_name().to_lowercase();
+                state = state.add_phase_tokens(&phase_name, tokens_used);
+            }
+            event = evt;
         }
         Ok(state)
     }
@@ -158,20 +164,23 @@ impl RitualRunner {
 
         let msg = match &state.phase {
             gid_core::ritual::V2Phase::Done => {
+                let token_summary = format_phase_tokens(&state.phase_tokens);
                 format!(
                     "✅ **Ritual complete!**\n\n\
                      📋 Task: {}\n\
                      ⏱ Duration: {}\n\
                      🔄 Transitions: {}\n\
+                     {}\
                      {}",
                     truncate(&state.task, 200),
                     duration_str,
                     phases_traversed,
                     if state.verify_retries > 0 {
-                        format!("🔧 Verify retries: {}", state.verify_retries)
+                        format!("🔧 Verify retries: {}\n", state.verify_retries)
                     } else {
                         String::new()
                     },
+                    token_summary,
                 )
             }
             gid_core::ritual::V2Phase::Escalated => {
@@ -179,13 +188,15 @@ impl RitualRunner {
                 let failed_phase = state.failed_phase.as_ref()
                     .map(|p| p.display_name())
                     .unwrap_or("unknown");
+                let token_summary = format_phase_tokens(&state.phase_tokens);
                 format!(
                     "🚨 **Ritual escalated — needs human intervention**\n\n\
                      📋 Task: {}\n\
                      💥 Failed in: {} phase\n\
                      ❌ Error: {}\n\
                      ⏱ Duration: {}\n\
-                     🔄 Transitions: {}\n\n\
+                     🔄 Transitions: {}\n\
+                     {}\n\n\
                      **Next steps:**\n\
                      • `/ritual retry` — retry the failed phase\n\
                      • `/ritual skip` — skip to the next phase\n\
@@ -195,6 +206,7 @@ impl RitualRunner {
                     truncate(error, 300),
                     duration_str,
                     phases_traversed,
+                    token_summary,
                 )
             }
             gid_core::ritual::V2Phase::Cancelled => {
@@ -214,17 +226,18 @@ impl RitualRunner {
     }
 
     /// Find and execute the single event-producing action from the action list.
-    async fn execute_event_producing(&self, actions: &[RitualAction]) -> Result<RitualEvent> {
+    /// Returns (event, tokens_used) — tokens_used is 0 for non-LLM actions.
+    async fn execute_event_producing(&self, actions: &[RitualAction]) -> Result<(RitualEvent, u64)> {
         for action in actions {
             match action {
                 RitualAction::DetectProject => {
-                    return self.detect_project().await;
+                    return self.detect_project().await.map(|e| (e, 0));
                 }
                 RitualAction::RunSkill { name, context } => {
                     return self.run_skill(name, context).await;
                 }
                 RitualAction::RunShell { command } => {
-                    return self.run_shell(command).await;
+                    return self.run_shell(command).await.map(|e| (e, 0));
                 }
                 RitualAction::RunPlanning => {
                     return self.run_planning().await;
@@ -327,7 +340,7 @@ impl RitualRunner {
     }
 
     /// Run a skill phase using the RitualLlmAdapter.
-    async fn run_skill(&self, name: &str, context: &str) -> Result<RitualEvent> {
+    async fn run_skill(&self, name: &str, context: &str) -> Result<(RitualEvent, u64)> {
         use crate::ritual_adapter::RitualLlmAdapter;
         use gid_core::ritual::llm::{LlmClient as GidLlmClient, ToolDefinition};
 
@@ -408,21 +421,22 @@ impl RitualRunner {
 
         match result {
             Ok(skill_result) => {
+                let tokens = skill_result.tokens_used;
                 tracing::info!(
                     "Skill '{}' completed: {} tool calls, {} tokens",
-                    name, skill_result.tool_calls_made, skill_result.tokens_used
+                    name, skill_result.tool_calls_made, tokens
                 );
-                Ok(RitualEvent::SkillCompleted {
+                Ok((RitualEvent::SkillCompleted {
                     phase: name.to_string(),
                     artifacts: skill_result.artifacts_created.iter().map(|p| p.display().to_string()).collect(),
-                })
+                }, tokens))
             }
             Err(e) => {
                 tracing::error!("Skill '{}' failed: {}", name, e);
-                Ok(RitualEvent::SkillFailed {
+                Ok((RitualEvent::SkillFailed {
                     phase: name.to_string(),
                     error: format!("{}", e),
-                })
+                }, 0))
             }
         }
     }
@@ -502,7 +516,7 @@ impl RitualRunner {
     }
 
     /// Run planning phase — LLM decides SingleLlm vs MultiAgent strategy.
-    async fn run_planning(&self) -> Result<RitualEvent> {
+    async fn run_planning(&self) -> Result<(RitualEvent, u64)> {
         use crate::ritual_adapter::RitualLlmAdapter;
         use gid_core::ritual::llm::{LlmClient as GidLlmClient, ToolDefinition};
 
@@ -547,14 +561,15 @@ impl RitualRunner {
 
         match result {
             Ok(skill_result) => {
+                let tokens = skill_result.tokens_used;
                 // Try to parse the LLM output as a strategy decision
                 let strategy = parse_strategy(&skill_result.output);
                 tracing::info!("Planning decided strategy: {:?}", strategy);
-                Ok(RitualEvent::PlanDecided(strategy))
+                Ok((RitualEvent::PlanDecided(strategy), tokens))
             }
             Err(e) => {
                 tracing::warn!("Planning failed, defaulting to SingleLlm: {}", e);
-                Ok(RitualEvent::PlanDecided(ImplementStrategy::SingleLlm))
+                Ok((RitualEvent::PlanDecided(ImplementStrategy::SingleLlm), 0))
             }
         }
     }
@@ -625,6 +640,40 @@ fn format_duration(d: chrono::TimeDelta) -> String {
         format!("{}m {}s", minutes, seconds)
     } else {
         format!("{}s", seconds)
+    }
+}
+
+/// Format per-phase token usage into a readable string.
+fn format_phase_tokens(phase_tokens: &std::collections::HashMap<String, u64>) -> String {
+    if phase_tokens.is_empty() {
+        return String::new();
+    }
+    // Sort phases in a logical order
+    let phase_order = ["initializing", "design", "planning", "graph", "implement", "verify"];
+    let mut entries: Vec<(&str, u64)> = phase_tokens
+        .iter()
+        .map(|(k, v)| (k.as_str(), *v))
+        .collect();
+    entries.sort_by_key(|(k, _)| {
+        phase_order.iter().position(|p| p == k).unwrap_or(99)
+    });
+
+    let lines: Vec<String> = entries
+        .iter()
+        .map(|(phase, tokens)| format!("  {} → {}", phase, format_tokens(*tokens)))
+        .collect();
+    let total: u64 = phase_tokens.values().sum();
+    format!("🪙 Tokens: {} total\n{}", format_tokens(total), lines.join("\n"))
+}
+
+/// Format token count with K/M suffix for readability.
+fn format_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}K", tokens as f64 / 1_000.0)
+    } else {
+        format!("{}", tokens)
     }
 }
 
