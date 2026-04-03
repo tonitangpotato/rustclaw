@@ -706,9 +706,16 @@ impl LlmClient for AnthropicClient {
         tools: &[ToolDefinition],
         model_override: &str,
     ) -> anyhow::Result<LlmResponse> {
+        // Adjust max_tokens for the overridden model (different models have different limits)
+        let effective_max_tokens = if model_override == self.model {
+            self.max_tokens
+        } else {
+            Self::default_max_tokens(model_override)
+        };
+
         let mut body = serde_json::json!({
             "model": model_override,
-            "max_tokens": self.max_tokens,
+            "max_tokens": effective_max_tokens,
             "system": self.build_system_value(system),
             "messages": serde_json::to_value(messages)?,
         });
