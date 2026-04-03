@@ -5,7 +5,7 @@
 //! - Cron jobs
 //! - Safety/hook settings
 //! - Telegram allowed_users, group_policy, dm_policy
-//! - Orchestrator specialists (add/remove/modify)
+//! - Orchestrator config (specialists, tick_interval, max_concurrent, enabled)
 //!
 //! NOT reloaded (requires restart):
 //! - LLM provider/model/auth
@@ -167,11 +167,23 @@ fn diff_config(old: &Config, new: &Config) -> Vec<String> {
         ));
     }
 
-    // Check orchestrator/specialist changes
+    // Check orchestrator config changes
     if old.orchestrator.enabled != new.orchestrator.enabled {
         changes.push(format!(
             "orchestrator.enabled: {} → {}",
             old.orchestrator.enabled, new.orchestrator.enabled
+        ));
+    }
+    if old.orchestrator.tick_interval != new.orchestrator.tick_interval {
+        changes.push(format!(
+            "orchestrator.tick_interval: {}s → {}s",
+            old.orchestrator.tick_interval, new.orchestrator.tick_interval
+        ));
+    }
+    if old.orchestrator.max_concurrent != new.orchestrator.max_concurrent {
+        changes.push(format!(
+            "orchestrator.max_concurrent: {} → {}",
+            old.orchestrator.max_concurrent, new.orchestrator.max_concurrent
         ));
     }
     if old.orchestrator.specialists.len() != new.orchestrator.specialists.len() {
@@ -180,6 +192,23 @@ fn diff_config(old: &Config, new: &Config) -> Vec<String> {
             old.orchestrator.specialists.len(),
             new.orchestrator.specialists.len()
         ));
+    } else {
+        // Same count — check if any specialist fields changed
+        for (old_spec, new_spec) in old.orchestrator.specialists.iter()
+            .zip(new.orchestrator.specialists.iter())
+        {
+            if old_spec.id != new_spec.id
+                || old_spec.role != new_spec.role
+                || old_spec.model != new_spec.model
+                || old_spec.workspace != new_spec.workspace
+                || old_spec.budget_tokens != new_spec.budget_tokens
+                || old_spec.max_iterations != new_spec.max_iterations
+                || old_spec.name != new_spec.name
+            {
+                changes.push("orchestrator.specialists: config changed".to_string());
+                break;
+            }
+        }
     }
 
     // Check telegram config changes

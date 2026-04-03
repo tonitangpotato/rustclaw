@@ -8,11 +8,6 @@
 //! - Assigns tasks to idle specialists based on role matching
 //! - Specialists work in their own workspace/branch
 //! - CEO merges results when complete
-//!
-//! Hot-reload support:
-//! - Specialists can be added/removed/updated without restart
-//! - tick_interval and max_concurrent are applied on next tick
-//! - Orchestrator can be enabled/disabled dynamically
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -232,7 +227,7 @@ pub struct Orchestrator {
     tasks: HashMap<String, Task>,
     /// In-flight tasks (task_id -> start_time).
     in_flight: HashMap<String, std::time::Instant>,
-    /// Configuration (hot-reloadable).
+    /// Configuration.
     config: OrchestratorConfig,
 }
 
@@ -259,66 +254,6 @@ impl Orchestrator {
         );
 
         orchestrator
-    }
-
-    /// Update orchestrator configuration via hot-reload.
-    ///
-    /// Applies changes to tick_interval, max_concurrent, enabled state,
-    /// and specialist list without restarting the orchestrator.
-    /// Returns a summary of what changed.
-    pub fn update_config(&mut self, new_config: &OrchestratorConfig) -> Vec<String> {
-        let mut changes = Vec::new();
-
-        if self.config.tick_interval != new_config.tick_interval {
-            changes.push(format!(
-                "orchestrator.tick_interval: {}s → {}s",
-                self.config.tick_interval, new_config.tick_interval
-            ));
-            self.config.tick_interval = new_config.tick_interval;
-        }
-
-        if self.config.max_concurrent != new_config.max_concurrent {
-            changes.push(format!(
-                "orchestrator.max_concurrent: {} → {}",
-                self.config.max_concurrent, new_config.max_concurrent
-            ));
-            self.config.max_concurrent = new_config.max_concurrent;
-        }
-
-        if self.config.enabled != new_config.enabled {
-            changes.push(format!(
-                "orchestrator.enabled: {} → {}",
-                self.config.enabled, new_config.enabled
-            ));
-            self.config.enabled = new_config.enabled;
-        }
-
-        // Update specialists
-        update_specialists(self, &new_config.specialists);
-        if self.config.specialists.len() != new_config.specialists.len() {
-            changes.push(format!(
-                "orchestrator.specialists: {} → {}",
-                self.config.specialists.len(), new_config.specialists.len()
-            ));
-        }
-        self.config.specialists = new_config.specialists.clone();
-
-        changes
-    }
-
-    /// Get the current tick interval (may have been hot-reloaded).
-    pub fn tick_interval(&self) -> u64 {
-        self.config.tick_interval
-    }
-
-    /// Get the current max concurrent setting (may have been hot-reloaded).
-    pub fn max_concurrent(&self) -> u32 {
-        self.config.max_concurrent
-    }
-
-    /// Check if the orchestrator is currently enabled.
-    pub fn is_enabled(&self) -> bool {
-        self.config.enabled
     }
 
     /// Add a specialist agent.
@@ -635,61 +570,26 @@ pub fn create_orchestrator(config: OrchestratorConfig) -> SharedOrchestrator {
     Arc::new(RwLock::new(Orchestrator::new(config)))
 }
 
-/// Start the orchestrator tick loop with hot-reload support.
-///
-/// The loop reads `tick_interval` and `enabled` from the orchestrator on each
-/// iteration, so config changes applied via hot-reload take effect on the next tick.
+/// Start the orchestrator tick loop.
 pub async fn start_orchestrator_loop(
     orchestrator: SharedOrchestrator,
     runner: Arc<AgentRunner>,
-    initial_tick_interval_secs: u64,
+    tick_interval_secs: u64,
 ) {
-    if initial_tick_interval_secs == 0 {
+    if tick_interval_secs == 0 {
         tracing::info!("Orchestrator tick loop disabled (interval=0)");
         return;
     }
 
     tracing::info!(
-        "Starting orchestrator tick loop (initial interval: {}s)",
-        initial_tick_interval_secs
+        "Starting orchestrator tick loop (interval: {}s)",
+        tick_interval_secs
     );
 
-    let mut current_interval = initial_tick_interval_secs;
+    let interval = std::time::Duration::from_secs(tick_interval_secs);
 
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(current_interval)).await;
-
-        // Read the latest config values from the orchestrator (may have been hot-reloaded)
-        let (is_enabled, new_interval) = {
-            let orch = orchestrator.read().await;
-            (orch.is_enabled(), orch.tick_interval())
-        };
-
-        // Update tick interval if it changed via hot-reload
-        if new_interval != current_interval {
-            tracing::info!(
-                "Orchestrator tick interval updated via hot-reload: {}s → {}s",
-                current_interval, new_interval
-            );
-            current_interval = new_interval;
-        }
-
-        // Handle tick_interval of 0 (pause the loop)
-        if current_interval == 0 {
-            tracing::info!("Orchestrator tick loop paused (interval=0), waiting for config change...");
-            // Sleep briefly and re-check — avoids busy loop while waiting for config change
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            // Re-read interval
-            let orch = orchestrator.read().await;
-            current_interval = orch.tick_interval();
-            continue;
-        }
-
-        // Skip tick if orchestrator is disabled via hot-reload
-        if !is_enabled {
-            tracing::debug!("Orchestrator disabled, skipping tick");
-            continue;
-        }
+        tokio::time::sleep(interval).await;
 
         let results = {
             let mut orch = orchestrator.write().await;
@@ -714,13 +614,8 @@ pub async fn start_orchestrator_loop(
     }
 }
 
-/// Start listening for config changes and hot-reload the full orchestrator config.
-///
-/// When the config changes, updates:
-/// - Specialist list (add/remove/modify)
-/// - tick_interval (applied on next tick)
-/// - max_concurrent (applied immediately)
-/// - enabled state (applied on next tick)
+/// Start listening for config changes and hot-reload specialists.
+/// When the config changes, updates the specialist list without restart.
 pub async fn start_config_reload_listener(
     orchestrator: SharedOrchestrator,
     mut config_rx: crate::reload::ConfigReceiver,
@@ -730,16 +625,15 @@ pub async fn start_config_reload_listener(
         while config_rx.changed().await.is_ok() {
             let new_config = config_rx.borrow_and_update().clone();
 
-            // Apply the full orchestrator config update
-            let mut orch = orchestrator.write().await;
-            let changes = orch.update_config(&new_config.orchestrator);
-
-            if !changes.is_empty() {
-                tracing::info!(
-                    "Orchestrator config hot-reloaded: {}",
-                    changes.join(", ")
-                );
+            // Check if orchestrator config changed
+            if !new_config.orchestrator.enabled {
+                tracing::info!("Orchestrator disabled via config reload");
+                continue;
             }
+
+            // Hot-reload specialists
+            let mut orch = orchestrator.write().await;
+            update_specialists(&mut orch, &new_config.orchestrator.specialists);
         }
         tracing::warn!("Orchestrator config reload listener exited");
     });
@@ -860,178 +754,5 @@ mod tests {
         agent.add_usage(1000);
         assert!(!agent.is_within_budget());
         assert!(!agent.can_accept_task());
-    }
-
-    #[test]
-    fn test_update_config_tick_interval() {
-        let cfg = OrchestratorConfig {
-            enabled: true,
-            tick_interval: 60,
-            max_concurrent: 3,
-            specialists: vec![],
-        };
-        let mut orch = Orchestrator::new(cfg);
-        assert_eq!(orch.tick_interval(), 60);
-
-        let new_cfg = OrchestratorConfig {
-            enabled: true,
-            tick_interval: 120,
-            max_concurrent: 3,
-            specialists: vec![],
-        };
-        let changes = orch.update_config(&new_cfg);
-        assert_eq!(orch.tick_interval(), 120);
-        assert!(changes.iter().any(|c| c.contains("tick_interval")));
-    }
-
-    #[test]
-    fn test_update_config_max_concurrent() {
-        let cfg = OrchestratorConfig {
-            enabled: true,
-            tick_interval: 60,
-            max_concurrent: 3,
-            specialists: vec![],
-        };
-        let mut orch = Orchestrator::new(cfg);
-        assert_eq!(orch.max_concurrent(), 3);
-
-        let new_cfg = OrchestratorConfig {
-            enabled: true,
-            tick_interval: 60,
-            max_concurrent: 5,
-            specialists: vec![],
-        };
-        let changes = orch.update_config(&new_cfg);
-        assert_eq!(orch.max_concurrent(), 5);
-        assert!(changes.iter().any(|c| c.contains("max_concurrent")));
-    }
-
-    #[test]
-    fn test_update_config_enabled_toggle() {
-        let cfg = OrchestratorConfig {
-            enabled: true,
-            tick_interval: 60,
-            max_concurrent: 3,
-            specialists: vec![],
-        };
-        let mut orch = Orchestrator::new(cfg);
-        assert!(orch.is_enabled());
-
-        let new_cfg = OrchestratorConfig {
-            enabled: false,
-            tick_interval: 60,
-            max_concurrent: 3,
-            specialists: vec![],
-        };
-        let changes = orch.update_config(&new_cfg);
-        assert!(!orch.is_enabled());
-        assert!(changes.iter().any(|c| c.contains("enabled")));
-    }
-
-    #[test]
-    fn test_update_config_no_changes() {
-        let cfg = OrchestratorConfig {
-            enabled: true,
-            tick_interval: 60,
-            max_concurrent: 3,
-            specialists: vec![],
-        };
-        let mut orch = Orchestrator::new(cfg.clone());
-
-        let changes = orch.update_config(&cfg);
-        assert!(changes.is_empty());
-    }
-
-    #[test]
-    fn test_update_config_adds_specialist() {
-        let cfg = OrchestratorConfig {
-            enabled: true,
-            tick_interval: 60,
-            max_concurrent: 3,
-            specialists: vec![],
-        };
-        let mut orch = Orchestrator::new(cfg);
-        assert_eq!(orch.agents.len(), 0);
-
-        let new_cfg = OrchestratorConfig {
-            enabled: true,
-            tick_interval: 60,
-            max_concurrent: 3,
-            specialists: vec![SpecialistConfig {
-                id: "builder-1".into(),
-                name: Some("Builder".into()),
-                role: "builder".into(),
-                workspace: None,
-                model: None,
-                budget_tokens: None,
-                max_iterations: 25,
-            }],
-        };
-        orch.update_config(&new_cfg);
-        assert_eq!(orch.agents.len(), 1);
-        assert!(orch.agents.contains_key("builder-1"));
-    }
-
-    #[test]
-    fn test_update_config_removes_idle_specialist() {
-        let cfg = OrchestratorConfig {
-            enabled: true,
-            tick_interval: 60,
-            max_concurrent: 3,
-            specialists: vec![SpecialistConfig {
-                id: "builder-1".into(),
-                name: Some("Builder".into()),
-                role: "builder".into(),
-                workspace: None,
-                model: None,
-                budget_tokens: None,
-                max_iterations: 25,
-            }],
-        };
-        let mut orch = Orchestrator::new(cfg);
-        assert_eq!(orch.agents.len(), 1);
-
-        let new_cfg = OrchestratorConfig {
-            enabled: true,
-            tick_interval: 60,
-            max_concurrent: 3,
-            specialists: vec![],
-        };
-        orch.update_config(&new_cfg);
-        assert_eq!(orch.agents.len(), 0);
-    }
-
-    #[test]
-    fn test_update_config_keeps_busy_specialist() {
-        let cfg = OrchestratorConfig {
-            enabled: true,
-            tick_interval: 60,
-            max_concurrent: 3,
-            specialists: vec![SpecialistConfig {
-                id: "builder-1".into(),
-                name: Some("Builder".into()),
-                role: "builder".into(),
-                workspace: None,
-                model: None,
-                budget_tokens: None,
-                max_iterations: 25,
-            }],
-        };
-        let mut orch = Orchestrator::new(cfg);
-
-        // Mark the agent as busy
-        if let Some(agent) = orch.agents.get_mut("builder-1") {
-            agent.status = AgentStatus::Working("task-1".into());
-        }
-
-        let new_cfg = OrchestratorConfig {
-            enabled: true,
-            tick_interval: 60,
-            max_concurrent: 3,
-            specialists: vec![],
-        };
-        orch.update_config(&new_cfg);
-        // Agent should NOT be removed because it's busy
-        assert_eq!(orch.agents.len(), 1);
     }
 }
