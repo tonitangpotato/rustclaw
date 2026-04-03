@@ -23,6 +23,12 @@ use gid_core::{
     refactor,
     CodeGraph,
     unified::build_unified_graph,
+    semantify,
+    complexity,
+    working_mem,
+    ignore,
+    ritual::scope::{default_scope_for_phase, ToolScope},
+    harness::{create_plan, ExecutionPlan},
 };
 use crate::config::AgentConfig;
 use crate::memory::MemoryManager;
@@ -182,7 +188,15 @@ impl ToolRegistry {
         self.register(Box::new(GidRitualApproveTool::new(gid_pathbuf.clone())));
         self.register(Box::new(GidRitualSkipTool::new(gid_pathbuf.clone())));
         self.register(Box::new(GidRitualCancelTool::new(gid_pathbuf.clone())));
-        self.register(Box::new(GidStatsTool::new(gid_pathbuf)));
+        self.register(Box::new(GidStatsTool::new(gid_pathbuf.clone())));
+
+        // Additional gid-core tools (execute, semantify, complexity, working memory, ignore, scope)
+        self.register(Box::new(GidExecuteTool::new(graph.clone())));
+        self.register(Box::new(GidSemantifyTool::new(graph.clone(), path.clone())));
+        self.register(Box::new(GidComplexityTool));
+        self.register(Box::new(GidWorkingMemoryTool));
+        self.register(Box::new(GidIgnoreTool::new(gid_pathbuf.clone())));
+        self.register(Box::new(GidScopeTool));
 
         self
     }
@@ -3900,6 +3914,544 @@ impl Tool for GidRitualCancelTool {
 
         Ok(ToolResult {
             output: "⊘ Ritual cancelled. State preserved in ritual-state.json.".to_string(),
+            is_error: false,
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GID Execute Tool — Create execution plan from graph (planning only)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct GidExecuteTool {
+    graph: Arc<RwLock<Graph>>,
+}
+
+impl GidExecuteTool {
+    fn new(graph: Arc<RwLock<Graph>>) -> Self {
+        Self { graph }
+    }
+}
+
+#[async_trait]
+impl Tool for GidExecuteTool {
+    fn name(&self) -> &str {
+        "gid_execute"
+    }
+
+    fn description(&self) -> &str {
+        "Create an execution plan from the task graph. Shows layers, parallelism, critical path, and estimated turns. Use gid_plan for a simpler view or gid_execute for full execution details."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "If true (default), only show the plan without executing. Set to false to actually execute tasks."
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let dry_run = input["dry_run"].as_bool().unwrap_or(true);
+
+        let graph = self.graph.read().await;
+        
+        // Create execution plan from graph
+        let plan: ExecutionPlan = match create_plan(&graph) {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(ToolResult {
+                    output: format!("Failed to create execution plan: {}", e),
+                    is_error: true,
+                });
+            }
+        };
+
+        let mut output = format!(
+            "Execution Plan\n\
+             ══════════════\n\
+             Total tasks: {}\n\
+             Layers: {}\n\
+             Estimated turns: {}\n\n",
+            plan.total_tasks, plan.layers.len(), plan.estimated_total_turns
+        );
+
+        // Show critical path
+        if !plan.critical_path.is_empty() {
+            output.push_str("Critical Path:\n");
+            for task_id in &plan.critical_path {
+                output.push_str(&format!("  → {}\n", task_id));
+            }
+            output.push('\n');
+        }
+
+        // Show layers
+        for layer in &plan.layers {
+            output.push_str(&format!(
+                "Layer {} ({} tasks, parallel):\n",
+                layer.index, layer.tasks.len()
+            ));
+            for task in &layer.tasks {
+                let deps = if task.depends_on.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [deps: {}]", task.depends_on.join(", "))
+                };
+                output.push_str(&format!(
+                    "  • {} — {} (~{} turns){}\n",
+                    task.id, task.title, task.estimated_turns, deps
+                ));
+            }
+            output.push('\n');
+        }
+
+        if dry_run {
+            output.push_str("(dry run - no tasks executed)\n");
+        } else {
+            output.push_str("⚠️ Full execution not available in this tool. Use ritual workflow or spawn sub-agents.\n");
+        }
+
+        Ok(ToolResult {
+            output,
+            is_error: false,
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GID Semantify Tool — Upgrade file-level graph to semantic graph
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct GidSemantifyTool {
+    graph: Arc<RwLock<Graph>>,
+    path: Arc<String>,
+}
+
+impl GidSemantifyTool {
+    fn new(graph: Arc<RwLock<Graph>>, path: Arc<String>) -> Self {
+        Self { graph, path }
+    }
+}
+
+#[async_trait]
+impl Tool for GidSemantifyTool {
+    fn name(&self) -> &str {
+        "gid_semantify"
+    }
+
+    fn description(&self) -> &str {
+        "Upgrade a file-level graph to a semantic graph by assigning architectural layers (interface, application, domain, infrastructure) to nodes based on file paths. Uses heuristics — no LLM call required."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {}
+        })
+    }
+
+    async fn execute(&self, _input: Value) -> anyhow::Result<ToolResult> {
+        let mut graph = self.graph.write().await;
+        
+        let assigned = semantify::apply_heuristic_layers(&mut graph);
+        
+        // Save the updated graph
+        gid_save_graph(&graph, std::path::Path::new(self.path.as_str()))?;
+
+        let mut output = format!("✓ Semantify complete: {} nodes assigned layers\n\n", assigned);
+        
+        // Show layer distribution
+        let mut layer_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for node in &graph.nodes {
+            if let Some(layer) = node.metadata.get("layer").and_then(|v| v.as_str()) {
+                *layer_counts.entry(layer.to_string()).or_default() += 1;
+            }
+        }
+        
+        if !layer_counts.is_empty() {
+            output.push_str("Layer distribution:\n");
+            for (layer, count) in &layer_counts {
+                output.push_str(&format!("  • {}: {} nodes\n", layer, count));
+            }
+        }
+
+        Ok(ToolResult {
+            output,
+            is_error: false,
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GID Complexity Tool — Code complexity/risk analysis
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct GidComplexityTool;
+
+#[async_trait]
+impl Tool for GidComplexityTool {
+    fn name(&self) -> &str {
+        "gid_complexity"
+    }
+
+    fn description(&self) -> &str {
+        "Analyze code complexity and risk from the code graph. Examines relevant nodes, inheritance depth, import edges, and test coverage to classify as simple/medium/complex."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "dir": {
+                    "type": "string",
+                    "description": "Directory to analyze (default: src)"
+                },
+                "keywords": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Keywords to focus analysis on (e.g., ['auth', 'login'])"
+                },
+                "problem": {
+                    "type": "string",
+                    "description": "Problem statement to extract keywords from (alternative to keywords)"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let dir = input["dir"].as_str().unwrap_or("src");
+        let dir_path = std::path::Path::new(dir);
+        
+        if !dir_path.exists() {
+            return Ok(ToolResult {
+                output: format!("Directory not found: {}", dir),
+                is_error: true,
+            });
+        }
+        
+        // Extract code graph
+        let code_graph = CodeGraph::extract_from_dir(dir_path);
+        
+        // Get keywords
+        let keywords: Vec<&str> = if let Some(kw_array) = input["keywords"].as_array() {
+            kw_array.iter().filter_map(|v| v.as_str()).collect()
+        } else if let Some(problem) = input["problem"].as_str() {
+            let extracted = CodeGraph::extract_keywords(problem);
+            extracted.into_iter().collect()
+        } else {
+            vec!["main", "core", "lib"]
+        };
+        
+        // Assess complexity
+        let report = complexity::assess_complexity_from_graph(&code_graph, &keywords, 0);
+        
+        let mut output = format!(
+            "Complexity Analysis\n\
+             ═══════════════════\n\
+             Complexity: {:?}\n\
+             Relevant nodes: {}\n\
+             Relevant files: {}\n\
+             Classes: {}\n\
+             Inheritance edges: {}\n\
+             Import edges: {}\n\
+             Tests: {}\n\n\
+             Summary: {}\n",
+            report.complexity,
+            report.relevant_nodes,
+            report.relevant_files,
+            report.class_count,
+            report.inheritance_edges,
+            report.import_edges,
+            report.test_count,
+            report.summary,
+        );
+        
+        // Add risk assessment if we have node IDs
+        if report.relevant_nodes > 0 {
+            let risk = complexity::assess_risk_level(&code_graph, &[]);
+            output.push_str(&format!("\nRisk level: {}\n", risk));
+        }
+
+        Ok(ToolResult {
+            output,
+            is_error: false,
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GID Working Memory Tool — Changed files → affected nodes
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct GidWorkingMemoryTool;
+
+#[async_trait]
+impl Tool for GidWorkingMemoryTool {
+    fn name(&self) -> &str {
+        "gid_working_memory"
+    }
+
+    fn description(&self) -> &str {
+        "Analyze impact of changed files on the codebase. Shows affected source nodes, related tests, risk level, and blast radius."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "files": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "List of changed file paths to analyze"
+                },
+                "dir": {
+                    "type": "string",
+                    "description": "Project source directory for code graph extraction (default: src)"
+                }
+            },
+            "required": ["files"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let files: Vec<String> = input["files"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Missing 'files' parameter"))?
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        
+        if files.is_empty() {
+            return Ok(ToolResult {
+                output: "No files provided to analyze.".to_string(),
+                is_error: true,
+            });
+        }
+        
+        let dir = input["dir"].as_str().unwrap_or("src");
+        let dir_path = std::path::Path::new(dir);
+        
+        // Extract code graph
+        let code_graph = if dir_path.exists() {
+            CodeGraph::extract_from_dir(dir_path)
+        } else {
+            CodeGraph::default()
+        };
+        
+        // Analyze impact
+        let analysis = working_mem::analyze_impact(&files, &code_graph);
+        
+        let mut output = format!(
+            "Impact Analysis\n\
+             ═══════════════\n\
+             {}\n\n\
+             Risk Level: {}\n\n",
+            analysis.summary,
+            analysis.risk_level,
+        );
+        
+        if !analysis.affected_source.is_empty() {
+            output.push_str("Affected Source Nodes:\n");
+            for node in analysis.affected_source.iter().take(10) {
+                output.push_str(&format!(
+                    "  • {} ({}) — {} callers\n",
+                    node.name, node.kind, node.callers
+                ));
+            }
+            if analysis.affected_source.len() > 10 {
+                output.push_str(&format!("  ... and {} more\n", analysis.affected_source.len() - 10));
+            }
+            output.push('\n');
+        }
+        
+        if !analysis.affected_tests.is_empty() {
+            output.push_str("Related Tests:\n");
+            for node in analysis.affected_tests.iter().take(10) {
+                output.push_str(&format!("  • {} ({})\n", node.name, node.file));
+            }
+            if analysis.affected_tests.len() > 10 {
+                output.push_str(&format!("  ... and {} more\n", analysis.affected_tests.len() - 10));
+            }
+        }
+
+        Ok(ToolResult {
+            output,
+            is_error: false,
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GID Ignore Tool — Check if path is ignored by .gidignore
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct GidIgnoreTool {
+    gid_path: PathBuf,
+}
+
+impl GidIgnoreTool {
+    fn new(gid_path: PathBuf) -> Self {
+        Self { gid_path }
+    }
+}
+
+#[async_trait]
+impl Tool for GidIgnoreTool {
+    fn name(&self) -> &str {
+        "gid_ignore"
+    }
+
+    fn description(&self) -> &str {
+        "Check if a path is ignored by .gidignore rules. Shows loaded patterns and whether a specific path would be ignored."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to check (optional - if omitted, shows all ignore patterns)"
+                },
+                "is_dir": {
+                    "type": "boolean",
+                    "description": "Whether the path is a directory (default: false)"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        // Load ignore list from project directory (parent of .gid)
+        let project_dir = self.gid_path.parent().unwrap_or(&self.gid_path);
+        let ignore_list = ignore::load_ignore_list(project_dir);
+        
+        let path_to_check = input["path"].as_str();
+        let is_dir = input["is_dir"].as_bool().unwrap_or(false);
+        
+        let mut output = String::new();
+        
+        // Show loaded patterns
+        output.push_str(&format!(
+            "Ignore Patterns ({} total)\n═══════════════════════════\n",
+            ignore_list.patterns().len()
+        ));
+        
+        // Group by negated/normal
+        let normal: Vec<_> = ignore_list.patterns().iter()
+            .filter(|p| !p.negated)
+            .take(20)
+            .collect();
+        let negated: Vec<_> = ignore_list.patterns().iter()
+            .filter(|p| p.negated)
+            .collect();
+        
+        if !normal.is_empty() {
+            output.push_str("Ignored:\n");
+            for p in &normal {
+                let dir_marker = if p.dir_only { "/" } else { "" };
+                output.push_str(&format!("  • {}{}\n", p.pattern, dir_marker));
+            }
+            if ignore_list.patterns().len() > 20 {
+                output.push_str(&format!("  ... and {} more\n", ignore_list.patterns().len() - 20));
+            }
+        }
+        
+        if !negated.is_empty() {
+            output.push_str("\nExceptions (not ignored):\n");
+            for p in negated {
+                output.push_str(&format!("  • !{}\n", p.pattern));
+            }
+        }
+        
+        // Check specific path if provided
+        if let Some(path) = path_to_check {
+            let ignored = ignore_list.should_ignore(path, is_dir);
+            output.push_str(&format!(
+                "\nPath check: {}\n  → {} {}\n",
+                path,
+                if ignored { "❌ IGNORED" } else { "✓ NOT ignored" },
+                if is_dir { "(directory)" } else { "(file)" }
+            ));
+        }
+
+        Ok(ToolResult {
+            output,
+            is_error: false,
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GID Scope Tool — Show ToolScope for ritual phase
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct GidScopeTool;
+
+#[async_trait]
+impl Tool for GidScopeTool {
+    fn name(&self) -> &str {
+        "gid_scope"
+    }
+
+    fn description(&self) -> &str {
+        "Show the ToolScope for a ritual phase. Displays allowed tools, writable paths, and bash policy for the given phase."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "phase": {
+                    "type": "string",
+                    "description": "Phase ID (e.g., 'research', 'execute-tasks', 'verify-quality'). If omitted, shows all known phases."
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let phase = input["phase"].as_str();
+        
+        let mut output = String::new();
+        
+        let format_scope = |scope: &ToolScope, phase_id: &str| {
+            let mut s = format!("Phase: {}\n", phase_id);
+            s.push_str(&format!("  Tools: [{}]\n", scope.allowed_tools.join(", ")));
+            s.push_str(&format!("  Writable: [{}]\n", scope.writable_paths.join(", ")));
+            if !scope.readable_paths.is_empty() {
+                s.push_str(&format!("  Readable: [{}]\n", scope.readable_paths.join(", ")));
+            } else {
+                s.push_str("  Readable: [all]\n");
+            }
+            s.push_str(&format!("  Bash: {:?}\n", scope.bash_policy));
+            s
+        };
+        
+        if let Some(phase_id) = phase {
+            let scope = default_scope_for_phase(phase_id);
+            output = format!("Tool Scope\n══════════\n\n{}", format_scope(&scope, phase_id));
+        } else {
+            // Show all known phases
+            output.push_str("Tool Scopes for Known Phases\n════════════════════════════\n\n");
+            let phases = [
+                "capture-idea", "research", "draft-requirements", "draft-design",
+                "generate-graph", "plan-tasks", "execute-tasks", "extract-code", "verify-quality"
+            ];
+            for phase_id in phases {
+                let scope = default_scope_for_phase(phase_id);
+                output.push_str(&format_scope(&scope, phase_id));
+                output.push('\n');
+            }
+        }
+
+        Ok(ToolResult {
+            output,
             is_error: false,
         })
     }

@@ -99,7 +99,6 @@ Six lifecycle hooks:
 - ✅ **Honcho user modeling** — dialectic user profiling, not just preference storage
 - ✅ **Modal/serverless backend** — environment hibernates when idle, wakes on demand. Near-zero cost between sessions.
 - ✅ **FTS5 session search** — search past conversations across sessions with LLM summarization
-- ✅ **Trajectory export** — batch generation for training data (ShareGPT format)
 - ✅ **Subagent delegation** — spawn isolated subagents for parallel work
 - ❌ Python = slow startup, large dependencies, no single binary
 - ❌ No cognitive memory models (no ACT-R, Hebbian, Ebbinghaus)
@@ -210,7 +209,6 @@ RustClaw's CEO pattern is powered by potato's existing Rust projects:
 ### Also Done ✅ (originally "Future")
 - [x] Auto skill generation (from Hermes)
 - [x] Discord, Slack, Signal, WhatsApp, Matrix channels (6 total)
-- [x] Trajectory export (ShareGPT format)
 - [x] Distributed agent bus (TCP)
 - [x] Serverless hibernate/wake
 - [x] Docker sandbox (ephemeral, capabilities mode — see persistent upgrade below)
@@ -231,7 +229,6 @@ RustClaw's CEO pattern is powered by potato's existing Rust projects:
   - 完成后 `openclaw gateway wake` 通知 CEO
   - 参考：OpenClaw coding-agent skill 已验证此模式可行
 - [ ] Modal/serverless execution backend (from Hermes)
-- [ ] Trajectory export for training data (ShareGPT format — from Hermes)
 - [ ] Distributed agents (across machines)
 - [ ] **Persistent Docker sandbox** — current Docker sandbox uses ephemeral containers (`--rm` per exec call), which breaks multi-step workflows (no state persistence, can't see workspace files unless mounted). When multi-user or untrusted code execution is needed, upgrade to: persistent container per session, workspace volume binding, `docker exec` for commands, container lifecycle management (create/reuse/destroy). ~500-800 lines. Not needed for single-user personal use — capabilities mode (path whitelist + timeout) is sufficient.
 

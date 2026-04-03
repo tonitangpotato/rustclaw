@@ -71,10 +71,6 @@ pub struct Config {
     #[serde(default)]
     pub search: SearchConfig,
 
-    /// Trajectory export configuration.
-    #[serde(default)]
-    pub export: ExportConfig,
-
     /// Browser control configuration.
     #[serde(default)]
     pub browser: BrowserConfig,
@@ -693,30 +689,6 @@ impl Default for SearchConfig {
     }
 }
 
-/// Trajectory export configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExportConfig {
-    /// Whether trajectory export is enabled.
-    #[serde(default)]
-    pub enabled: bool,
-
-    /// Output directory for exported trajectories.
-    #[serde(default = "default_export_dir")]
-    pub output_dir: String,
-}
-
-fn default_export_dir() -> String {
-    "trajectories".to_string()
-}
-
-impl Default for ExportConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            output_dir: default_export_dir(),
-        }
-    }
-}
 
 /// Browser control configuration (CDP).
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -12,7 +12,6 @@ mod daemon;
 mod dashboard;
 mod distributed;
 mod engram_hooks;
-mod export;
 mod heartbeat;
 mod hooks;
 mod llm;
