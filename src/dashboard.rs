@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
-    extract::{Json, State},
+    extract::{Json, Path, State},
     http::{header, Method, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -481,6 +481,94 @@ async fn post_message(
     }
 }
 
+/// Export a session as a downloadable Markdown file.
+async fn export_session(
+    State(state): State<Arc<DashboardState>>,
+    Path(id): Path<String>,
+) -> Response {
+    // Look up session (returns 404 if not found)
+    let session = match state.runner.sessions().get_session(&id).await {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Session '{}' not found", id),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Build markdown content
+    let mut md = String::new();
+    md.push_str(&format!("# Session Export: {}\n", session.key));
+    md.push_str(&format!("- **Created**: {}\n", session.created_at));
+    md.push_str(&format!("- **Updated**: {}\n", session.updated_at));
+    md.push_str(&format!("- **Messages**: {}\n", session.messages.len()));
+    md.push_str(&format!("- **Tokens**: {}\n", session.total_tokens));
+    md.push_str("\n---\n");
+
+    for (i, msg) in session.messages.iter().enumerate() {
+        let (icon, role_label) = match msg.role.as_str() {
+            "user" => ("👤", "User"),
+            "assistant" => ("🤖", "Assistant"),
+            "system" => ("⚙️", "System"),
+            _ => ("❓", msg.role.as_str()),
+        };
+
+        md.push_str(&format!("\n## [#{}] {} {}\n\n", i + 1, icon, role_label));
+
+        for block in &msg.content {
+            match block {
+                crate::llm::ContentBlock::Text { text } => {
+                    md.push_str(text);
+                    md.push('\n');
+                }
+                crate::llm::ContentBlock::ToolUse { name, input, .. } => {
+                    let input_str = serde_json::to_string_pretty(input)
+                        .unwrap_or_else(|_| input.to_string());
+                    md.push_str(&format!(
+                        "🔧 **Tool: {}**\n```json\n{}\n```\n",
+                        name, input_str
+                    ));
+                }
+                crate::llm::ContentBlock::ToolResult { content, .. } => {
+                    md.push_str(&format!(
+                        "📋 **Result:**\n```\n{}\n```\n",
+                        content
+                    ));
+                }
+            }
+        }
+
+        md.push_str("\n---\n");
+    }
+
+    // Sanitize session key for filename (replace non-alphanumeric with dash)
+    let sanitized_key: String = session
+        .key
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+
+    (
+        StatusCode::OK,
+        [
+            (
+                header::CONTENT_TYPE,
+                "text/markdown; charset=utf-8".to_string(),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"session-{}.md\"", sanitized_key),
+            ),
+        ],
+        md,
+    )
+        .into_response()
+}
+
 async fn get_dashboard_html() -> impl IntoResponse {
     Html(DASHBOARD_HTML)
 }
@@ -798,6 +886,7 @@ pub async fn start_dashboard(
     let api_routes = Router::new()
         .route("/status", get(get_status))
         .route("/sessions", get(get_sessions))
+        .route("/sessions/{id}/export", get(export_session))
         .route("/tasks", get(get_tasks))
         .route("/agents", get(get_agents))
         .route("/config", get(get_config))

@@ -383,6 +383,47 @@ impl SessionManager {
         }
     }
 
+    /// Get a session by key if it exists (memory or DB). Returns None if not found.
+    pub async fn get_session(&self, key: &str) -> Option<Session> {
+        // Check memory cache first
+        {
+            let sessions = self.sessions.read().await;
+            if let Some(s) = sessions.get(key) {
+                return Some(s.clone());
+            }
+        }
+
+        // Try loading from DB
+        if let Some(pool) = &self.pool {
+            if let Ok(row) = sqlx::query_as::<_, SessionRow>(
+                "SELECT key, messages, created_at, updated_at, total_tokens, channel, user_id FROM sessions WHERE key = ?",
+            )
+            .bind(key)
+            .fetch_one(pool)
+            .await
+            {
+                let messages: Vec<Message> =
+                    serde_json::from_str(&row.messages).unwrap_or_default();
+                let session = Session {
+                    key: row.key,
+                    messages,
+                    created_at: row.created_at,
+                    updated_at: row.updated_at,
+                    total_tokens: row.total_tokens as u64,
+                    channel: row.channel,
+                    user_id: row.user_id,
+                };
+
+                // Cache it
+                let mut sessions = self.sessions.write().await;
+                sessions.insert(key.to_string(), session.clone());
+                return Some(session);
+            }
+        }
+
+        None
+    }
+
     /// Count active sessions.
     pub async fn count(&self) -> usize {
         if let Some(pool) = &self.pool {
