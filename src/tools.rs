@@ -3623,76 +3623,21 @@ impl Tool for GidStatsTool {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Ritual LLM Adapter — bridges agentctl-auth → gid-core LlmClient trait
+// Ritual LLM Adapter — bridges RustClaw's LlmClient → gid-core LlmClient trait
 // ═══════════════════════════════════════════════════════════════════════════════
 
 struct RitualLlmAdapter {
-    client: agentctl_auth::ClaudeClient,
+    client: Box<dyn crate::llm::LlmClient>,
 }
 
 impl RitualLlmAdapter {
+    /// Create from RustClaw's config file (same auth/model as agent)
     fn try_new() -> Option<Self> {
-        let pool_path = dirs::home_dir()?.join(".agentctl/auth.toml");
-        let pool = agentctl_auth::AuthPool::load(&pool_path).ok()?;
-        let client = agentctl_auth::ClaudeClient::builder()
-            .pool(&pool)
-            .build()
-            .ok()?;
+        let config_path = dirs::home_dir()?.join("rustclaw/rustclaw.yaml");
+        let config_str = std::fs::read_to_string(&config_path).ok()?;
+        let config: crate::config::Config = serde_yaml::from_str(&config_str).ok()?;
+        let client = crate::llm::create_client(&config.llm).ok()?;
         Some(Self { client })
-    }
-}
-
-struct RitualToolHandler {
-    working_dir: std::path::PathBuf,
-}
-
-#[async_trait]
-impl agentctl_auth::ToolHandler for RitualToolHandler {
-    async fn handle(&self, name: &str, input: &serde_json::Value) -> anyhow::Result<agentctl_auth::ToolOutput> {
-        match name {
-            "Read" => {
-                let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                let full_path = self.working_dir.join(path);
-                match std::fs::read_to_string(&full_path) {
-                    Ok(content) => {
-                        let c = if content.len() > 50_000 { format!("{}\n[truncated]", &content[..50_000]) } else { content };
-                        Ok(agentctl_auth::ToolOutput { content: c, is_error: false })
-                    }
-                    Err(e) => Ok(agentctl_auth::ToolOutput { content: format!("Error: {}", e), is_error: true }),
-                }
-            }
-            "Write" => {
-                let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                let full_path = self.working_dir.join(path);
-                if let Some(parent) = full_path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                match std::fs::write(&full_path, content) {
-                    Ok(_) => Ok(agentctl_auth::ToolOutput { content: format!("Wrote {}", path), is_error: false }),
-                    Err(e) => Ok(agentctl_auth::ToolOutput { content: format!("Error: {}", e), is_error: true }),
-                }
-            }
-            "Bash" => {
-                let command = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                let output = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(command)
-                    .current_dir(&self.working_dir)
-                    .output();
-                match output {
-                    Ok(o) => {
-                        let stdout = String::from_utf8_lossy(&o.stdout);
-                        let stderr = String::from_utf8_lossy(&o.stderr);
-                        let combined = format!("{}{}", stdout, stderr);
-                        let truncated = if combined.len() > 20_000 { format!("{}\n[truncated]", &combined[..20_000]) } else { combined };
-                        Ok(agentctl_auth::ToolOutput { content: truncated, is_error: !o.status.success() })
-                    }
-                    Err(e) => Ok(agentctl_auth::ToolOutput { content: format!("Error: {}", e), is_error: true }),
-                }
-            }
-            _ => Ok(agentctl_auth::ToolOutput { content: format!("Unknown tool: {}", name), is_error: true }),
-        }
     }
 }
 
@@ -3702,31 +3647,111 @@ impl gid_core::ritual::llm::LlmClient for RitualLlmAdapter {
         &self,
         skill_prompt: &str,
         tools: Vec<gid_core::ritual::llm::ToolDefinition>,
-        model: &str,
+        _model: &str,
         working_dir: &std::path::Path,
     ) -> anyhow::Result<gid_core::ritual::llm::SkillResult> {
-        // Convert gid-core tools → agentctl-auth tools
-        let ac_tools: Vec<agentctl_auth::Tool> = tools.iter().map(|t| {
-            agentctl_auth::Tool::new(&t.name, &t.description, t.input_schema.clone())
+        use crate::llm::{Message, ContentBlock, ToolDefinition as RcToolDef};
+
+        // Convert gid-core tools → RustClaw tools
+        let rc_tools: Vec<RcToolDef> = tools.iter().map(|t| RcToolDef {
+            name: t.name.clone(),
+            description: t.description.clone(),
+            input_schema: t.input_schema.clone(),
         }).collect();
 
-        let handler = RitualToolHandler { working_dir: working_dir.to_path_buf() };
+        let mut messages = vec![];
+        let mut total_tool_calls = 0usize;
+        let mut total_tokens = 0u64;
+        let mut final_text = String::new();
 
-        let result = self.client.run_agent_loop(
-            model,
-            skill_prompt,
-            "Execute the skill as described in the system prompt.",
-            &ac_tools,
-            20, // max turns
-            &handler,
-        ).await?;
+        // Mini agent loop: LLM → tool execution → feedback → repeat
+        for _ in 0..20 {
+            let response = self.client.chat(skill_prompt, &messages, &rc_tools).await?;
+            total_tokens += (response.usage.input_tokens + response.usage.output_tokens) as u64;
+
+            // Collect assistant response text
+            if let Some(text) = &response.text {
+                final_text = text.clone();
+            }
+
+            // No tool calls → done
+            if response.tool_calls.is_empty() {
+                break;
+            }
+
+            // Build assistant message with tool_use blocks
+            let mut assistant_content: Vec<ContentBlock> = Vec::new();
+            if let Some(text) = &response.text {
+                assistant_content.push(ContentBlock::Text { text: text.clone() });
+            }
+            for tc in &response.tool_calls {
+                assistant_content.push(ContentBlock::ToolUse {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    input: tc.input.clone(),
+                });
+            }
+            messages.push(Message { role: "assistant".to_string(), content: assistant_content });
+
+            // Execute tools and build tool_result message
+            let mut result_content: Vec<ContentBlock> = Vec::new();
+            for tc in &response.tool_calls {
+                total_tool_calls += 1;
+                let (output, is_error) = execute_ritual_tool(&tc.name, &tc.input, working_dir);
+                result_content.push(ContentBlock::ToolResult {
+                    tool_use_id: tc.id.clone(),
+                    content: output,
+                    is_error,
+                });
+            }
+            messages.push(Message { role: "user".to_string(), content: result_content });
+        }
 
         Ok(gid_core::ritual::llm::SkillResult {
-            output: result.final_text,
+            output: final_text,
             artifacts_created: vec![],
-            tool_calls_made: result.tool_calls.len(),
-            tokens_used: result.total_input_tokens + result.total_output_tokens,
+            tool_calls_made: total_tool_calls,
+            tokens_used: total_tokens,
         })
+    }
+}
+
+/// Execute a tool call during ritual skill phase (Read/Write/Bash only)
+fn execute_ritual_tool(name: &str, input: &serde_json::Value, working_dir: &std::path::Path) -> (String, bool) {
+    match name {
+        "Read" => {
+            let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let full_path = working_dir.join(path);
+            match std::fs::read_to_string(&full_path) {
+                Ok(c) => {
+                    if c.len() > 50_000 { (format!("{}\n[truncated]", &c[..50_000]), false) }
+                    else { (c, false) }
+                }
+                Err(e) => (format!("Error: {}", e), true),
+            }
+        }
+        "Write" => {
+            let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let full_path = working_dir.join(path);
+            if let Some(parent) = full_path.parent() { let _ = std::fs::create_dir_all(parent); }
+            match std::fs::write(&full_path, content) {
+                Ok(_) => (format!("Wrote {}", path), false),
+                Err(e) => (format!("Error: {}", e), true),
+            }
+        }
+        "Bash" => {
+            let command = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            match std::process::Command::new("sh").arg("-c").arg(command).current_dir(working_dir).output() {
+                Ok(o) => {
+                    let out = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+                    let truncated = if out.len() > 20_000 { format!("{}\n[truncated]", &out[..20_000]) } else { out };
+                    (truncated, !o.status.success())
+                }
+                Err(e) => (format!("Error: {}", e), true),
+            }
+        }
+        _ => (format!("Unknown tool: {}", name), true),
     }
 }
 
