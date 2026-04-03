@@ -83,6 +83,8 @@ impl RitualRunner {
             self.execute_fire_and_forget_with_state(&actions, &state).await;
 
             if state.phase.is_terminal() {
+                // Send enriched terminal notification (duration, context, guidance)
+                self.send_terminal_notification(&state).await;
                 break;
             }
 
@@ -99,13 +101,12 @@ impl RitualRunner {
     }
 
     /// Execute fire-and-forget actions (Notify, SaveState, UpdateGraph, Cleanup).
+    /// Notify is truly fire-and-forget: spawned as a task, failures only logged.
     async fn execute_fire_and_forget_with_state(&self, actions: &[RitualAction], state: &RitualState) {
         for action in actions {
             match action {
                 RitualAction::Notify { message } => {
-                    let notify = self.notify.clone();
-                    let msg = message.clone();
-                    notify(msg).await;
+                    self.fire_and_forget_notify(message.clone());
                 }
                 RitualAction::SaveState => {
                     if let Err(e) = self.save_state(state) {
@@ -121,6 +122,81 @@ impl RitualRunner {
                 _ => {} // Event-producing actions handled separately
             }
         }
+    }
+
+    /// Send a notification as fire-and-forget: spawned into a tokio task.
+    /// Send failures are logged but never crash the ritual.
+    fn fire_and_forget_notify(&self, message: String) {
+        let notify = self.notify.clone();
+        tokio::spawn(async move {
+            notify(message).await;
+        });
+    }
+
+    /// Send enriched notification when ritual reaches a terminal state.
+    /// Adds duration, phase summary, error context, and retry guidance.
+    async fn send_terminal_notification(&self, state: &RitualState) {
+        let elapsed = chrono::Utc::now()
+            .signed_duration_since(state.started_at);
+        let duration_str = format_duration(elapsed);
+
+        let phases_traversed = state.transitions.len();
+
+        let msg = match &state.phase {
+            gid_core::ritual::V2Phase::Done => {
+                format!(
+                    "✅ **Ritual complete!**\n\n\
+                     📋 Task: {}\n\
+                     ⏱ Duration: {}\n\
+                     🔄 Transitions: {}\n\
+                     {}",
+                    truncate(&state.task, 200),
+                    duration_str,
+                    phases_traversed,
+                    if state.verify_retries > 0 {
+                        format!("🔧 Verify retries: {}", state.verify_retries)
+                    } else {
+                        String::new()
+                    },
+                )
+            }
+            gid_core::ritual::V2Phase::Escalated => {
+                let error = state.error_context.as_deref().unwrap_or("unknown error");
+                let failed_phase = state.failed_phase.as_ref()
+                    .map(|p| p.display_name())
+                    .unwrap_or("unknown");
+                format!(
+                    "🚨 **Ritual escalated — needs human intervention**\n\n\
+                     📋 Task: {}\n\
+                     💥 Failed in: {} phase\n\
+                     ❌ Error: {}\n\
+                     ⏱ Duration: {}\n\
+                     🔄 Transitions: {}\n\n\
+                     **Next steps:**\n\
+                     • `/ritual retry` — retry the failed phase\n\
+                     • `/ritual skip` — skip to the next phase\n\
+                     • `/ritual cancel` — abort the ritual",
+                    truncate(&state.task, 200),
+                    failed_phase,
+                    truncate(error, 300),
+                    duration_str,
+                    phases_traversed,
+                )
+            }
+            gid_core::ritual::V2Phase::Cancelled => {
+                format!(
+                    "🛑 **Ritual cancelled**\n\n\
+                     📋 Task: {}\n\
+                     ⏱ Duration: {}",
+                    truncate(&state.task, 200),
+                    duration_str,
+                )
+            }
+            _ => return, // Not terminal, nothing to send
+        };
+
+        // Fire-and-forget: don't block on send, don't crash on failure
+        self.fire_and_forget_notify(msg);
     }
 
     /// Find and execute the single event-producing action from the action list.
@@ -467,6 +543,21 @@ fn parse_strategy(output: &str) -> ImplementStrategy {
         }
     }
     ImplementStrategy::SingleLlm
+}
+
+/// Format a chrono::Duration into a human-readable string (e.g., "2m 34s", "1h 5m").
+fn format_duration(d: chrono::TimeDelta) -> String {
+    let total_secs = d.num_seconds().max(0);
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let seconds = total_secs % 60;
+    if hours > 0 {
+        format!("{}h {}m", hours, minutes)
+    } else if minutes > 0 {
+        format!("{}m {}s", minutes, seconds)
+    } else {
+        format!("{}s", seconds)
+    }
 }
 
 /// Recursively count files in a directory.
