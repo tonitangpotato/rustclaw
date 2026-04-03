@@ -194,7 +194,11 @@ impl ToolRegistry {
             .to_path_buf();
         self.register(Box::new(GidDesignTool::new(graph.clone(), gid_pathbuf.clone())));
         self.register(Box::new(GidPlanTool::new(graph.clone())));
-        // V1 ritual tools removed — use /ritual command (V2 state machine) instead
+        // V2 ritual: single tool for LLM to trigger ritual programmatically
+        self.register(Box::new(StartRitualTool::new(
+            self.workspace_root.clone().unwrap_or_else(|| gid_pathbuf.parent().unwrap_or(std::path::Path::new(".")).to_path_buf()),
+            self.llm_client.clone(),
+        )));
         self.register(Box::new(GidStatsTool::new(gid_pathbuf.clone())));
 
         // Additional gid-core tools (execute, semantify, complexity, working memory, ignore, scope)
@@ -4059,6 +4063,117 @@ impl Tool for GidScopeTool {
             output,
             is_error: false,
         })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Start Ritual Tool — V2 ritual entry point for LLM
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct StartRitualTool {
+    workspace_root: PathBuf,
+    llm_client: Option<Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>>,
+}
+
+impl StartRitualTool {
+    fn new(
+        workspace_root: PathBuf,
+        llm_client: Option<Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>>,
+    ) -> Self {
+        Self { workspace_root, llm_client }
+    }
+}
+
+#[async_trait]
+impl Tool for StartRitualTool {
+    fn name(&self) -> &str {
+        "start_ritual"
+    }
+
+    fn description(&self) -> &str {
+        "Start a V2 development ritual (design → implement → verify pipeline). \
+         Use this when the task involves writing or modifying source code. \
+         The ritual automatically detects project state and runs appropriate phases. \
+         Returns when the ritual completes, fails, or needs intervention."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "Description of the development task to accomplish"
+                }
+            },
+            "required": ["task"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let task = input["task"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing 'task' parameter"))?
+            .to_string();
+
+        let llm_client = match &self.llm_client {
+            Some(c) => c.clone(),
+            None => {
+                return Ok(ToolResult {
+                    output: "No LLM client available for ritual execution.".to_string(),
+                    is_error: true,
+                });
+            }
+        };
+
+        // Create a simple log-based notify (no chat_id available in tool context)
+        let notify: crate::ritual_runner::NotifyFn = Arc::new(move |msg: String| {
+            tracing::info!(ritual_notify = %msg, "Ritual progress");
+            Box::pin(async {})
+        });
+
+        let runner = crate::ritual_runner::RitualRunner::new(
+            self.workspace_root.clone(),
+            llm_client,
+            notify,
+        );
+
+        match runner.start(task).await {
+            Ok(state) => {
+                if let Err(e) = runner.save_state(&state) {
+                    tracing::error!("Failed to save ritual state: {}", e);
+                }
+
+                let phase_name = state.phase.display_name();
+                let output = match state.phase {
+                    gid_core::ritual::state_machine::RitualPhase::Done => {
+                        format!("✅ Ritual completed successfully! Final phase: {}", phase_name)
+                    }
+                    gid_core::ritual::state_machine::RitualPhase::Escalated => {
+                        format!(
+                            "⚠️ Ritual escalated at {} phase.\nError: {}\nUse /ritual retry to retry.",
+                            phase_name,
+                            state.error_context.as_deref().unwrap_or("unknown")
+                        )
+                    }
+                    gid_core::ritual::state_machine::RitualPhase::Cancelled => {
+                        "🛑 Ritual was cancelled.".to_string()
+                    }
+                    _ => {
+                        format!("Ritual ended in {} phase.", phase_name)
+                    }
+                };
+
+                Ok(ToolResult {
+                    output,
+                    is_error: !matches!(state.phase, gid_core::ritual::state_machine::RitualPhase::Done),
+                })
+            }
+            Err(e) => Ok(ToolResult {
+                output: format!("❌ Ritual failed: {}", e),
+                is_error: true,
+            }),
+        }
     }
 }
 
