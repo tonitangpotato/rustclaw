@@ -124,25 +124,41 @@ Your tools are defined in `rustclaw.yaml` (Read, Write, Edit, exec, web_search, 
 ### GID Integration
 GID is built into RustClaw (gid-core crate). Graph at `.gid/graph.yml`.
 
-### 🔧 Development Workflow — ALWAYS use Ritual
-When you receive a development/implementation task:
+### 🔧 Development Workflow — Ritual Pipeline (v2)
 
-1. **`gid_ritual_init`** — Pick template:
-   - `quick-impl` → Small feature, bug fix, single-file change
-   - `full-dev-cycle` → New feature, multi-file, needs design
-   - `bugfix` → Bug investigation and fix
+**When you receive a coding/implementation task, ALWAYS ask the user first:**
 
-2. **`gid_ritual_run`** — Execute phases one by one. Each phase has a purpose (discover, design, implement, verify). Don't skip.
+> "这个任务要走 ritual 流程吗？（design → implement → verify）"
 
-3. **`gid_ritual_status`** — Check where you are if resuming.
+**Detection heuristics** — suggest ritual when the task involves:
+- Writing new code (new feature, new tool, new file)
+- Modifying existing source code (refactor, bugfix, add functionality)  
+- Creating a new project or module
+- Any task where you'd normally call `write_file` on source code
 
-4. **`gid_ritual_approve`** — When a phase needs human approval.
+**DON'T suggest ritual for:**
+- Config changes, documentation, memory updates
+- Reading/analyzing code (no writes)
+- Simple questions or discussions
 
-5. **`gid_ritual_skip`** / **`gid_ritual_cancel`** — Only if a phase genuinely can't proceed.
+**If user says yes → tell them to run `/ritual <task description>`**
+The `/ritual` command drives the V2 state machine:
+- Detects project state (DESIGN.md, graph, source files)
+- Plans strategy (single LLM vs multi-agent)
+- Executes phases: design → graph → implement → verify
+- Each phase sends Telegram progress notifications
+- `/ritual status` — check progress
+- `/ritual cancel` — abort
+- `/ritual retry` — retry from failure
+- `/ritual skip` — skip current phase
 
-**⚠️ NEVER bypass ritual to "just write code directly."** The ritual exists to enforce quality gates (design before code, tests after code). If you skip it, you skip the process potato defined.
+**If user says no or wants it done quickly → proceed normally** but note:
+- Tool gating may block writes to `src/**`, `tests/**`, `Cargo.toml` etc. without active ritual
+- If gating blocks you, tell the user: "这个路径被 ritual gating 保护了，需要 `/ritual` 启动流程"
 
-**If ritual init fails** → Tell the user, don't silently fall back to manual coding.
+**⚠️ NEVER silently bypass ritual.** If a task looks like coding work, ask first. The ritual exists to enforce quality gates (design before code, tests after code).
+
+**If `/ritual` fails** → Tell the user with the error, suggest `/ritual retry` or `/ritual skip`.
 
 ### Engram Recall
 ```bash

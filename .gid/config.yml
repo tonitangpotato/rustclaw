@@ -1,0 +1,23 @@
+ritual:
+  gating:
+    enabled: true
+    gated_paths:
+      - "src/**"
+      - "tests/**"
+      - "Cargo.toml"
+      - "build.rs"
+    ungated_paths:
+      - "DESIGN.md"
+      - ".gid/**"
+      - "docs/**"
+      - "memory/**"
+      - "AGENTS.md"
+      - "TOOLS.md"
+      - "*.md"
+      - "skills/**"
+    gated_commands:
+      - pattern: "^cargo\\s+(build|run|test|check)\\b"
+        type: regex
+      - pattern: "^rustc\\b"
+        type: regex
+    verify_command: "cargo build 2>&1 && cargo test 2>&1"

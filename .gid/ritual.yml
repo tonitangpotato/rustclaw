@@ -4,7 +4,7 @@ extends: null
 phases:
 - id: draft-design
   kind: skill
-  name: quick-design
+  name: draft-design
   model: sonnet
   approval: auto
   skip_if:
@@ -74,3 +74,4 @@ config:
   state_file: .gid/ritual-state.json
   log_file: .gid/execution-log.jsonl
   notify: null
+task_context: null

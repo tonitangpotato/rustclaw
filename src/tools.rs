@@ -65,11 +65,12 @@ pub trait Tool: Send + Sync {
 pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
     llm_client: Option<Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>>,
+    workspace_root: Option<std::path::PathBuf>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        Self { tools: Vec::new(), llm_client: None }
+        Self { tools: Vec::new(), llm_client: None, workspace_root: None }
     }
 
     /// Set the LLM client for ritual tools.
@@ -80,6 +81,7 @@ impl ToolRegistry {
     /// Register all default tools.
     pub fn with_defaults(workspace_root: &str, config: &crate::config::Config) -> Self {
         let mut registry = Self::new();
+        registry.workspace_root = Some(std::path::PathBuf::from(workspace_root));
         registry.register(Box::new(ExecTool));
         registry.register(Box::new(ReadFileTool::new(workspace_root)));
         registry.register(Box::new(WriteFileTool::new(workspace_root)));
@@ -252,7 +254,34 @@ impl ToolRegistry {
     }
 
     /// Execute a tool by name.
+    /// Applies tool gating: source code writes and build commands are blocked
+    /// unless a ritual is active, forcing the agent through the ritual pipeline.
     pub async fn execute(&self, name: &str, input: Value) -> anyhow::Result<ToolResult> {
+        // ── Tool gating check ──
+        if let Some(ref workspace) = self.workspace_root {
+            let config = gid_core::ritual::load_gating_config(workspace);
+            if config.enabled {
+                // Check if a ritual is active (state file exists and phase is non-terminal)
+                let ritual_active = self.is_ritual_active(workspace);
+
+                let file_path = input["path"].as_str()
+                    .or_else(|| input["file_path"].as_str());
+                let command = input["command"].as_str();
+
+                let result = gid_core::ritual::check_gating(
+                    &config, name, file_path, command, ritual_active,
+                );
+
+                if let gid_core::ritual::GatingResult::Blocked { reason } = result {
+                    tracing::info!(tool = name, "Tool gating blocked operation");
+                    return Ok(ToolResult {
+                        output: reason,
+                        is_error: true,
+                    });
+                }
+            }
+        }
+
         let tool = self
             .tools
             .iter()
@@ -260,6 +289,26 @@ impl ToolRegistry {
             .ok_or_else(|| anyhow::anyhow!("Unknown tool: {}", name))?;
 
         tool.execute(input).await
+    }
+
+    /// Check if a ritual is currently active by reading .gid/ritual-state.json.
+    fn is_ritual_active(&self, workspace: &std::path::Path) -> bool {
+        let state_path = workspace.join(".gid").join("ritual-state.json");
+        if !state_path.exists() {
+            return false;
+        }
+        match std::fs::read_to_string(&state_path) {
+            Ok(content) => {
+                // Check if phase is non-terminal (not Idle/Done/Escalated/Cancelled)
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                    let phase = v["phase"].as_str().unwrap_or("idle");
+                    !matches!(phase, "idle" | "done" | "escalated" | "cancelled")
+                } else {
+                    false
+                }
+            }
+            Err(_) => false,
+        }
     }
 }
 

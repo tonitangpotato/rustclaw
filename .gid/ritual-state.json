@@ -1,50 +1,50 @@
 {
   "ritual_name": "quick-impl",
-  "started_at": "2026-04-03T17:27:12.402870Z",
-  "current_phase": 4,
+  "started_at": "2026-04-03T19:53:13.370254Z",
+  "current_phase": 1,
   "phase_states": [
     {
       "phase_id": "draft-design",
-      "status": "completed",
-      "started_at": "2026-04-03T17:27:12.403405Z",
-      "completed_at": "2026-04-03T17:28:29.817137Z",
-      "artifacts_produced": [
-        "DESIGN.md"
-      ],
+      "status": {
+        "skipped": {
+          "reason": "File exists: DESIGN.md"
+        }
+      },
+      "started_at": null,
+      "completed_at": null,
+      "artifacts_produced": [],
       "error": null,
       "retry_count": 0
     },
     {
       "phase_id": "generate-graph",
-      "status": "completed",
-      "started_at": "2026-04-03T17:28:29.817563Z",
-      "completed_at": "2026-04-03T17:32:23.084394Z",
-      "artifacts_produced": [
-        ".gid/graph.yml"
-      ],
+      "status": "running",
+      "started_at": "2026-04-03T19:53:13.370963Z",
+      "completed_at": null,
+      "artifacts_produced": [],
       "error": null,
       "retry_count": 0
     },
     {
       "phase_id": "execute-tasks",
-      "status": "completed",
-      "started_at": "2026-04-03T17:32:23.084805Z",
-      "completed_at": "2026-04-03T17:38:22.217392Z",
+      "status": "pending",
+      "started_at": null,
+      "completed_at": null,
       "artifacts_produced": [],
       "error": null,
       "retry_count": 0
     },
     {
       "phase_id": "verify",
-      "status": "completed",
-      "started_at": "2026-04-03T17:38:22.217445Z",
-      "completed_at": "2026-04-03T17:38:22.285790Z",
+      "status": "pending",
+      "started_at": null,
+      "completed_at": null,
       "artifacts_produced": [],
       "error": null,
       "retry_count": 0
     }
   ],
   "status": {
-    "type": "completed"
+    "type": "running"
   }
 }
