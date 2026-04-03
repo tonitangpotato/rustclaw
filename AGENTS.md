@@ -124,6 +124,26 @@ Your tools are defined in `rustclaw.yaml` (Read, Write, Edit, exec, web_search, 
 ### GID Integration
 GID is built into RustClaw (gid-core crate). Graph at `.gid/graph.yml`.
 
+### 🔧 Development Workflow — ALWAYS use Ritual
+When you receive a development/implementation task:
+
+1. **`gid_ritual_init`** — Pick template:
+   - `quick-impl` → Small feature, bug fix, single-file change
+   - `full-dev-cycle` → New feature, multi-file, needs design
+   - `bugfix` → Bug investigation and fix
+
+2. **`gid_ritual_run`** — Execute phases one by one. Each phase has a purpose (discover, design, implement, verify). Don't skip.
+
+3. **`gid_ritual_status`** — Check where you are if resuming.
+
+4. **`gid_ritual_approve`** — When a phase needs human approval.
+
+5. **`gid_ritual_skip`** / **`gid_ritual_cancel`** — Only if a phase genuinely can't proceed.
+
+**⚠️ NEVER bypass ritual to "just write code directly."** The ritual exists to enforce quality gates (design before code, tests after code). If you skip it, you skip the process potato defined.
+
+**If ritual init fails** → Tell the user, don't silently fall back to manual coding.
+
 ### Engram Recall
 ```bash
 engram --db /Users/potato/rustclaw/engram-memory.db recall "query" --limit 5
