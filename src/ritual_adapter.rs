@@ -72,7 +72,11 @@ impl GidLlmClient for RitualLlmAdapter {
         let handler = SkillToolHandler { working_dir: working_dir.to_path_buf() };
 
         // Mini agent loop — up to 20 turns
-        for _turn in 0..20 {
+        let max_turns = 20;
+        for turn in 0..max_turns {
+            if turn == max_turns - 1 {
+                tracing::warn!("Ritual skill hit {}-turn limit, stopping", max_turns);
+            }
             let response = {
                 let client = self.client.read().await;
                 client.chat_with_model(
@@ -151,17 +155,44 @@ struct SkillToolHandler {
 }
 
 impl SkillToolHandler {
+    /// Resolve and validate a path — must stay within working_dir (no traversal).
+    fn resolve_path(&self, path_str: &str) -> Result<PathBuf> {
+        let full = self.working_dir.join(path_str);
+        // Canonicalize to resolve ../ etc. Falls back to cleaned path if file doesn't exist yet.
+        let resolved = full.canonicalize().unwrap_or_else(|_| {
+            // For new files, strip .. components manually
+            let mut components = Vec::new();
+            for c in full.components() {
+                match c {
+                    std::path::Component::ParentDir => { components.pop(); },
+                    std::path::Component::CurDir => {},
+                    _ => components.push(c),
+                }
+            }
+            components.iter().collect()
+        });
+        let working_canonical = self.working_dir.canonicalize()
+            .unwrap_or_else(|_| self.working_dir.clone());
+        if !resolved.starts_with(&working_canonical) {
+            return Err(anyhow::anyhow!(
+                "Path '{}' escapes working directory. Ritual skills can only access files within {}",
+                path_str, self.working_dir.display()
+            ));
+        }
+        Ok(resolved)
+    }
+
     async fn handle(&self, name: &str, input: &serde_json::Value) -> Result<String> {
         match name {
             "Read" => {
                 let path = input.get("path")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow::anyhow!("Missing 'path'"))?;
-                let full = self.working_dir.join(path);
+                let full = self.resolve_path(path)?;
                 let content = tokio::fs::read_to_string(&full).await
                     .map_err(|e| anyhow::anyhow!("Read {}: {}", full.display(), e))?;
                 // Truncate to 50k
-                Ok(if content.len() > 50_000 { content[..50_000].to_string() } else { content })
+                Ok(truncate_safe(&content, 50_000))
             }
             "Write" => {
                 let path = input.get("path")
@@ -170,7 +201,7 @@ impl SkillToolHandler {
                 let content = input.get("content")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow::anyhow!("Missing 'content'"))?;
-                let full = self.working_dir.join(path);
+                let full = self.resolve_path(path)?;
                 if let Some(parent) = full.parent() {
                     tokio::fs::create_dir_all(parent).await?;
                 }
@@ -187,7 +218,7 @@ impl SkillToolHandler {
                 let new_text = input.get("newText")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow::anyhow!("Missing 'newText'"))?;
-                let full = self.working_dir.join(path);
+                let full = self.resolve_path(path)?;
                 let content = tokio::fs::read_to_string(&full).await
                     .map_err(|e| anyhow::anyhow!("Edit read {}: {}", full.display(), e))?;
                 if let Some(pos) = content.find(old_text) {
@@ -214,9 +245,22 @@ impl SkillToolHandler {
                 if !stdout.is_empty() { result.push_str(&stdout); }
                 if !stderr.is_empty() { result.push_str("\nSTDERR: "); result.push_str(&stderr); }
                 // Truncate to 20k
-                Ok(if result.len() > 20_000 { result[..20_000].to_string() } else { result })
+                Ok(truncate_safe(&result, 20_000))
             }
             other => Err(anyhow::anyhow!("Unknown tool: {}", other)),
         }
     }
+}
+
+/// Truncate a string safely at a char boundary (never panics on multi-byte UTF-8).
+fn truncate_safe(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    // Find the last char boundary at or before max_bytes
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) && end > 0 {
+        end -= 1;
+    }
+    s[..end].to_string()
 }

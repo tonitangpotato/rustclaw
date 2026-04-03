@@ -93,16 +93,14 @@ impl RitualRunner {
             let (new_state, actions) = transition(&state, event);
             state = new_state;
 
-            // Execute fire-and-forget actions first (Notify, SaveState, UpdateGraph, Cleanup)
-            self.execute_fire_and_forget_with_state(&actions, &state).await;
-
             if state.phase.is_terminal() {
-                // Send enriched terminal notification (duration, context, guidance)
+                // Terminal: save state with final tokens, send notification
+                self.execute_fire_and_forget_with_state(&actions, &state).await;
                 self.send_terminal_notification(&state).await;
                 break;
             }
 
-            // Execute the single event-producing action
+            // Execute the single event-producing action FIRST (to get token count)
             let (evt, tokens_used) = match self.execute_event_producing(&actions).await {
                 Ok(pair) => pair,
                 Err(e) => (RitualEvent::SkillFailed {
@@ -110,11 +108,13 @@ impl RitualRunner {
                     error: format!("Executor error: {}", e),
                 }, 0),
             };
-            // Record tokens used by this phase
+            // Record tokens BEFORE SaveState fires
             if tokens_used > 0 {
                 let phase_name = state.phase.display_name().to_lowercase();
                 state = state.add_phase_tokens(&phase_name, tokens_used);
             }
+            // Now fire-and-forget (SaveState will include token counts)
+            self.execute_fire_and_forget_with_state(&actions, &state).await;
             event = evt;
         }
         Ok(state)
@@ -485,16 +485,20 @@ impl RitualRunner {
         }
     }
 
-    /// Run a shell command (for verify phase).
+    /// Run a shell command (for verify phase). Timeout: 5 minutes.
     async fn run_shell(&self, command: &str) -> Result<RitualEvent> {
         tracing::info!("Running shell command: {}", command);
 
-        let output = tokio::process::Command::new("bash")
-            .arg("-lc")
-            .arg(command)
-            .current_dir(&self.project_root)
-            .output()
-            .await?;
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            tokio::process::Command::new("bash")
+                .arg("-lc")
+                .arg(command)
+                .current_dir(&self.project_root)
+                .output()
+        ).await
+            .map_err(|_| anyhow::anyhow!("Shell command timed out after 5 minutes: {}", command))?
+            ?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
