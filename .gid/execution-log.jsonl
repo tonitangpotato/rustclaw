@@ -1,0 +1,11 @@
+{"event":"plan","total_tasks":4,"layers":1,"ts":"2026-04-03T17:32:23.152152Z"}
+{"event":"task_start","task_id":"task-dashboard-orchestrator-view","layer":0,"ts":"2026-04-03T17:32:23.171802Z"}
+{"event":"task_start","task_id":"task-hot-reload-orchestrator","layer":0,"ts":"2026-04-03T17:32:23.500710Z"}
+{"event":"task_start","task_id":"task-reply-to-context","layer":0,"ts":"2026-04-03T17:32:23.672258Z"}
+{"event":"task_done","task_id":"task-dashboard-orchestrator-view","turns":28,"tokens":7136,"duration_s":227,"verify":"pass","ts":"2026-04-03T17:36:11.065750Z"}
+{"event":"task_done","task_id":"task-hot-reload-orchestrator","turns":27,"tokens":20787,"duration_s":227,"verify":"pass","ts":"2026-04-03T17:36:11.134625Z"}
+{"event":"task_done","task_id":"task-reply-to-context","turns":30,"tokens":18026,"duration_s":227,"verify":"pass","ts":"2026-04-03T17:36:11.218958Z"}
+{"event":"task_start","task_id":"task-wasm-sandbox","layer":0,"ts":"2026-04-03T17:36:11.247003Z"}
+{"event":"task_done","task_id":"task-wasm-sandbox","turns":31,"tokens":4438,"duration_s":130,"verify":"pass","ts":"2026-04-03T17:38:21.926265Z"}
+{"event":"advise","passed":false,"score":20,"issues":26,"ts":"2026-04-03T17:38:22.194203Z"}
+{"event":"complete","total_turns":116,"total_tokens":50387,"duration_s":359,"failed":0,"ts":"2026-04-03T17:38:22.194369Z"}

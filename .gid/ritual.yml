@@ -1,0 +1,76 @@
+name: quick-impl
+description: 'Quick implementation: design → graph → implement → verify'
+extends: null
+phases:
+- id: draft-design
+  kind: skill
+  name: quick-design
+  model: sonnet
+  approval: auto
+  skip_if:
+    file_exists: DESIGN.md
+  timeout_minutes: 30
+  input: []
+  output:
+  - path: DESIGN.md
+    required: false
+  hooks:
+    pre: []
+    post: []
+  on_failure:
+    type: skip
+  harness_config: null
+- id: generate-graph
+  kind: skill
+  name: design-to-graph
+  model: sonnet
+  approval: optional
+  skip_if: null
+  timeout_minutes: 30
+  input: []
+  output:
+  - path: .gid/graph.yml
+    required: true
+  hooks:
+    pre: []
+    post: []
+  on_failure:
+    type: escalate
+  harness_config: null
+- id: execute-tasks
+  kind: harness
+  config_overrides: null
+  model: opus
+  approval: auto
+  skip_if: null
+  timeout_minutes: null
+  input: []
+  output: []
+  hooks:
+    pre: []
+    post: []
+  on_failure:
+    type: escalate
+  harness_config: null
+- id: verify
+  kind: gid_command
+  command: advise
+  args: []
+  model: null
+  approval: auto
+  skip_if: null
+  timeout_minutes: 15
+  input: []
+  output: []
+  hooks:
+    pre: []
+    post: []
+  on_failure:
+    type: escalate
+  harness_config: null
+config:
+  default_model: sonnet
+  default_approval: auto
+  state_file: .gid/ritual-state.json
+  log_file: .gid/execution-log.jsonl
+  notify: null

@@ -13,6 +13,7 @@ use crate::text_utils;
 const TELEGRAM_API: &str = "https://api.telegram.org";
 
 /// Telegram bot client.
+#[derive(Clone)]
 struct TelegramBot {
     client: reqwest::Client,
     token: String,
@@ -1268,9 +1269,15 @@ Choose a model:", current),
                             if let Some(id) = update["update_id"].as_i64() {
                                 offset = id + 1;
                             }
-                            if let Err(e) = self.handle_update(update).await {
-                                tracing::error!("Update handling error: {}", e);
-                            }
+                            // Spawn each update handler concurrently so /stop can
+                            // execute while a long-running agent call is in progress.
+                            let this = self.clone();
+                            let update = update.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = this.handle_update(&update).await {
+                                    tracing::error!("Update handling error: {}", e);
+                                }
+                            });
                         }
                     }
                 }

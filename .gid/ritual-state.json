@@ -1,0 +1,50 @@
+{
+  "ritual_name": "quick-impl",
+  "started_at": "2026-04-03T17:27:12.402870Z",
+  "current_phase": 4,
+  "phase_states": [
+    {
+      "phase_id": "draft-design",
+      "status": "completed",
+      "started_at": "2026-04-03T17:27:12.403405Z",
+      "completed_at": "2026-04-03T17:28:29.817137Z",
+      "artifacts_produced": [
+        "DESIGN.md"
+      ],
+      "error": null,
+      "retry_count": 0
+    },
+    {
+      "phase_id": "generate-graph",
+      "status": "completed",
+      "started_at": "2026-04-03T17:28:29.817563Z",
+      "completed_at": "2026-04-03T17:32:23.084394Z",
+      "artifacts_produced": [
+        ".gid/graph.yml"
+      ],
+      "error": null,
+      "retry_count": 0
+    },
+    {
+      "phase_id": "execute-tasks",
+      "status": "completed",
+      "started_at": "2026-04-03T17:32:23.084805Z",
+      "completed_at": "2026-04-03T17:38:22.217392Z",
+      "artifacts_produced": [],
+      "error": null,
+      "retry_count": 0
+    },
+    {
+      "phase_id": "verify",
+      "status": "completed",
+      "started_at": "2026-04-03T17:38:22.217445Z",
+      "completed_at": "2026-04-03T17:38:22.285790Z",
+      "artifacts_produced": [],
+      "error": null,
+      "retry_count": 0
+    }
+  ],
+  "status": {
+    "type": "completed"
+  }
+}

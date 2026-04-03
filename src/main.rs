@@ -319,8 +319,8 @@ async fn main() -> anyhow::Result<()> {
             if let Some(ref orch_ref) = orch {
                 let tick_interval = cfg.orchestrator.tick_interval;
                 // Wire config hot-reload to orchestrator (specialists, tick_interval, max_concurrent)
-                orchestrator::start_config_reload_listener(orch_clone.clone(), orch_config_rx).await;
                 let orch_clone = orch_ref.clone();
+                orchestrator::start_config_reload_listener(orch_clone.clone(), orch_config_rx).await;
                 let runner_clone = runner.clone();
                 tokio::spawn(async move {
                     orchestrator::start_orchestrator_loop(orch_clone, runner_clone, tick_interval).await;
