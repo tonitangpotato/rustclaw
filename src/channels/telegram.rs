@@ -606,6 +606,7 @@ Choose a model:", current),
                     /stop — Stop current task\n\
                     /sessions — List recent active sessions\n\
                     /ritual — Run a development ritual (multi-phase pipeline)\n\
+                    /ping — Pong with current time\n\
                     /help — Show this help";
                 self.send_message(chat_id, msg, None).await?;
                 Ok(true)
@@ -619,6 +620,11 @@ Choose a model:", current),
                     arg
                 };
                 self.handle_ritual_command(chat_id, arg).await?;
+                Ok(true)
+            }
+            "/ping" => {
+                let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                self.send_message(chat_id, &format!("pong 🏓 {}", now), None).await?;
                 Ok(true)
             }
             _ => Ok(false), // Not a known command, pass to agent

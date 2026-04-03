@@ -397,7 +397,7 @@ impl RitualRunner {
         tracing::info!("Running shell command: {}", command);
 
         let output = tokio::process::Command::new("bash")
-            .arg("-c")
+            .arg("-lc")
             .arg(command)
             .current_dir(&self.project_root)
             .output()
