@@ -678,36 +678,48 @@ Choose a model:", current),
                     }
                 }
             }
-            "cancel" => {
+            arg if arg == "cancel" || arg.starts_with("cancel ") => {
                 let runner = self.make_ritual_runner(chat_id);
-                let state = runner.load_state()?;
-                if state.phase.is_terminal() || state.phase == gid_core::ritual::V2Phase::Idle {
+                let specific_id = arg.strip_prefix("cancel ").map(|s| s.trim()).filter(|s| !s.is_empty());
+
+                let target_state = if let Some(id) = specific_id {
+                    // Cancel specific ritual by ID
+                    match runner.load_state_by_id(id) {
+                        Ok(s) => s,
+                        Err(_) => {
+                            self.send_message(chat_id, &format!("❌ Ritual `{}` not found.", id), None).await?;
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    // Cancel latest active ritual
+                    runner.load_state()?
+                };
+
+                if target_state.phase.is_terminal() || target_state.phase == gid_core::ritual::V2Phase::Idle {
                     self.send_message(chat_id, "No active ritual to cancel.", None).await?;
                 } else {
                     // Immediately interrupt running ritual via cancellation token
-                    let interrupted = runner.cancel_running(&state.id);
+                    let interrupted = runner.cancel_running(&target_state.id);
                     if interrupted {
-                        tracing::info!(ritual_id = %state.id, "Interrupted running ritual via cancel token");
-                        // The running loop will detect cancellation and transition to Cancelled
+                        tracing::info!(ritual_id = %target_state.id, "Interrupted running ritual via cancel token");
                         self.send_message(
                             chat_id,
-                            &format!("🛑 Interrupting ritual `{}` (was in {} phase)...", state.id, state.phase.display_name()),
+                            &format!("🛑 Interrupting ritual `{}` (was in {} phase)...", target_state.id, target_state.phase.display_name()),
                             None,
                         ).await?;
                     } else {
-                        // Ritual not actively running (maybe paused/escalated) — send cancel event
-                        match runner.send_event(RitualEvent::UserCancel).await {
-                            Ok(state) => {
-                                self.send_message(
-                                    chat_id,
-                                    &format!("🛑 Ritual cancelled (was in {} phase).", state.phase.display_name()),
-                                    None,
-                                ).await?;
-                            }
-                            Err(e) => {
-                                self.send_message(chat_id, &format!("❌ Cancel failed: {}", e), None).await?;
-                            }
+                        // Ritual not actively running (paused/escalated) — update state directly
+                        let cancelled = target_state.clone()
+                            .with_phase(gid_core::ritual::V2Phase::Cancelled);
+                        if let Err(e) = runner.save_state(&cancelled) {
+                            tracing::error!("Failed to save cancelled state: {}", e);
                         }
+                        self.send_message(
+                            chat_id,
+                            &format!("🛑 Ritual `{}` cancelled (was in {} phase).", target_state.id, target_state.phase.display_name()),
+                            None,
+                        ).await?;
                     }
                 }
             }
@@ -769,7 +781,7 @@ Choose a model:", current),
                     "🔧 **Ritual Commands**\n\n\
                      `/ritual <task>` — Start a new development ritual\n\
                      `/ritual status` — Show current ritual status\n\
-                     `/ritual cancel` — Cancel the active ritual\n\
+                     `/ritual cancel [id]` — Cancel a ritual (latest or by ID)\n\
                      `/ritual retry` — Retry from escalated state\n\
                      `/ritual skip` — Skip current phase\n\
                      `/ritual clarify <response>` — Answer clarification question",
