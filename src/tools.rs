@@ -2376,10 +2376,18 @@ impl Tool for SpawnSpecialistTool {
                 match runner.process_with_subagent(&subagent, task, Some(&task_id)).await {
                     Ok(result) => {
                         tracing::info!("Sub-agent {} completed: {} chars", task_id, result.len());
+                        // Truncate sub-agent output to prevent blowing up parent's context
+                        let max_output = 8000; // ~2000 tokens
+                        let truncated_result = if result.chars().count() > max_output {
+                            let preview: String = result.chars().take(max_output).collect();
+                            format!("{}\n\n... (truncated from {} chars — sub-agent wrote full output to files)", preview, result.chars().count())
+                        } else {
+                            result
+                        };
                         Ok(ToolResult {
                             output: format!(
                                 "## Sub-agent '{}' completed\n\n### Result:\n{}",
-                                task_id, result
+                                task_id, truncated_result
                             ),
                             is_error: false,
                         })
