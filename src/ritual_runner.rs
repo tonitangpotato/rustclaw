@@ -687,22 +687,75 @@ Guidelines:
 
         let result = gid_client.run_skill(
             &skill_prompt,
-            tools,
+            tools.clone(),
             model,
             &self.project_root,
         ).await;
 
         match result {
             Ok(skill_result) => {
-                let tokens = skill_result.tokens_used;
+                let mut total_tokens = skill_result.tokens_used;
                 tracing::info!(
                     "Skill '{}' completed: {} tool calls, {} tokens",
-                    name, skill_result.tool_calls_made, tokens
+                    name, skill_result.tool_calls_made, total_tokens
                 );
+
+                // Self-review loop for implement phase: up to 4 rounds of review
+                // Each round reads back modified files and checks for issues.
+                // Stops when LLM responds with REVIEW_PASS or max rounds reached.
+                if name == "implement" || name == "execute-tasks" {
+                    let max_reviews = 4;
+                    for round in 1..=max_reviews {
+                        let review_prompt = format!(
+                            "## SELF-REVIEW ROUND {}/{}\n\n\
+                             Read back ALL files you modified in the previous step. \
+                             Carefully check for:\n\
+                             - Logic errors and incorrect assumptions\n\
+                             - Missing edge cases and error handling\n\
+                             - Type mismatches and off-by-one errors\n\
+                             - Unused imports or variables\n\
+                             - Inconsistencies with the rest of the codebase\n\n\
+                             If you find issues, fix them using the available tools.\n\
+                             If everything looks correct after thorough review, respond with exactly: REVIEW_PASS",
+                            round, max_reviews
+                        );
+
+                        tracing::info!("Implement self-review round {}/{}", round, max_reviews);
+                        let review_result = gid_client.run_skill(
+                            &review_prompt,
+                            tools.clone(),
+                            model,
+                            &self.project_root,
+                        ).await;
+
+                        match review_result {
+                            Ok(review) => {
+                                total_tokens += review.tokens_used;
+                                let output = review.output.to_lowercase();
+                                if output.contains("review_pass") {
+                                    tracing::info!(
+                                        "Self-review passed at round {}/{} ({} tokens used)",
+                                        round, max_reviews, review.tokens_used
+                                    );
+                                    break;
+                                }
+                                tracing::info!(
+                                    "Self-review round {} found issues — {} tool calls, {} tokens",
+                                    round, review.tool_calls_made, review.tokens_used
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!("Self-review round {} failed: {} — continuing", round, e);
+                                break;
+                            }
+                        }
+                    }
+                }
+
                 Ok((RitualEvent::SkillCompleted {
                     phase: name.to_string(),
                     artifacts: skill_result.artifacts_created.iter().map(|p| p.display().to_string()).collect(),
-                }, tokens))
+                }, total_tokens))
             }
             Err(e) => {
                 tracing::error!("Skill '{}' failed: {}", name, e);
