@@ -122,7 +122,18 @@ Don't silently disappear into a 5-minute tool loop. The user should never wonder
 Your tools are defined in `rustclaw.yaml` (Read, Write, Edit, exec, web_search, etc.). Keep local notes in `TOOLS.md`.
 
 ### GID Integration
-GID is built into RustClaw (gid-core crate). Graph at `.gid/graph.yml`.
+GID is built into RustClaw (gid-core crate). Key paths:
+- **Graph:** `.gid/graph.yml` — project structure, tasks, dependencies
+- **Features:** `.gid/features/<feature-name>/` — per-feature documents:
+  - `requirements-*.md` — split requirement docs (numbered)
+  - `requirements-master.md` — master requirements overview
+  - `design-*.md` — split design docs (numbered)
+  - `design.md` — master design overview
+- **Reviews:** `.gid/reviews/<doc-name>-review.md` — review findings with FINDING-N IDs
+- **Rituals:** `.gid/rituals/<id>.json` — ritual state files
+- **Config:** `.gid/config.yml` — ritual gating, tool scope settings
+
+**Always check `.gid/features/` first** when looking for project documents (requirements, designs). They are split into numbered sub-documents for manageability.
 
 ### 🔧 Development Workflow — Ritual Pipeline (v2)
 
