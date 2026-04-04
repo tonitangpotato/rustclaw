@@ -951,15 +951,63 @@ Guidelines:
         }
     }
 
-    /// Best-effort update of graph nodes.
+    /// Update graph node matching the task description — mark as done.
+    /// Uses fuzzy title/description matching, best-effort (errors logged, never crashes ritual).
     async fn update_graph(&self, description: &str) {
+        use gid_core::graph::{Graph, NodeStatus};
+
         let graph_path = self.project_root.join(".gid/graph.yml");
-        if graph_path.exists() {
-            tracing::info!("UpdateGraph (best-effort): {}", truncate(description, 100));
-            // Best-effort: just log for now. Full graph update would require
-            // parsing graph.yml and updating node statuses.
-        } else {
+        if !graph_path.exists() {
             tracing::debug!("No graph.yml found, skipping UpdateGraph");
+            return;
+        }
+
+        let content = match std::fs::read_to_string(&graph_path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("Failed to read graph.yml: {}", e);
+                return;
+            }
+        };
+        let mut graph: Graph = match serde_yaml::from_str(&content) {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!("Failed to parse graph.yml: {}", e);
+                return;
+            }
+        };
+
+        // Fuzzy match: find node whose title/description contains the task text (or vice versa)
+        let desc_lower = description.to_lowercase();
+        let matched_id = graph.nodes.iter()
+            .filter(|n| matches!(n.status, NodeStatus::Todo | NodeStatus::InProgress))
+            .find(|n| {
+                let title_lower = n.title.to_lowercase();
+                let node_desc = n.description.as_deref().unwrap_or("").to_lowercase();
+                desc_lower.contains(&title_lower)
+                    || title_lower.contains(&desc_lower)
+                    || (!node_desc.is_empty() && (
+                        desc_lower.contains(&node_desc)
+                        || node_desc.contains(&desc_lower)
+                    ))
+            })
+            .map(|n| n.id.clone());
+
+        if let Some(id) = matched_id {
+            if graph.mark_task_done(&id) {
+                match serde_yaml::to_string(&graph) {
+                    Ok(yaml) => {
+                        if let Err(e) = std::fs::write(&graph_path, &yaml) {
+                            tracing::warn!("Failed to write graph.yml: {}", e);
+                        } else {
+                            tracing::info!(node_id = %id, "Marked graph node as done");
+                        }
+                    }
+                    Err(e) => tracing::warn!("Failed to serialize graph: {}", e),
+                }
+            }
+        } else {
+            tracing::info!(description = %truncate(description, 100), "No matching graph node found");
         }
     }
 

@@ -59,6 +59,14 @@
 - IDEA-20260403-01 (自动化 Skill 优化) — Skill 也是 Harness 的一部分，可以自动优化
 - engram/cognitive memory — "让 Agent 自己做信息检索和因果推理" 和 engram 的 ACT-R 激活机制理念相通
 
+## Action Items
+
+- [x] ~~execution-log.jsonl 保留完整历史~~ — **已实现**：gid-harness telemetry.rs 已是 append-only JSONL，每个事件立即 flush，无压缩无摘要（GUARD-8）。论文验证了这个设计决策正确（完整历史 50% >> 压缩摘要 34.9%）✅
+- [ ] 给 gid-harness 加 Meta-Harness 式自动优化循环 — harness 已有完整 trace，下一步是让 proposer agent 读取 execution-log.jsonl 历史，自动提出 harness/ritual 改进建议 [P1]
+- [ ] 给 ritual pipeline 加 phase 级 trace（每次 ritual 的 phase 耗时、成功/失败、retry 次数、token 消耗）— 当前 ritual 缺少结构化 trace，需补齐以支持自动优化 [P1]
+- [ ] 评估 TerminalBench-2 作为 RustClaw coding agent 能力的 benchmark — 直接可用，有公开排行榜 [P2]
+- [ ] 将 "加法优于修改" 原则文档化到 AGENTS.md — Skill 叠加能力 > 修改核心代码，论文第 7 轮转折验证了这个策略 [P1]
+
 ## References
 
 - 论文: https://yoonholee.com/meta-harness/paper.pdf

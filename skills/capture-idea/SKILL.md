@@ -128,6 +128,9 @@ If connections were found in Step 3, go back and update the **existing** entries
 ### Potential Value
 {value assessment}
 
+### Action Items
+- [ ] {Concrete action} — {why} [{P0/P1/P2}]
+
 ### Connections
 {related ideas/projects found}
 
@@ -160,6 +163,10 @@ Reply to potato with a concise summary, and **actively surface connections**:
 {1-2 sentence summary}
 💰 Value: {potential value assessment}
 📝 Saved to IDEAS.md as IDEA-{id}
+
+🎯 **Action Items:**
+- [ ] {Concrete action} — {why} [{P0/P1/P2}]
+- [ ] {Concrete action} — {why} [{P0/P1/P2}]
 
 🔗 **这个让我想到：**
 - {Related idea/project} — {WHY it's connected, not just "related"}

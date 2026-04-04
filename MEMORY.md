@@ -93,4 +93,42 @@
 - System prompt is modular: context files → skills → channel caps → runtime → behavior rules
 - Skills are markdown-based workflows with YAML frontmatter triggers — no Rust code needed
 
-*Last updated: 2026-03-29 (evening refactor)*
+*Last updated: 2026-04-03*
+
+---
+
+## GID Ecosystem (2026-04-02)
+
+### 四个项目定位
+- **gid-core** — 图引擎 + 共享类型（事件格式、状态 schema）
+- **gid-harness** — AI 自主开发执行引擎 ✅ **已完整实现**
+- **gidterm** — TUI surface，纯展示层，读 execution-log.jsonl
+- **agentctl** — daemon 进程管家（TUI + Telegram bot，7,001行，38 tests）
+
+### gid-harness ✅ DONE
+- **15 个 Rust 源文件，6,881 行代码**
+- 路径：`/Users/potato/clawd/projects/gid-rs/crates/gid-core/src/harness/`
+- 模块：executor, scheduler, replanner, context, notifier, planner, verifier, topology, worktree, config, types, telemetry, log_reader, execution_state
+- 文件系统是 backend：graph.yml + execution-log.jsonl + execution-state.json
+- 7-Phase 流程（Phase 1-3 人机协作，Phase 4-7 AI 自动）
+- gate:human tag 做审批控制
+
+### 关键架构决策
+- 方案 B：harness 独立实现，gidterm 是纯 UI
+- 共享协议不共享代码：事件格式和状态 schema 在 gid-core
+- 所有 surface（Telegram、gidterm、CLI）读写同一套文件
+
+---
+
+## 产品商业化定位 (2026-04-03 potato 明确)
+
+### 可卖钱的产品
+- **xinfluencer** — X/Twitter 影响力增长工具，Rust，6,462 行，13 模块
+  - 自用：集成进 RustClaw，Telegram Bot 控制
+  - 商业：作为独立 SaaS 产品卖
+  - 功能：autopilot, engage, discover, crawler, scoring, brand_audit, graph, monitor
+- **Knowledge Compiler** (IDEA-20260403-02) — 知识管理产品化
+
+### 内部工具（不适合直接卖）
+- **gid-harness** — AI 开发执行引擎，主要内部使用，作为服务卖比较困难
+- **agentctl** — 进程管家，纯运维工具

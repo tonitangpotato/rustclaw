@@ -216,6 +216,33 @@ engram_recall("{tags}")
 # - Similar patterns or themes
 ```
 
+**Generate Action Items:**
+
+After analyzing the content AND finding connections, actively think about **what we should DO**. This is the most important part of intake — passive archival is useless without action.
+
+Ask for each item:
+1. **Does this change how we should build something?** → action: update design/requirements
+2. **Does this validate or invalidate a decision we made?** → action: revisit decision, update MEMORY.md
+3. **Does this reveal a tool/technique we should adopt?** → action: try it, add to TODO
+4. **Does this reveal a competitive threat or opportunity?** → action: prioritize/deprioritize a project
+5. **Does this connect to an existing project that's stalled?** → action: unblock it with this new info
+6. **Does this suggest a content/marketing opportunity?** → action: write about it, share insight
+7. **Can we directly apply this to make money?** → action: implement, with timeline
+
+**Action Item format:**
+```
+ACTION ITEMS:
+- [ ] {Concrete action} — {why, referencing specific project/idea} [{priority: P0/P1/P2}]
+- [ ] {Concrete action} — {why} [{priority}]
+```
+
+**Rules for action items:**
+- Be SPECIFIC: "Update gid-harness design to use append-only event log" not "consider this approach"
+- Reference EXISTING projects/ideas by name when applicable
+- Assign priority: P0 (do this week), P1 (do this month), P2 (backlog)
+- If genuinely no action items → say "No immediate action items" (but this should be rare — most content has at least one)
+- Max 5 action items per intake (focus on highest value)
+
 **Critical judgment - Does this trigger a NEW idea?**
 
 Ask yourself:
@@ -274,6 +301,11 @@ cat > intake/{platform}/{slug}.md << 'EOF'
 
 {List any related ideas/projects discovered via engram_recall}
 {If none: "No existing connections identified."}
+
+## Action Items
+
+{Concrete next steps triggered by this content}
+- [ ] {action} — {why} [{priority}]
 
 ---
 
@@ -398,20 +430,15 @@ fi
 🔗 **Connections**:
 {List related ideas/projects found, or "No existing connections found"}
 
+🎯 **Action Items**:
+- [ ] {Concrete action} — {why} [{P0/P1/P2}]
+- [ ] {Concrete action} — {why} [{P0/P1/P2}]
+
 💡 **New Idea**:
 {If a new idea was triggered, describe it here}
-{Otherwise: "Archived for reference - no immediate insights triggered"}
+{Otherwise omit this section entirely}
 
-📁 **Saved to**: intake/{date}/{platform}-{slug}.md
-```
-
-**Include actionable suggestions if applicable:**
-```
-💰 **Potential Value**: {assessment}
-
-🎯 **Suggested Actions**:
-- {action item 1}
-- {action item 2}
+📁 **Saved to**: intake/{platform}/{slug}.md
 ```
 
 ## Error Handling & Fallback Chain
