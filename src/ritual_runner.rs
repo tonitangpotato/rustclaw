@@ -700,24 +700,41 @@ Guidelines:
                     name, skill_result.tool_calls_made, total_tokens
                 );
 
-                // Self-review loop for implement phase: up to 4 rounds of review
-                // Each round reads back modified files and checks for issues.
+                // Self-review loop: up to N rounds of auto-review after key phases.
+                // Each round reads back output and checks for issues.
                 // Stops when LLM responds with REVIEW_PASS or max rounds reached.
-                if name == "implement" || name == "execute-tasks" {
+                let review_phases = ["implement", "execute-tasks", "draft-design", "update-design", "draft-requirements"];
+                if review_phases.contains(&name) {
                     let max_reviews = 4;
                     for round in 1..=max_reviews {
-                        let review_prompt = format!(
-                            "## SELF-REVIEW ROUND {}/{}\n\n\
-                             Read back ALL files you modified in the previous step. \
-                             Carefully check for:\n\
+                        let checklist = match name {
+                            "draft-design" | "update-design" => "\
+                             - Does the design actually solve the stated problem?\n\
+                             - Are there missing components or interactions?\n\
+                             - Are edge cases and error scenarios addressed?\n\
+                             - Is the architecture over-engineered or under-engineered?\n\
+                             - Are interfaces clear and well-defined?\n\
+                             - Does it conflict with existing architecture?",
+                            "draft-requirements" => "\
+                             - Are requirements specific and testable (not vague)?\n\
+                             - Are there missing requirements or unstated assumptions?\n\
+                             - Are acceptance criteria measurable?\n\
+                             - Do requirements conflict with each other?\n\
+                             - Are non-functional requirements covered (perf, security)?",
+                            _ => "\
                              - Logic errors and incorrect assumptions\n\
                              - Missing edge cases and error handling\n\
                              - Type mismatches and off-by-one errors\n\
                              - Unused imports or variables\n\
-                             - Inconsistencies with the rest of the codebase\n\n\
+                             - Inconsistencies with the rest of the codebase",
+                        };
+                        let review_prompt = format!(
+                            "## SELF-REVIEW ROUND {}/{}\n\n\
+                             Read back ALL files you created or modified in the previous step. \
+                             Carefully check for:\n{}\n\n\
                              If you find issues, fix them using the available tools.\n\
                              If everything looks correct after thorough review, respond with exactly: REVIEW_PASS",
-                            round, max_reviews
+                            round, max_reviews, checklist
                         );
 
                         tracing::info!("Implement self-review round {}/{}", round, max_reviews);
