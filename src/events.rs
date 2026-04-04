@@ -5,6 +5,28 @@
 
 use tokio::sync::mpsc;
 
+/// Sub-agent lifecycle events — broadcast to all listeners (e.g., telegram.rs).
+/// These events trigger proactive agent turns when sub-agents complete.
+#[derive(Debug, Clone)]
+pub enum SubAgentEvent {
+    /// A fire-and-forget sub-agent completed successfully.
+    Completed {
+        task_id: String,
+        parent_session_key: String,
+        task_summary: String,
+        result_preview: String,
+        duration_secs: f64,
+    },
+    /// A fire-and-forget sub-agent failed.
+    Failed {
+        task_id: String,
+        parent_session_key: String,
+        task_summary: String,
+        error: String,
+        duration_secs: f64,
+    },
+}
+
 /// Events emitted by the agent during message processing.
 #[derive(Debug, Clone)]
 pub enum AgentEvent {

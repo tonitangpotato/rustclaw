@@ -924,6 +924,69 @@ Choose a model:", current),
         ).with_agent_runner(self.runner.clone())
     }
 
+    /// Handle a sub-agent lifecycle event: trigger a proactive agent turn so the agent
+    /// knows its sub-agent completed/failed and can act on it.
+    async fn handle_subagent_event(&self, event: crate::events::SubAgentEvent) {
+        let (parent_key, system_msg) = match &event {
+            crate::events::SubAgentEvent::Completed { task_id, parent_session_key, task_summary, result_preview, duration_secs } => {
+                let msg = format!(
+                    "[system] Your sub-agent '{}' has completed ({:.0}s).\nTask: {}\nResult summary: {}",
+                    task_id, duration_secs, task_summary, result_preview
+                );
+                (parent_session_key.clone(), msg)
+            }
+            crate::events::SubAgentEvent::Failed { task_id, parent_session_key, task_summary, error, duration_secs } => {
+                let msg = format!(
+                    "[system] Your sub-agent '{}' has FAILED ({:.0}s).\nTask: {}\nError: {}",
+                    task_id, duration_secs, task_summary, error
+                );
+                (parent_session_key.clone(), msg)
+            }
+        };
+
+        if parent_key.is_empty() {
+            tracing::warn!("Sub-agent event with empty parent session key, skipping proactive turn");
+            return;
+        }
+
+        // Extract chat_id from parent session key (format: "telegram:{chat_id}")
+        let chat_id = match parent_key.strip_prefix("telegram:").and_then(|s| s.parse::<i64>().ok()) {
+            Some(id) => id,
+            None => {
+                tracing::warn!("Cannot parse chat_id from parent session key: {}", parent_key);
+                return;
+            }
+        };
+
+        tracing::info!("Triggering proactive agent turn for sub-agent event → {}", parent_key);
+
+        // Process the system message through the agent and stream response to Telegram
+        let mut rx = self.runner.process_message_events(
+            &parent_key,
+            &system_msg,
+            None, // system message, no user
+            Some("telegram"),
+            false,
+        );
+
+        // Consume events and send responses to Telegram
+        while let Some(event) = rx.recv().await {
+            match event {
+                crate::events::AgentEvent::Response(text) => {
+                    if !text.is_empty() && text != "HEARTBEAT_OK" {
+                        if let Err(e) = self.send_message(chat_id, &text, None).await {
+                            tracing::error!("Failed to send proactive response: {}", e);
+                        }
+                    }
+                }
+                crate::events::AgentEvent::Error(e) => {
+                    tracing::error!("Error in proactive agent turn: {}", e);
+                }
+                _ => {} // Ignore intermediate events
+            }
+        }
+    }
+
     fn make_notify_fn(&self, chat_id: i64) -> crate::ritual_runner::NotifyFn {
         let bot = self.clone();
         Arc::new(move |msg: String| {
@@ -1707,6 +1770,27 @@ pub async fn start(config: TelegramConfig, runner: Arc<AgentRunner>) -> anyhow::
     let bot = TelegramBot::new(config, runner).await?;
     // Register channel capabilities with the agent runner
     bot.runner.set_channel_capabilities(bot.capabilities()).await;
+
+    // Spawn sub-agent event listener for proactive completion handling
+    let bot_clone = bot.clone();
+    let mut event_rx = bot.runner.subagent_events.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match event_rx.recv().await {
+                Ok(event) => {
+                    bot_clone.handle_subagent_event(event).await;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("Sub-agent event listener lagged, missed {} events", n);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::info!("Sub-agent event channel closed, stopping listener");
+                    break;
+                }
+            }
+        }
+    });
+
     bot.run().await
 }
 

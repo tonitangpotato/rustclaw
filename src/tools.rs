@@ -72,6 +72,8 @@ pub struct ToolRegistry {
     /// Current parent session key — set per-request by telegram.rs,
     /// used by fire-and-forget sub-agents to inject completion back into parent.
     pub current_session_key: Arc<std::sync::Mutex<Option<String>>>,
+    /// Broadcast sender for sub-agent lifecycle events.
+    pub subagent_event_tx: Option<tokio::sync::broadcast::Sender<crate::events::SubAgentEvent>>,
 }
 
 impl ToolRegistry {
@@ -82,6 +84,7 @@ impl ToolRegistry {
             workspace_root: None,
             ritual_notify: Arc::new(std::sync::Mutex::new(None)),
             current_session_key: Arc::new(std::sync::Mutex::new(None)),
+            subagent_event_tx: None,
         }
     }
 
@@ -172,7 +175,8 @@ impl ToolRegistry {
     pub fn with_spawn_specialist(mut self, runner: SharedAgentRunner, orchestrator: Option<SharedOrchestrator>) -> Self {
         let notify_slot = self.ritual_notify.clone();
         let session_key_slot = self.current_session_key.clone();
-        self.register(Box::new(SpawnSpecialistTool::new(runner, orchestrator, notify_slot, session_key_slot)));
+        let event_tx = self.subagent_event_tx.clone();
+        self.register(Box::new(SpawnSpecialistTool::new(runner, orchestrator, notify_slot, session_key_slot, event_tx)));
         self
     }
 
@@ -2120,6 +2124,7 @@ pub struct SpawnSpecialistTool {
     orchestrator: Option<SharedOrchestrator>,
     notify_slot: Arc<std::sync::Mutex<Option<crate::ritual_runner::NotifyFn>>>,
     session_key_slot: Arc<std::sync::Mutex<Option<String>>>,
+    event_tx: Option<tokio::sync::broadcast::Sender<crate::events::SubAgentEvent>>,
 }
 
 impl SpawnSpecialistTool {
@@ -2128,8 +2133,9 @@ impl SpawnSpecialistTool {
         orchestrator: Option<SharedOrchestrator>,
         notify_slot: Arc<std::sync::Mutex<Option<crate::ritual_runner::NotifyFn>>>,
         session_key_slot: Arc<std::sync::Mutex<Option<String>>>,
+        event_tx: Option<tokio::sync::broadcast::Sender<crate::events::SubAgentEvent>>,
     ) -> Self {
-        Self { runner, orchestrator, notify_slot, session_key_slot }
+        Self { runner, orchestrator, notify_slot, session_key_slot, event_tx }
     }
 
     /// Fire-and-forget notification via the shared notify slot (Telegram).
@@ -2313,6 +2319,7 @@ impl Tool for SpawnSpecialistTool {
             let notify_slot_ping = self.notify_slot.clone();
             // Capture parent session key for completion injection
             let parent_session_key = self.session_key_slot.lock().unwrap().clone();
+            let event_tx = self.event_tx.clone();
             let start_time = std::time::Instant::now();
             let task_summary = if task.chars().count() > 80 {
                 format!("{}...", task.chars().take(80).collect::<String>())
@@ -2379,18 +2386,15 @@ impl Tool for SpawnSpecialistTool {
                                 );
                                 // Notify user via Telegram
                                 send_notify(completion_msg.clone());
-                                // Queue completion into parent session so agent sees it on next turn
-                                if let Some(ref parent_key) = parent_session_key {
-                                    runner_clone.queue_message(
-                                        parent_key,
-                                        &format!(
-                                            "[system] Your sub-agent '{}' has completed.\nTask: {}\nResult summary: {}",
-                                            final_config_clone.id, task_summary, result_preview
-                                        ),
-                                        None,
-                                        crate::message_queue::Priority::Next,
-                                    ).await;
-                                    tracing::info!("Queued sub-agent completion into parent session: {}", parent_key);
+                                // Broadcast completion event — telegram.rs listener triggers proactive agent turn
+                                if let Some(ref tx) = event_tx {
+                                    let _ = tx.send(crate::events::SubAgentEvent::Completed {
+                                        task_id: final_config_clone.id.clone(),
+                                        parent_session_key: parent_session_key.clone().unwrap_or_default(),
+                                        task_summary: task_summary.clone(),
+                                        result_preview: result_preview.clone(),
+                                        duration_secs: elapsed.as_secs_f64(),
+                                    });
                                 }
                             }
                             Err(e) => {
@@ -2405,17 +2409,15 @@ impl Tool for SpawnSpecialistTool {
                                     duration, task_summary, final_config_clone.id, e
                                 );
                                 send_notify(fail_msg.clone());
-                                // Queue failure into parent session
-                                if let Some(ref parent_key) = parent_session_key {
-                                    runner_clone.queue_message(
-                                        parent_key,
-                                        &format!(
-                                            "[system] Your sub-agent '{}' has FAILED.\nTask: {}\nError: {}",
-                                            final_config_clone.id, task_summary, e
-                                        ),
-                                        None,
-                                        crate::message_queue::Priority::Next,
-                                    ).await;
+                                // Broadcast failure event
+                                if let Some(ref tx) = event_tx {
+                                    let _ = tx.send(crate::events::SubAgentEvent::Failed {
+                                        task_id: final_config_clone.id.clone(),
+                                        parent_session_key: parent_session_key.clone().unwrap_or_default(),
+                                        task_summary: task_summary.clone(),
+                                        error: e.to_string(),
+                                        duration_secs: elapsed.as_secs_f64(),
+                                    });
                                 }
                             }
                         }

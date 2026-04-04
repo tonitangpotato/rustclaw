@@ -68,6 +68,9 @@ pub struct AgentRunner {
     cancellation_tokens: Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio_util::sync::CancellationToken>>>,
     /// Parent session → child sub-agent session keys (for cascade cancel)
     subagent_children: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Vec<String>>>>,
+    /// Broadcast channel for sub-agent lifecycle events (completion/failure).
+    /// Listeners (e.g., telegram.rs) subscribe to trigger proactive agent turns.
+    pub subagent_events: tokio::sync::broadcast::Sender<crate::events::SubAgentEvent>,
     /// Tool call frequency and duration statistics
     pub tool_stats: Arc<crate::tool_stats::ToolStatsTracker>,
 }
@@ -135,6 +138,10 @@ impl AgentRunner {
             .join(".rustclaw/voice-mode.json");
         let voice_mode = crate::voice_mode::VoiceMode::new(voice_mode_path);
 
+        let (subagent_tx, _) = tokio::sync::broadcast::channel(16);
+        let mut tools = tools;
+        tools.subagent_event_tx = Some(subagent_tx.clone());
+
         Self {
             config,
             workspace,
@@ -153,6 +160,7 @@ impl AgentRunner {
             message_queues: crate::message_queue::SessionQueues::new(),
             cancellation_tokens: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             subagent_children: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            subagent_events: subagent_tx,
             tool_stats: Arc::new(crate::tool_stats::ToolStatsTracker::new()),
         }
     }
