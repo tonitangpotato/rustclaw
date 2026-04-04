@@ -166,7 +166,7 @@ pub enum ConfigError {
     ZeroMaxReEvalPerIteration { value: usize },
     #[error("merge_interval must be > 0 when merge is enabled, got {value}")]
     ZeroMergeInterval { value: u64 },
-    #[error("base_delay must be > 0 for exponential backoff, got {value:?}")]
+    #[error("base_delay must be > 0 for exponential backoff when retry_max > 0, got {value:?}")]
     ZeroBaseDelayExponential { value: Duration },
 }
 
@@ -176,8 +176,10 @@ fn validate(config: &GEPAConfig) -> Result<(), ConfigError> { /* checks each rul
 **Key Details:**
 - Validation is called inside `ConfigBuilder::build()` after defaults are applied.
 - Checks are ordered from most fundamental (zero sizes) to cross-field constraints (stagnation vs max_iterations).
+- `ZeroBaseDelayExponential` is only checked when `backoff_strategy == Exponential && retry_max > 0`. If `retry_max == 0` (no retries), `base_delay` is irrelevant and any value (including zero) is accepted.
 - Valid edge cases explicitly allowed: `retry_max=0`, `max_consecutive_skips=0`, `time_budget=Some(Duration::ZERO)`.
 - Returns the first invalid condition found (not all errors at once) — simpler for users to fix iteratively.
+- **Cross-feature validation note:** `min_shared_examples > total training examples` is **not** checked here — it is validated at engine run start (design-08, §2.7 startup validation) when the actual training set size is known. The builder cannot check this because training data hasn't been loaded yet.
 - No panics anywhere per GUARD-4.
 
 **Satisfies:** GOAL-7.3, GUARD-4

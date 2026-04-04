@@ -40,7 +40,7 @@ pub enum GEPAEvent {
         child_id: CandidateId,
     },
     CandidateAccepted {
-        candidate_id: CandidateId,
+        candidate: Candidate,
         scores: Vec<(ExampleId, f64)>,
         front_size: usize,
     },
@@ -69,6 +69,8 @@ pub enum GEPAEvent {
     CheckpointSaved {
         path: PathBuf,
         iteration: u64,
+        success: bool,
+        error: Option<String>,
     },
     IterationCompleted {
         iteration: u64,
@@ -88,7 +90,8 @@ pub enum GEPAEvent {
 ```
 
 **Key Details:**
-- `CandidateId`, `ExampleId`, `SelectionMethod`, `TerminationReason` are types defined in features 01/02/06. Summarized here: `CandidateId(String)`, `ExampleId(String)`, `SelectionMethod` enum (`Tournament`, `LeastCrowded`, `Random`, `MergeComplement`), `TerminationReason` enum (`MaxIterations`, `Stagnation`, `TimeBudget`, `ConvergedFront`, `TooManySkips`).
+- `CandidateId`, `ExampleId`, `SelectionMethod`, `TerminationReason` are types defined in features 01/02/06/08. Summarized here: `CandidateId = u64` (type alias, see design-02 §2.1), `ExampleId(pub u64)` (newtype wrapper, see design-08 §2.2), `SelectionMethod` enum (`RoundRobinOverfitting`, `ComplementaryPair`, `Random` — defined in design-02 §2.3), `TerminationReason` enum (`MaxIterations`, `TimeBudget`, `Stagnation`, `TooManySkips`, `Cancelled` — defined in design-01 §2.3).
+- `Candidate` is the full candidate struct from feature 01 (contains `id: CandidateId`, prompt text, metadata, etc.). The `CandidateAccepted` variant carries the full `Candidate` (cloned) per requirements GOAL-9.1a, while `CandidateRejected` carries only the `CandidateId` — accepted candidates are more valuable to consumers (they may want the full prompt text for logging or external storage). The `emit_event!` macro (§2.4) ensures the `Candidate` clone only occurs when callbacks are registered.
 - `Instant` is `std::time::Instant` — not serializable, but events are transient (not checkpointed).
 - `PathBuf` is `std::path::PathBuf` for the checkpoint file path.
 - All variants derive `Debug` per GUARD-8. `Clone` is derived to allow callbacks to store copies if needed.
@@ -208,7 +211,7 @@ loop {
 
     // 6. ACCEPT/REJECT
     if front.try_insert(child, scores) {
-        emit!(CandidateAccepted { candidate_id, scores, front_size });
+        emit!(CandidateAccepted { candidate: child.clone(), scores, front_size });
     } else {
         emit!(CandidateRejected { candidate_id, scores, dominator_id });
     }
@@ -314,8 +317,8 @@ impl TracingCallback {
                 GEPAEvent::MutationCompleted { parent_id, child_id } => {
                     tracing::debug!(?parent_id, ?child_id, "Mutation completed");
                 }
-                GEPAEvent::CandidateAccepted { candidate_id, front_size, .. } => {
-                    tracing::info!(?candidate_id, front_size, "Candidate accepted into front");
+                GEPAEvent::CandidateAccepted { candidate, front_size, .. } => {
+                    tracing::info!(candidate_id = ?candidate.id, front_size, "Candidate accepted into front");
                 }
                 GEPAEvent::CandidateRejected { candidate_id, dominator_id, .. } => {
                     tracing::debug!(?candidate_id, ?dominator_id, "Candidate rejected");
@@ -332,8 +335,12 @@ impl TracingCallback {
                 GEPAEvent::DataLoaderWarning { message } => {
                     tracing::warn!(message, "Data loader warning");
                 }
-                GEPAEvent::CheckpointSaved { path, iteration } => {
-                    tracing::info!(?path, iteration, "Checkpoint saved");
+                GEPAEvent::CheckpointSaved { path, iteration, success, error } => {
+                    if *success {
+                        tracing::info!(?path, iteration, "Checkpoint saved");
+                    } else {
+                        tracing::warn!(?path, iteration, ?error, "Checkpoint save failed");
+                    }
                 }
                 GEPAEvent::IterationCompleted { iteration, elapsed, best_score, front_size } => {
                     tracing::info!(iteration, ?elapsed, best_score, front_size, "Iteration completed");
@@ -357,7 +364,7 @@ impl TracingCallback {
         // by registering for each EventType individually
         for event_type in EventType::all() {
             let cb_clone: EventCallback = Box::new({
-                let inner = std::sync::Arc::new(self.callback_fn());
+                let inner = std::sync::Arc::new(self.callback());
                 move |event| inner(event)
             });
             registry.register(event_type, cb_clone);
@@ -402,7 +409,7 @@ Event overhead must stay within GUARD-6's 5% budget relative to adapter call tim
 ## 4. Integration Points
 
 - **Engine loop (feature 01):** The engine holds a `CallbackRegistry` and calls `emit_event!` at each defined emission point (§2.3). The registry is built during `GEPAEngine::builder()` via `on_event()` calls (GOAL-9.3).
-- **Builder (feature 01):** `EngineBuilder::on_event(EventType, callback)` delegates to `CallbackRegistry::register()`. The builder owns the registry until `build()` transfers it to the engine.
+- **Builder (feature 01):** `EngineBuilder::on_event(EventType, callback)` delegates to `CallbackRegistry::register()`. The builder owns the registry until `build()` transfers it to the engine. **Compile-time enforcement:** `on_event` is only available on `EngineBuilder`, not on `GEPAEngine`. Since `build()` consumes the builder (takes `self`, not `&self`), calling `on_event` after `build()` is a compile error (builder has been moved). This enforces the GOAL-9.3 requirement that callbacks are registered before `run()` without runtime checks.
 - **Data loading (feature 08):** Emits `DataLoaderWarning` during startup validation, `ReEvaluationCompleted` after backfill, `ValidationProgress` during final validation.
 - **Checkpoint (feature 06):** Emits `CheckpointSaved` after successful checkpoint write.
 - **Config (feature 07):** No direct coupling. The `TracingCallback` does not read config; its log levels are hardcoded per the GOAL-9.5 table.

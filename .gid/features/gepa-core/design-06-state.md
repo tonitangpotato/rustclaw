@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-`EngineState` is the checkpoint-and-resume backbone of the GEPA engine. It aggregates everything needed to pause an optimization run and restart it later with identical behavior: the Pareto front, all candidate history, the evaluation cache, iteration counter, RNG state, proposer state, and run statistics.
+`GEPAState` is the checkpoint-and-resume backbone of the GEPA engine. It aggregates everything needed to pause an optimization run and restart it later with identical behavior: the Pareto front, all candidate history, the evaluation cache, iteration counter, RNG state, proposer state, and run statistics.
 
 The design prioritizes **correctness over performance**: checkpoints are full JSON snapshots written atomically via write-temp-then-rename (GUARD-4). Incremental/delta checkpoints (GOAL-6.6) are a P2 extension layered on top of the base mechanism. Memory management for the evaluation cache uses LRU eviction with front-member pinning to bound growth without invalidating active dominance relationships.
 
@@ -10,14 +10,14 @@ The design prioritizes **correctness over performance**: checkpoints are full JS
 
 ## 2. Components
 
-### 2.1 EngineState Struct
+### 2.1 GEPAState Struct
 
 **Responsibility:** Aggregate all engine state into a single serializable checkpoint unit.
 
 **Interface:**
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EngineState {
+pub struct GEPAState {
     pub schema_version: u32,
     pub iteration: u64,
     pub pareto_front: ParetoFront,
@@ -30,20 +30,34 @@ pub struct EngineState {
     pub config_snapshot: GEPAConfig,
     pub stagnation_counter: u64,
     pub consecutive_skips: u64,
+    pub minibatch_state: MinibatchState,
+    pub overfitting_deltas: HashMap<u64, f64>,
+    pub merge_disabled: bool,
+    pub elapsed_before_resume: Duration,
 }
 
-/// Serializable RNG state — captures the full internal state of StdRng.
+/// Serializable minibatch iterator state for checkpoint/resume.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MinibatchState {
+    pub cursor: usize,
+    pub epoch: u64,
+    pub shuffled_order: Vec<usize>,
+}
+
+/// Serializable RNG state — captures the full internal state of ChaCha8Rng.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RngState(pub Vec<u8>);
 
 impl RngState {
-    pub fn capture(rng: &StdRng) -> Self {
+    pub fn capture(rng: &ChaCha8Rng) -> Result<Self, GEPAError> {
         let bytes = bincode::serialize(rng)
-            .expect("StdRng serialization is infallible");
-        Self(bytes)
+            .map_err(|e| GEPAError::Internal {
+                message: format!("failed to serialize RNG state: {}", e),
+            })?;
+        Ok(Self(bytes))
     }
 
-    pub fn restore(&self) -> Result<StdRng, GEPAError> {
+    pub fn restore(&self) -> Result<ChaCha8Rng, GEPAError> {
         bincode::deserialize(&self.0).map_err(|e| GEPAError::CheckpointCorrupt {
             message: format!("failed to restore RNG state: {}", e),
         })
@@ -58,12 +72,23 @@ pub struct ProposerState {
 }
 ```
 
+**Convenience methods:**
+```rust
+impl EngineState {
+    /// Public lineage API — delegates to the freestanding `lineage()` function in design-05 §2.3.
+    pub fn lineage(&self, candidate_id: u64) -> Result<Vec<u64>, GEPAError> {
+        lineage(candidate_id, &self.candidates)
+    }
+}
+```
+
 **Key Details:**
 - `schema_version: u32` starts at 1. On deserialization, if version != current, return `GEPAError::CheckpointCorrupt`. Forward compatibility strategy: future versions bump the version and add migration logic or reject incompatible checkpoints. V1 does not support cross-version resume (per GOAL-5.6 scope).
 - `CandidateStore` is `HashMap<u64, Candidate>` — all candidates ever created, never pruned (design-05 §2.3).
 - `ParetoFront` is serialized as its member ID list + any internal state (design-02).
 - `rng_state` captures the full `StdRng` state via `bincode` serialization. This ensures that resumed runs produce identical sequences (GUARD-9). `StdRng` from `rand` crate implements `Serialize/Deserialize` via the `serde1` feature.
 - `config_snapshot` stores the config used for this run. On resume, the engine can warn if the provided config differs from the snapshot (informational, not enforced in v1).
+- **Cross-design constraint:** All types embedded in `EngineState` — including `ParetoFront` (design-02), `GEPAConfig` (design-07), `CandidateStore`/`Candidate` (design-05), and `ProposerState` — MUST derive `Serialize, Deserialize`. This is required for `EngineState`'s derive to compile.
 - `stagnation_counter` and `consecutive_skips` are engine loop counters needed for correct resume of termination condition tracking.
 
 **Satisfies:** GOAL-6.1, GOAL-1.9, GUARD-9
@@ -127,10 +152,10 @@ The checkpoint is a single JSON file containing the serialized `EngineState`. Ex
 ```
 
 - `schema_version` at top level. Unknown versions → `GEPAError::CheckpointCorrupt`.
-- **Deterministic JSON (GOAL-6.1):** HashMap keys sorted during serialization (via `BTreeMap` conversion). Bitwise-identical output on re-serialization.
-- Tuple keys `(u64, u64)` serialized as string keys for JSON compatibility.
+- **Deterministic JSON (GOAL-6.1):** HashMap keys sorted during serialization via `#[serde(serialize_with = "ordered_map")]` helper attribute on all `HashMap` fields (`CandidateStore`, `EvaluationCache.entries`, `ProposerState.selection_counts`). The helper converts the `HashMap` to a `BTreeMap` before serializing, ensuring bitwise-identical output on re-serialization.
+- Tuple keys `(u64, u64)` in `EvaluationCache.entries` are serialized as string keys `"candidate_id:example_id"` (e.g., `"0:1"`) via `#[serde(serialize_with = "tuple_key_map", deserialize_with = "tuple_key_map_de")]` custom serde helpers. This is required because `serde_json` only supports string keys in JSON objects.
 
-**Satisfies:** GOAL-6.1, GOAL-6.6 (format foundation)
+**Satisfies:** GOAL-6.1, Partial: GOAL-6.6 (format foundation only; full delta mechanism deferred to P2 implementation)
 
 ### 2.4 Checkpoint Save/Restore
 
@@ -227,7 +252,7 @@ The resume flow is:
 ## 3. Data Integrity
 
 - **Atomic writes (GUARD-4):** Checkpoint is written to a temp file then renamed. A crash at any point leaves either the old checkpoint intact or the new one fully written.
-- **Deterministic serialization (GUARD-9):** `HashMap` keys are sorted during serialization (via `BTreeMap` conversion or `serde` key ordering). Two identical `EngineState` values produce bitwise-identical JSON.
+- **Deterministic serialization (GUARD-9):** `HashMap` keys are sorted during serialization via `#[serde(serialize_with = "ordered_map")]` helper attribute that converts to `BTreeMap` before writing. `EvaluationCache` tuple keys use custom string-key serde helpers (`"candidate_id:example_id"` format). Two identical `EngineState` values produce bitwise-identical JSON.
 - **No partial state:** The entire `EngineState` is serialized as one unit. There are no partial writes or multi-file checkpoints in the base mechanism.
 - **Validation on load:** Schema version check, deserialization errors, and RNG restore errors all produce `GEPAError::CheckpointCorrupt` with a descriptive message.
 

@@ -21,6 +21,7 @@ pub struct Candidate {
     pub id: u64,
     pub params: HashMap<String, String>,
     pub parent_id: Option<u64>,
+    pub merge_parent_id: Option<u64>,
     pub generation: u32,
     pub created_at: DateTime<Utc>,
     pub reflection: Option<String>,
@@ -28,7 +29,8 @@ pub struct Candidate {
 
 impl Candidate {
     pub fn new(id: u64, params: HashMap<String, String>, parent_id: Option<u64>,
-               generation: u32, reflection: Option<String>) -> Result<Self, GEPAError>;
+               merge_parent_id: Option<u64>, generation: u32,
+               reflection: Option<String>) -> Result<Self, GEPAError>;
     pub fn seed(id: u64, params: HashMap<String, String>) -> Result<Self, GEPAError>;
     pub fn is_seed(&self) -> bool;
 }
@@ -36,7 +38,8 @@ impl Candidate {
 
 **Key Details:**
 - `params`: named text parameters (e.g., "system_prompt"). Values may be empty (placeholder for mutation). Keys must be non-empty. `new()` validates both constraints, returning `GEPAError::InvalidCandidate` on violation.
-- `reflection`: natural-language output from the adapter's `reflect` method. `None` for seeds.
+- `merge_parent_id`: secondary parent for merge candidates; `None` for seeds and single-parent mutations.
+- `reflection`: natural-language output from the adapter's `reflect` method. `None` for seeds. Reflection consistency (seeds must have `None`, non-seeds should have `Some(...)`) is the caller's responsibility — the `seed()` convenience method sets it to `None` automatically.
 - `generation`: 0 for seeds, `parent.generation + 1` for mutations, `max(a, b) + 1` for merges.
 - `created_at`: set at construction. Used for age-based tie-breaking in Pareto pruning (GOAL-2.4).
 - No scores on the struct — scores live in `EvaluationCache` keyed by `(candidate_id, example_id)` per GOAL-5.2.
@@ -92,13 +95,14 @@ impl CandidateIdGenerator {
 ```rust
 pub type CandidateStore = HashMap<u64, Candidate>;
 
+/// Internal implementation — the public API `EngineState::lineage(candidate_id)` (design-06) delegates to this function.
 pub fn lineage(candidate_id: u64, store: &CandidateStore) -> Result<Vec<u64>, GEPAError>;
 
 pub fn lesson_chain(candidate_id: u64, store: &CandidateStore, max_depth: usize) -> Result<Vec<String>, GEPAError>;
 ```
 
 **Key Details:**
-- `lineage()` walks `parent_id` back-pointers from the given candidate to its seed root, returning IDs ordered [candidate → ... → seed]. Returns `GEPAError::CandidateNotFound` if any ID is missing. O(D) where D is generation depth (≤1000 typical).
+- `lineage()` walks `parent_id` back-pointers from the given candidate to its seed root, returning IDs ordered [candidate → ... → seed]. Returns `GEPAError::CandidateNotFound` if any ID is missing. O(D) where D is generation depth (≤1000 typical). **Design decision:** `lineage()` follows the primary-parent chain only (`parent_id`). For merge candidates, the secondary parent (`merge_parent_id`) is not traversed. This keeps lineage as a simple linear chain. Callers that need full merge provenance can inspect `merge_parent_id` directly and call `lineage()` on the secondary parent separately.
 - `lesson_chain()` calls `lineage()` then collects `reflection` strings (skipping `None` for seeds), truncated to `max_depth` per GOAL-4.2b.
 - For merged candidates, `parent_id` records the primary parent. A separate `merge_parent_id: Option<u64>` field on `Candidate` records the secondary parent. Lesson chain follows only `parent_id`.
 - The `CandidateStore` is never pruned — all candidates retained for lineage + stats. Memory: 10K × ~1KB ≈ 10MB (GUARD-7).

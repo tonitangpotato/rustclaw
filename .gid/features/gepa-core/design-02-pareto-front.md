@@ -96,6 +96,8 @@ impl ParetoFront {
 5. `debug_assert!` front invariant (GUARD-1).
 6. Return `true`.
 
+**Note on front invariant:** The invariant that "no member dominates another" holds *modulo* `min_shared_examples` gaps. Two members may have insufficient shared data to establish dominance between them, while having sufficient shared data with a new candidate. This is by design — the `min_shared_examples` threshold prevents premature dominance conclusions. The invariant is fully restored after `recompute()` runs with updated cache data (GOAL-8.5b).
+
 **Full recomputation (`recompute`) — called after re-evaluation backfill (GOAL-8.5b):**
 
 1. Perform all-pairs dominance check on current `members` with updated cache scores.
@@ -120,8 +122,19 @@ impl ParetoFront {
         &mut self,
         cache: &EvalCache,
         overfitting_deltas: &HashMap<CandidateId, f64>,
-        rng: &mut StdRng,
+        rng: &mut ChaCha8Rng,
     ) -> Result<CandidateId, GEPAError>;
+}
+
+/// Selection method used, reported in events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SelectionMethod {
+    /// Round-robin with overfitting-delta reordering (default mutation selection)
+    RoundRobinOverfitting,
+    /// Complementary pair selection for merge iterations
+    ComplementaryPair,
+    /// Random selection (fallback)
+    Random,
 }
 ```
 
@@ -130,15 +143,15 @@ impl ParetoFront {
 1. If `members.is_empty()`, return `Err(GEPAError::EmptyFrontError)`.
 2. If `members.len() == 1`, return the single member (boundary condition, GOAL-2.3).
 3. **Round-robin floor** (starvation prevention): advance `selection_cursor` by 1 (wrapping). This guarantees every member is selected at least once every `members.len()` iterations (GOAL-2.3).
-4. **Overfitting-aware reordering within the round:** within the current round-robin cycle, members are sorted by ascending overfitting delta (lower delta = selected earlier). Ties broken by candidate age (newer first) then by candidate ID for full determinism (GUARD-9).
+4. **Overfitting-aware reordering within the round:** the overfitting-delta sort order is computed once at the start of each full round-robin cycle (when cursor wraps to 0) and held constant for that cycle. Within this fixed ordering, members are sorted by ascending overfitting delta (lower delta = selected earlier). Ties broken by candidate age (newer first) then by candidate ID for full determinism (GUARD-9). This ensures every member is visited exactly once per cycle regardless of delta changes mid-cycle.
 5. The candidate at the reordered position `selection_cursor % members.len()` is returned.
 
 **Key Details:**
 
-- `overfitting_deltas` is computed externally (Feature 01 §2.2, step 10) after re-evaluation backfill. Between backfill rounds, the deltas remain stale — this is acceptable since the round-robin floor guarantees no member is starved.
+- `overfitting_deltas` is computed externally (Feature 01 §2.2, step 11) after re-evaluation backfill. Between backfill rounds, the deltas remain stale — this is acceptable since the round-robin floor guarantees no member is starved.
 - If `overfitting_deltas` is empty (no re-evaluation yet), selection degrades to pure round-robin — still correct.
 - Selection never removes candidates from the front (GOAL-2.3 — "MUST NOT remove candidates based on re-evaluation alone"). Only `try_insert` and `recompute` modify membership.
-- All randomness uses the passed `rng` for determinism (GUARD-9).
+- `rng` is accepted for future use (e.g., random tie-breaking) but current selection is fully deterministic given the cursor state and overfitting deltas. The parameter ensures the API doesn't need to change if randomness is added later (GUARD-9).
 
 **Satisfies:** GOAL-2.3, GOAL-1.3
 
@@ -161,7 +174,7 @@ pub fn compute_crowding_distances(
 
 **Crowding distance algorithm:**
 
-1. Identify the set of example IDs (dimensions) to use: ideally the intersection of examples all front members have been evaluated on. If no universal intersection exists, fall back to examples shared by the most members (GOAL-2.4).
+1. Identify the set of example IDs (dimensions) to use: ideally the intersection of examples all front members have been evaluated on. If no universal intersection exists, fall back to ranking examples by the number of front members that have been evaluated on them (descending). Use the top-K examples where K = `min_shared_examples` or all examples with coverage ≥ 2 members, whichever is larger. Members without scores on the selected examples are excluded from crowding distance computation for those dimensions (GOAL-2.4).
 2. For each dimension (example ID), sort members by their score on that example.
 3. Boundary members (best and worst per dimension) receive `f64::INFINITY` distance.
 4. Interior members accumulate: `distance[i] += (score[i+1] - score[i-1]) / (max_score - min_score)` for each dimension. If `max_score == min_score` for a dimension (all members tied), skip that dimension (contributes 0).
@@ -222,8 +235,8 @@ All operations are dominated by adapter call time (typically 1-30 seconds), sati
 
 | This Feature | Depends On | Interface |
 |---|---|---|
-| §2.2 `check_dominance` | Feature 06 (State) GOAL-6.3 | `EvalCache::scores_for(candidate_id) -> &[(ExampleId, f64)]` |
-| §2.2 `try_insert` | Feature 06 (State) GOAL-6.3 | `EvalCache::examples_for(candidate_id) -> &[ExampleId]` |
+| §2.2 `check_dominance` | Feature 06 (State) GOAL-6.3 | `EvalCache::scores_for_candidate(candidate_id) -> Vec<(u64, f64)>` |
+| §2.2 `try_insert` | Feature 06 (State) GOAL-6.3 | `EvalCache::examples_for(candidate_id) -> Vec<u64>` |
 | §2.3 `select` | Feature 01 (Engine) §2.2 | Called at step 3 of each iteration |
 | §2.4 `prune_to_capacity` | Feature 07 (Config) GOAL-7.2 | `config.pareto_max_size` |
 | §2.2 `recompute` | Feature 08 (Data Loading) GOAL-8.5b | Triggered after re-evaluation backfill |

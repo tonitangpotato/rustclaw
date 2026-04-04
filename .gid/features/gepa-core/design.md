@@ -84,6 +84,16 @@ pub enum GEPAError {
     CandidateNotFound { id: u64 },
     #[error("corrupt checkpoint: {message}")]
     CheckpointCorrupt { message: String },
+    #[error("all seed candidates failed evaluation")]
+    AllSeedsFailed,
+    #[error("pareto front is empty")]
+    EmptyFrontError,
+    #[error("insufficient front size for merge: need 2, have {size}")]
+    InsufficientFrontSize { size: usize },
+    #[error("internal error: {message}")]
+    Internal { message: String },
+    #[error("validation error: {0}")]
+    ValidationError(String),
     #[error("serialization error: {0}")]
     SerializationError(String),
 }
@@ -148,7 +158,53 @@ iteration = i)`. Log levels per GOAL-9.5: INFO for lifecycle events, DEBUG for s
 WARN for errors/stagnation. A built-in `TracingCallback` bridges events to `tracing`,
 serializing payloads at TRACE level. No `println!` or `eprintln!`.
 
-### 3.7 Send + Sync (GUARD-11)
+### 3.8 Invariant Enforcement (GUARD-1, GUARD-2)
+
+Critical data-structure invariants are guarded by `debug_assert!` checks after every mutation:
+
+- **GUARD-1 (Pareto front invariant):** After every `ParetoFront::try_accept` or dominance
+  pruning operation, `debug_assert!` verifies that no candidate in the front is dominated by
+  any other. Details in the Pareto front feature design (feature 2).
+- **GUARD-2 (Candidate immutability):** Candidates are immutable value types — consumed by
+  move, never passed as `&mut`. Fields are `pub` for ergonomic construction, but all engine
+  code treats candidates as read-only after creation. `debug_assert!` checks in the candidate
+  registry verify that no candidate ID is ever reused or mutated.
+
+These assertions are compiled out in release builds (`debug_assertions` cfg) but run in every
+test and CI build, catching invariant violations early.
+
+### 3.9 Score Semantics (GUARD-10)
+
+All score values follow consistent semantics across every feature (Pareto front, eval cache,
+statistics, selection):
+
+1. **Higher is better** — all comparisons, dominance checks, and rankings assume higher
+   scores are superior. Adapters must return scores in this convention.
+2. **NaN → None** — `f64::is_nan()` scores are treated as unevaluated (`None` in the eval
+   cache). The example is marked as needing re-evaluation.
+3. **±Inf → clamp** — `f64::INFINITY` is clamped to `f64::MAX`; `f64::NEG_INFINITY` is
+   clamped to `f64::MIN`. A `ScoreWarning` event is emitted on each clamped value.
+4. **Consistent application** — Score sanitization is applied at the single entry point
+   (§5 step 8, after `adapter.evaluate`) so all downstream consumers see clean values.
+
+### 3.10 Performance Budget (GUARD-6)
+
+Engine overhead is expected to be negligible since all heavy computation (LLM calls) is in
+the adapter. The sequential loop (§5) performs only in-memory data structure operations
+(Pareto front updates, eval cache lookups, RNG draws) between adapter calls. GUARD-6
+compliance (engine-internal computation < 5% of adapter call time) will be validated via
+benchmarks comparing engine-internal time vs total iteration time, tracked in CI.
+
+### 3.11 Memory Growth (GUARD-7)
+
+Memory per candidate is O(parameters + evaluated_examples). With minibatch-based evaluation,
+each candidate is evaluated on O(minibatch_size × re_eval_rounds) examples, not all examples.
+Total memory is O(candidates × max_evals_per_candidate), which is linear in candidates for
+fixed configuration. The Pareto front caps at `pareto_max_size` candidates; evicted candidates
+are removed from the eval cache. Peak memory is therefore bounded by
+O(pareto_max_size × max_evals_per_candidate × avg_parameter_size).
+
+### 3.12 Send + Sync (GUARD-11)
 
 All public types are `Send + Sync`: `Candidate` (immutable value type), `GEPAConfig` (plain
 data), `GEPAState` (owned data, no interior mutability), `GEPAEngine` (holds `Box<dyn Adapter>`
@@ -187,7 +243,10 @@ bound `Send + Sync`). The `run()` future is `Send`. Event callbacks bound `Send 
 
 Given iteration `i`, current `GEPAState`, seeded RNG:
 
-1. **Time gate** — If `Instant::elapsed() ≥ time_budget`, terminate `TimeBudget` (GOAL-7.6).
+1. **Time gate + cancellation** — Check cancellation token (GOAL-3.7); if cancelled,
+   terminate with `Cancelled`. If `Instant::elapsed() ≥ time_budget`, terminate `TimeBudget`
+   (GOAL-7.6). Cancellation is also checked before each adapter call (steps 5–8) to allow
+   prompt termination mid-iteration.
 2. **Emit** `IterationStarted`.
 3. **Sample minibatch** — `EpochSampler` draws `minibatch_size` examples using seeded RNG.
    Epoch-boundary concatenation ensures every example used exactly once per epoch (GOAL-8.3).
@@ -235,7 +294,7 @@ impl GEPAEngine {
 
 // Core data types
 pub type CandidateId = u64;
-pub type ExampleId = String;
+pub type ExampleId = u64;
 
 pub struct Candidate {
     pub id: CandidateId,
@@ -243,13 +302,19 @@ pub struct Candidate {
     pub parent_id: Option<CandidateId>,
     pub generation: u32,
     pub reflection: Option<String>,
+    pub lesson: Option<String>,
     pub created_at: SystemTime,
 }
+// Note: `reflection` is the raw analysis from the reflect step; `lesson` is the
+// distilled improvement insight carried forward. The ancestor lesson chain (GOAL-4.2b)
+// is built by walking `parent_id` links and collecting `lesson` from each ancestor,
+// truncated to `max_lesson_depth`. Fields are `pub` for ergonomic construction but
+// candidates are treated as immutable after creation (GUARD-2; see §3.8).
 
 pub struct Example {
     pub id: ExampleId,
     pub input: serde_json::Value,
-    pub expected_output: Option<String>,
+    pub expected_output: Option<serde_json::Value>,
     pub metadata: HashMap<String, String>,
     pub difficulty: Option<String>,
 }
@@ -272,8 +337,10 @@ pub struct GEPAResult {
     pub validation_skipped: bool,
     pub best_candidate: Candidate,
     pub termination_reason: TerminationReason,
-    pub statistics: RunStatistics,
+    pub statistics: GEPAStatistics,
     pub state: GEPAState,
+    pub total_iterations: u64,
+    pub elapsed_time: Duration,
 }
 
 pub enum TerminationReason {

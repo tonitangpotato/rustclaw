@@ -87,7 +87,7 @@ pub struct GEPAEngine<A: GEPAAdapter, D: DataLoader> {
     adapter: A,
     data_loader: D,
     state: GEPAState,
-    rng: StdRng,
+    rng: ChaCha8Rng,
     cancellation_token: Option<CancellationToken>,
     start_time: Option<Instant>,
     consecutive_skips: u32,
@@ -99,22 +99,45 @@ impl<A: GEPAAdapter, D: DataLoader> GEPAEngine<A, D> {
 }
 ```
 
+**Step 0: Seed Evaluation (before the loop):**
+
+Evaluate all seed candidates on the initial minibatch. For each seed, call `adapter.evaluate(&seed, &initial_minibatch).await`. Seeds that fail evaluation are discarded. If all seeds fail, return `Err(GEPAError::AllSeedsFailed)`. Successful seeds are inserted into the Pareto front and their scores stored in the evaluation cache (GOAL-1.12).
+
 **Iteration pseudocode (one loop cycle):**
 
 1. **Check termination** (§2.3) — max iterations, time budget, stagnation, consecutive skips, cancellation.
 2. **Sample minibatch** (§2.4) — draw next `minibatch_size` examples from epoch cycle.
-3. **Select** — call `ParetoFront::select(&mut self.rng)` to pick parent candidate (GOAL-1.3, delegates to Feature 02 §2.3).
+3. **Select** — call `ParetoFront::select(&mut self, &cache, &overfitting_deltas, &mut rng)` to pick parent candidate (GOAL-1.3, delegates to Feature 02 §2.3). Returns `Result<CandidateId, GEPAError>`; the engine resolves `CandidateId → &Candidate` via `state.candidates.get(id)`.
 4. **Execute** — call `adapter.execute(&parent, &minibatch).await`; on error, enter retry logic (§2.5). On exhaustion, skip iteration.
 5. **Reflect** — call `adapter.reflect(&parent, &traces).await`; retry on error.
 6. **Mutate** — gather ancestor lessons via `state.lineage(parent.id)` (max `config.max_lesson_depth`), call `adapter.mutate(&parent, &reflection, &lessons).await`; retry on error.
-7. **Evaluate** — call `adapter.evaluate(&child, &minibatch).await`; retry on error. Sanitize scores per GUARD-10 (NaN → None, ±Inf → clamped).
-8. **Accept/Reject** — store child scores in evaluation cache (GOAL-6.3). Check if child dominates parent on shared examples. If yes (or parent not on front), insert child into Pareto front; prune dominated members (delegates to Feature 02 §2.2). Reset stagnation counter. If rejected, increment stagnation counter (GOAL-1.2b).
-9. **Checkpoint** — if `iteration % checkpoint_interval == 0`, write state atomically (GOAL-6.2).
-10. **Re-evaluate** — if `iteration % re_eval_interval == 0`, run backfill (GOAL-8.5a), recompute front (GOAL-8.5b), compute overfitting delta (GOAL-8.5c).
-11. **Merge** (optional) — if merge enabled and `iteration % merge_interval == 0`, run merge iteration: select two complementary candidates, execute both, call `adapter.merge()`, evaluate, accept/reject (GOAL-1.10).
-12. **Increment iteration**, update statistics, loop.
+7. **Evaluate child** — call `adapter.evaluate(&child, &minibatch).await`; retry on error. Sanitize scores per GUARD-10: NaN scores are treated as evaluation failures for that example — the `(candidate_id, example_id)` pair is not stored in the cache. ±Inf scores are clamped to `±f64::MAX`. This keeps the cache clean and dominance logic simple (only `f64` values in cache).
+8. **Front backfill** — For each current front member, look up cached scores for the current minibatch examples. For uncached `(member_id, example_id)` pairs, call `adapter.evaluate()` to fill them in. Total evaluate calls in this step are capped at `config.max_re_eval_per_iteration` (GOAL-1.7c). When the budget is insufficient to backfill all members, prioritize by staleness (members with the fewest cached scores on the current minibatch are backfilled first). Store results in the evaluation cache. This ensures the new child and all front members share at least the current minibatch as common evaluation ground, preventing the front from growing unchecked due to insufficient shared data (GOAL-1.7a).
+9. **Accept/Reject** — Store child scores in evaluation cache (GOAL-6.3). Check if child is dominated by any front member on shared examples (using the now-backfilled data). If non-dominated, insert child into Pareto front; prune dominated members (delegates to Feature 02 §2.2). Reset stagnation counter. A candidate is "rejected" only when it is dominated by at least one front member (on sufficient shared examples). Candidates that are non-dominating due to insufficient shared data are accepted to the front (per GOAL-1.7d). The stagnation counter only increments on actual dominance-based rejections (GOAL-1.2b).
+10. **Checkpoint** — if `iteration % checkpoint_interval == 0`, write state atomically (GOAL-6.2).
+11. **Re-evaluate** — if `iteration % re_eval_interval == 0`, run full backfill (GOAL-8.5a), recompute front (GOAL-8.5b), compute overfitting delta (GOAL-8.5c). This is distinct from step 8's per-iteration backfill: this step performs a comprehensive re-evaluation across all historical examples, not just the current minibatch.
+12. **Merge** (optional) — if merge enabled and `iteration % merge_interval == 0`, run merge iteration: select two complementary candidates, execute both, call `adapter.merge()`, evaluate, accept/reject (GOAL-1.10).
+13. **Increment iteration**, update statistics, loop.
 
 After loop exit: evaluate all front candidates on validation set (GOAL-8.6), build `GEPAResult`.
+
+**`GEPAResult` structure:**
+
+```rust
+pub struct GEPAResult {
+    pub best_candidate: Candidate,
+    pub pareto_front: Vec<Candidate>,
+    pub validation_scores: HashMap<CandidateId, Vec<(ExampleId, f64)>>,
+    pub validation_skipped: bool,
+    pub termination_reason: TerminationReason,
+    pub statistics: GEPAStatistics,
+    pub state: GEPAState,
+    pub total_iterations: u64,
+    pub elapsed_time: Duration,
+}
+```
+
+The `best_candidate` is selected by highest average score across the validation set, with ties broken by age (newer preferred) then candidate ID (GOAL-1.8).
 
 **Satisfies:** GOAL-1.1, GOAL-1.3, GOAL-1.4, GOAL-1.5, GOAL-1.6, GOAL-1.7a-d, GOAL-1.8, GOAL-1.9, GOAL-1.10, GOAL-1.12
 
@@ -157,15 +180,15 @@ impl<A: GEPAAdapter, D: DataLoader> GEPAEngine<A, D> {
 
 ```rust
 pub struct MinibatchSampler {
-    example_ids: Vec<String>,
+    example_ids: Vec<ExampleId>,
     shuffled_order: Vec<usize>,
     cursor: usize,
     epoch: u64,
 }
 
 impl MinibatchSampler {
-    pub fn new(example_ids: Vec<String>, rng: &mut StdRng) -> Self;
-    pub fn next_batch(&mut self, batch_size: usize, rng: &mut StdRng) -> Vec<String>;
+    pub fn new(example_ids: Vec<ExampleId>, rng: &mut ChaCha8Rng) -> Self;
+    pub fn next_batch(&mut self, batch_size: usize, rng: &mut ChaCha8Rng) -> Vec<ExampleId>;
 }
 ```
 
@@ -258,8 +281,9 @@ sequenceDiagram
     Engine->>Engine: check_termination()
     Engine->>Sampler: next_batch(minibatch_size)
     Sampler-->>Engine: Vec<ExampleId>
-    Engine->>Front: select(&mut rng)
-    Front-->>Engine: parent: &Candidate
+    Engine->>Front: select(&self, &cache, &deltas, &mut rng)
+    Front-->>Engine: parent_id: CandidateId
+    Engine->>Engine: resolve CandidateId → &Candidate
     Engine->>Adapter: execute(&parent, &batch)
     Adapter-->>Engine: Vec<ExecutionTrace>
     Engine->>Adapter: reflect(&parent, &traces)
@@ -269,23 +293,29 @@ sequenceDiagram
     Adapter-->>Engine: child: Candidate
     Engine->>Adapter: evaluate(&child, &batch)
     Adapter-->>Engine: Vec<f64> scores
-    Engine->>Engine: sanitize scores (GUARD-10)
+    Engine->>Engine: sanitize scores (GUARD-10: NaN → drop, ±Inf → clamp)
     Engine->>Cache: store(child.id, example_ids, scores)
-    Engine->>Front: try_insert(child, &cache)
+    loop Front backfill (budget-capped)
+        Engine->>Cache: check cached scores for (member, batch)
+        Engine->>Adapter: evaluate(member, uncached examples)
+        Engine->>Cache: store(member.id, example_ids, scores)
+    end
+    Engine->>Front: try_insert(child.id, &cache)
     Front-->>Engine: accepted: bool
     Engine->>Engine: update stagnation / stats
 ```
 
-The diagram shows the sequential flow within a single iteration. Every adapter call goes through `call_with_retry()` (§2.5), which is omitted for clarity. Score sanitization (NaN → None, ±Inf → clamped) happens before cache storage per GUARD-10. The Pareto front update (Feature 02 §2.2) checks dominance using scores from the evaluation cache.
+The diagram shows the sequential flow within a single iteration. Every adapter call goes through `call_with_retry()` (§2.5), which is omitted for clarity. Score sanitization (NaN → not stored in cache, ±Inf → clamped to ±f64::MAX) happens before cache storage per GUARD-10. The front backfill step (step 8) ensures all front members have scores on the current minibatch before dominance checking, capped at `config.max_re_eval_per_iteration` evaluate calls (GOAL-1.7a, GOAL-1.7c). The Pareto front update (Feature 02 §2.2) checks dominance using scores from the evaluation cache. When storing scores, example IDs are maintained in sorted order within the cache to enable O(M) sorted-merge intersection during dominance checks (see design-02 §2.2).
 
 ## 4. Integration Points
 
 | This Feature | Depends On | Interface |
 |---|---|---|
-| §2.2 run() step 3 (Select) | Feature 02 §2.3 | `ParetoFront::select(&mut rng) -> &Candidate` |
-| §2.2 run() step 8 (Accept) | Feature 02 §2.2 | `ParetoFront::try_insert(candidate, &cache) -> bool` |
+| §2.2 run() step 3 (Select) | Feature 02 §2.3 | `ParetoFront::select(&mut self, &cache, &overfitting_deltas, &mut rng) -> Result<CandidateId, GEPAError>` |
+| §2.2 run() step 9 (Accept) | Feature 02 §2.2 | `ParetoFront::try_insert(&mut self, candidate: CandidateId, cache: &EvalCache) -> bool` |
 | §2.2 run() steps 4-7 | Feature 03 §2.1 | `GEPAAdapter::{execute, reflect, mutate, evaluate}` |
 | §2.4 minibatch sampling | Feature 08 (Data Loading) | `DataLoader::training_examples() -> Vec<Example>` |
-| §2.2 run() step 8 (cache) | Feature 06 §GOAL-6.3 | `EvalCache::store(candidate_id, example_id, score)` |
-| §2.1 builder config | Feature 07 (Config) | `GEPAConfig` with all stopping criteria, retry policy |
+| §2.2 run() step 9 (cache) | Feature 06 §GOAL-6.3 | `EvalCache::insert(candidate_id, example_id, score)` — example IDs maintained sorted |
+| §2.1 builder config | Feature 07 (Config) | `GEPAConfig` with all stopping criteria, retry policy, `max_re_eval_per_iteration` |
 | §2.2 run() checkpointing | Feature 06 §GOAL-6.2 | `GEPAState::serialize()`, atomic file write |
+| §2.2 run() step 8 (backfill) | Feature 06 §GOAL-6.3 | `EvalCache::scores_for_candidate(candidate_id) -> Vec<(u64, f64)>`, `EvalCache::examples_for(candidate_id) -> Vec<u64>` — for cache-aware backfill |

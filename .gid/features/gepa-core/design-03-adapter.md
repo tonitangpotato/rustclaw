@@ -48,6 +48,8 @@ pub trait GEPAAdapter: Send + Sync + 'static {
         &self,
         _parent_a: &Candidate,
         _parent_b: &Candidate,
+        _scores_a: &[(String, f64)],
+        _scores_b: &[(String, f64)],
     ) -> Result<Candidate, GEPAError> {
         Err(GEPAError::AdapterError {
             source: "merge not implemented".to_string(),
@@ -59,10 +61,10 @@ pub trait GEPAAdapter: Send + Sync + 'static {
 
 **Key Details:**
 
-- `#[async_trait]` from the `async-trait` crate desugars to `fn method(...) -> Pin<Box<dyn Future<Output = ...> + Send + '_>>`. This ensures all returned futures are `Send` (GUARD-11), making `engine.run()` future also `Send`.
+- `#[async_trait]` from the `async-trait` crate desugars to `fn method(...) -> Pin<Box<dyn Future<Output = ...> + Send + '_>>`. This ensures all returned futures are `Send` (GUARD-11), making `engine.run()` future also `Send`. Note: `#[async_trait]` (not `#[async_trait(?Send)]`) is used, which ensures the trait is object-safe for `&dyn GEPAAdapter` dispatch in proposers (see design-04 §2.1).
 - All `&self` — adapter is shared immutably. Implementations needing interior mutability use `Arc<Mutex<_>>` or similar.
 - All candidate references are `&Candidate` — never `&mut`. The engine never passes mutable candidate references to the adapter (GUARD-2).
-- `merge` has a default implementation returning `Err` with `retryable: false`, so the engine immediately skips merge iterations for adapters that don't support it (GOAL-3.6). The engine treats this specific error as "merge unsupported" and disables merge for the remainder of the run.
+- `merge` has a default implementation returning `Err` with `retryable: false`, so the engine immediately skips merge iterations for adapters that don't support it (GOAL-3.6). The engine treats this specific error as "merge unsupported" and disables merge for the remainder of the run. This auto-disable-on-first-failure policy is an engine-level behavior documented in design-01 (§2.2 engine loop) and is consistent with GOAL-1.10 merge scheduling — once merge is disabled, the engine simply runs mutation iterations for the remaining budget.
 - Generic bounds: `Send + Sync + 'static` enables the adapter to be stored in the engine struct and used across `.await` points in the tokio runtime (GUARD-11).
 
 **Satisfies:** GOAL-3.1, GOAL-3.6, GOAL-3.8
@@ -80,13 +82,13 @@ pub trait GEPAAdapter: Send + Sync + 'static {
 **`reflect` contract:**
 
 - **Input:** `&Candidate` (the parent that produced the traces), `&[ExecutionTrace]` (from the preceding `execute` call).
-- **Output:** `Reflection { diagnosis: String, directions: Vec<String> }` (GOAL-3.3). The `diagnosis` is free-form natural language. `directions` are suggested improvement axes — the engine passes these to `mutate`.
+- **Output:** `Reflection { diagnosis: String, improvement_directions: Vec<String> }` (GOAL-3.3). The `diagnosis` is free-form natural language. `improvement_directions` are suggested improvement axes — the engine passes these to `mutate`.
 - **Error:** `Err(GEPAError::AdapterError { .. })` on LLM failure. Retried per GOAL-7.5.
 
 **`mutate` contract:**
 
 - **Input:** `&Candidate` (parent), `&Reflection` (from reflect), `&[String]` (ancestor lessons — reflections from ancestors up to `config.max_lesson_depth`, GOAL-1.5). For seed candidates with no lineage, this slice is empty (GOAL-3.4).
-- **Output:** A new `Candidate` with `parent_id = Some(parent.id)`, `generation = parent.generation + 1`, and potentially modified `params` HashMap. The returned candidate must have the same parameter keys as the parent. The engine validates key consistency and assigns the candidate ID (GOAL-5.4) — the adapter need not set the ID.
+- **Output:** A new `Candidate` with `parent_id = Some(parent.id)`, `generation = parent.generation + 1`, and potentially modified `params` HashMap. The returned candidate must have the same parameter keys as the parent — the parameter schema is fixed at seed time (GOAL-3.4). The engine validates key consistency and assigns the candidate ID (GOAL-5.4) — the adapter need not set the ID. This constraint ensures all candidates in a run are structurally comparable; adding or removing parameter keys during mutation is not supported.
 - **Error:** `Err(GEPAError::AdapterError { .. })` on LLM failure.
 
 **`evaluate` contract:**
@@ -97,7 +99,8 @@ pub trait GEPAAdapter: Send + Sync + 'static {
 
 **`merge` contract:**
 
-- **Input:** Two `&Candidate` references — parents selected from different Pareto front regions (GOAL-1.10).
+- **Input:** Two `&Candidate` references — parents selected from different Pareto front regions (GOAL-1.10) — plus per-example score slices `scores_a: &[(String, f64)]` and `scores_b: &[(String, f64)]` providing each parent's evaluated per-example scores (keyed by example ID). This enables the adapter to identify which task subsets each parent excels on (GOAL-4.5).
+- **Pre-condition:** The engine/proposer calls `adapter.execute()` on both parents before calling `merge`, so that execution traces are available for context. See design-04 §2.3 for the full merge iteration sequence: `select → execute(both parents) → merge → evaluate → accept` (GOAL-3.6).
 - **Output:** A new `Candidate` combining strengths of both. The engine assigns ID and sets metadata.
 - **Default:** Returns `Err(GEPAError::AdapterError { source: "merge not implemented", retryable: false })` (§2.5).
 
@@ -236,7 +239,7 @@ impl GEPAAdapter for SimpleAdapter {
                     source: e.to_string(),
                     retryable: true,
                 })?;
-            let score = if output.contains(ex.expected.as_deref().unwrap_or(""))
+            let score = if output.contains(ex.expected_output.as_ref().and_then(|v| v.as_str()).unwrap_or(""))
                 { Some(1.0) } else { Some(0.0) };
             traces.push(ExecutionTrace {
                 example_id: ex.id.clone(),
@@ -260,7 +263,7 @@ impl GEPAAdapter for SimpleAdapter {
         let diagnosis = format!("{}/{} examples failed", failed.len(), traces.len());
         Ok(Reflection {
             diagnosis,
-            directions: vec!["Be more specific".into(), "Add examples".into()],
+            improvement_directions: vec!["Be more specific".into(), "Add examples".into()],
         })
     }
 
@@ -294,7 +297,7 @@ impl GEPAAdapter for SimpleAdapter {
                     source: e.to_string(),
                     retryable: true,
                 })?;
-            let score = if output.contains(ex.expected.as_deref().unwrap_or(""))
+            let score = if output.contains(ex.expected_output.as_ref().and_then(|v| v.as_str()).unwrap_or(""))
                 { 1.0 } else { 0.0 };
             scores.push(score);
         }
