@@ -647,48 +647,39 @@ Choose a model:", current),
 
         match arg {
             "status" => {
-                let state_path = project_root.join(".gid/ritual-state.json");
-                if state_path.exists() {
-                    match std::fs::read_to_string(&state_path)
-                        .ok()
-                        .and_then(|s| serde_json::from_str::<RitualState>(&s).ok())
-                    {
-                        Some(state) => {
-                            let mut msg = format!(
-                                "📊 **Ritual Status**\n\n\
-                                 • Phase: `{}`\n\
-                                 • Task: {}\n\
-                                 • Verify retries: {}\n\
-                                 • Started: {}\n\
-                                 • Updated: {}",
+                let runner = crate::ritual_runner::RitualRunner::new(
+                    project_root,
+                    llm_client,
+                    self.make_notify_fn(chat_id),
+                );
+                match runner.list_rituals() {
+                    Ok(rituals) if rituals.is_empty() => {
+                        self.send_message(chat_id, "No rituals found.", None).await?;
+                    }
+                    Ok(rituals) => {
+                        let mut msg = String::from("📊 **Ritual Status**\n");
+                        for state in rituals.iter().take(5) {
+                            msg.push_str(&format!(
+                                "\n`{}` — **{}** | `{}`\n  Task: {}\n  Updated: {}",
+                                state.id,
                                 state.phase.display_name(),
-                                if state.task.is_empty() { "(none)" } else { &state.task },
-                                state.verify_retries,
-                                state.started_at.format("%Y-%m-%d %H:%M:%S UTC"),
-                                state.updated_at.format("%Y-%m-%d %H:%M:%S UTC"),
-                            );
-                            // Add per-phase token usage
+                                if state.phase.is_terminal() { "✅" } else if state.phase.is_paused() { "⏸" } else { "🔄" },
+                                gid_core::ritual::truncate(&state.task, 60),
+                                state.updated_at.format("%H:%M:%S UTC"),
+                            ));
                             if !state.phase_tokens.is_empty() {
                                 let total: u64 = state.phase_tokens.values().sum();
-                                msg.push_str(&format!("\n\n🪙 **Tokens Used** (total: {})", format_token_count(total)));
-                                // Sort phases logically
-                                let phase_order = ["initializing", "triage", "design", "planning", "graph", "implement", "verify"];
-                                let mut entries: Vec<(&String, &u64)> = state.phase_tokens.iter().collect();
-                                entries.sort_by_key(|(k, _)| {
-                                    phase_order.iter().position(|p| *p == k.as_str()).unwrap_or(99)
-                                });
-                                for (phase, tokens) in &entries {
-                                    msg.push_str(&format!("\n  • {} → {}", phase, format_token_count(**tokens)));
-                                }
+                                msg.push_str(&format!(" | 🪙 {}", format_token_count(total)));
                             }
-                            self.send_message(chat_id, &msg, None).await?;
                         }
-                        None => {
-                            self.send_message(chat_id, "⚠️ Could not parse ritual state.", None).await?;
+                        if rituals.len() > 5 {
+                            msg.push_str(&format!("\n\n...and {} more", rituals.len() - 5));
                         }
+                        self.send_message(chat_id, &msg, None).await?;
                     }
-                } else {
-                    self.send_message(chat_id, "No active ritual.", None).await?;
+                    Err(e) => {
+                        self.send_message(chat_id, &format!("⚠️ Failed to list rituals: {}", e), None).await?;
+                    }
                 }
             }
             "cancel" => {

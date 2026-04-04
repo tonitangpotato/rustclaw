@@ -3,6 +3,91 @@
 > All ideas captured by RustClaw's Idea Intake pipeline.
 > Format: newest first. Each idea has a unique ID for cross-referencing.
 
+## IDEA-20260403-02: 知识管理产品化 + 内容飞轮 Marketing Pipeline
+- **Date**: 2026-04-03
+- **Triggered by**: 小红书 LLM 知识库帖子 + Karpathy 背书 + potato 讨论
+- **Category**: product/marketing
+- **Tags**: knowledge-management, content-flywheel, marketing-automation, productization, RustClaw
+- **Effort**: High
+
+### The Idea
+
+两部分：
+
+**A. 知识管理产品化（方案 B/C）**
+- 把 RustClaw 的知识管理能力单独拆出来做产品（浏览器插件 + agent 后端 + 知识图谱）
+- 或作为 RustClaw 的获客入口：免费知识管理引流 → 付费 agent 自动化
+- Karpathy 背书给了市场验证叙事
+- 与 Obsidian 方案的差异化：agent-native、认知记忆（ACT-R/Hebbian）、多平台自动抓取
+
+**B. 内容飞轮 → Marketing Automation Pipeline 完整链路**
+```
+[Intake] Social Intake 抓内容 → Engram 存储 → 找关联
+    ↓ 触发灵感
+[生产] Backlog → WIP → Schedule → Posted（LLM 辅助每阶段）
+    ↓ 发布
+[分发] xinfluencer (Twitter/X) + usergrow (增长互动) + 未来多平台
+    ↓ 数据回收
+[回收] 互动数据 → 分析效果 → 反馈到 Backlog
+```
+- 每条内容 = GID task node，状态 = backlog/wip/scheduled/posted
+- 可以开个人账号做内容营销
+- 现在缺的是中间段：素材 → 成品的内容生产环节
+
+### Why This Matters
+- Marketing 自动化是 potato 财务自由路径的关键环节
+- 做产品不做营销 = 白做。飞轮让营销变成可持续的低摩擦流程
+- 知识管理产品化有 Karpathy 背书，受众广
+
+### Potential Next Steps
+1. 设计内容飞轮的 GID workflow（task 状态机 + LLM 辅助）
+2. 补齐"生产阶段"：LLM 从 intake 素材起草可发布内容
+3. 对接 xinfluencer/usergrow 自动发布
+4. 考虑知识管理的独立产品形态（插件？SaaS？）
+
+### Connections
+- IDEA-20260402-02: Marketing Automation Pipeline — 直接上游
+- REF-20260403-01: Skill-JIT — skill 自动生成可辅助飞轮
+- IDEA-20260403-01: Skill 自动优化 — 飞轮各环节的 skill 需要持续优化
+- intake/xhs/llm-personal-knowledge-base-karpathy.md — 触发源
+
+### Status: 💡 New
+---
+
+## IDEA-20260403-02: LLM Knowledge Compiler — 知识自动编译产品
+- **Date**: 2026-04-03
+- **Triggered by**: Karpathy LLM 个人知识库帖子 + potato 感想
+- **Category**: product
+- **Tags**: LLM, knowledge-base, product, Karpathy, RustClaw
+
+### The Idea
+产品化 RustClaw 的知识管理能力，定位为"LLM 知识编译器"——用户只定义兴趣和查询，系统闭环完成采集、组织、纠错、呈现。区别于 Obsidian 方案：agent-native（无需 GUI），认知记忆（ACT-R + Hebbian 自增强），多平台自动抓取。
+
+### Why This Matters
+- Karpathy 背书 = 市场验证，方向确认
+- RustClaw 已有 80% 的基础能力（Engram + Social Intake + GID）
+- 差异化明确：认知记忆 > 简单 grep，agent-native > Obsidian 插件
+- 缺的 gap 明确：增量编译、知识健康检查、产出回灌闭环
+
+### Gap Analysis (vs Karpathy Vision)
+- ✅ 已有：自动抓取（Social Intake）、结构化存储（Engram + GID）、认知关联（Hebbian）
+- 🟡 部分有：自动摘要/分类（LLM prompt，但非增量式）
+- ❌ 缺失：知识健康检查、产出→回灌闭环、知识冲突检测
+
+### Potential Next Steps
+1. 定义 MVP scope：哪些能力足够构成一个可用产品？
+2. 考虑产品形态：CLI tool? Telegram bot? Web app?
+3. 用户画像：谁会用？（研究者、内容创作者、信息囤积者）
+
+### Connections
+- Related: intake/xhs/llm-personal-knowledge-base-karpathy.md (实践分享)
+- Related: intake/xhs/karpathy-llm-knowledge-base-analysis.md (深度分析)
+- Related: IDEA-20260402-02 (Marketing Automation Pipeline — 内容飞轮是产出端)
+- Related: IDEA-20260403-01 (自动化 Skill 优化系统 — 自增强循环的 skill 层面)
+
+### Status: 💡 New
+---
+
 ---
 
 <!-- New ideas are prepended below this line -->

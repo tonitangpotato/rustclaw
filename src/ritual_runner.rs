@@ -19,7 +19,9 @@ pub type NotifyFn = Arc<dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Fut
 /// with RustClaw's IO capabilities (LLM, shell, filesystem, notifications).
 pub struct RitualRunner {
     project_root: PathBuf,
-    state_path: PathBuf,
+    rituals_dir: PathBuf,
+    /// Legacy single state path (for backward compat loading)
+    legacy_state_path: PathBuf,
     llm_client: Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>,
     notify: NotifyFn,
 }
@@ -30,53 +32,105 @@ impl RitualRunner {
         llm_client: Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>,
         notify: NotifyFn,
     ) -> Self {
-        let state_path = project_root.join(".gid/ritual-state.json");
+        let rituals_dir = project_root.join(".gid/rituals");
+        let legacy_state_path = project_root.join(".gid/ritual-state.json");
         Self {
             project_root,
-            state_path,
+            rituals_dir,
+            legacy_state_path,
             llm_client,
             notify,
         }
     }
 
-    /// Load persisted state or create new Idle state.
-    pub fn load_state(&self) -> Result<RitualState> {
-        if self.state_path.exists() {
-            let data = std::fs::read_to_string(&self.state_path)?;
+    /// Get state path for a specific ritual ID.
+    fn state_path_for(&self, ritual_id: &str) -> PathBuf {
+        self.rituals_dir.join(format!("{}.json", ritual_id))
+    }
+
+    /// Load state for a specific ritual by ID.
+    pub fn load_state_by_id(&self, ritual_id: &str) -> Result<RitualState> {
+        let path = self.state_path_for(ritual_id);
+        if path.exists() {
+            let data = std::fs::read_to_string(&path)?;
             let state: RitualState = serde_json::from_str(&data)?;
             Ok(state)
         } else {
-            Ok(RitualState::new())
+            Err(anyhow::anyhow!("Ritual {} not found", ritual_id))
         }
     }
 
-    /// Save state to disk.
-    pub fn save_state(&self, state: &RitualState) -> Result<()> {
-        if let Some(parent) = self.state_path.parent() {
-            std::fs::create_dir_all(parent)?;
+    /// Load the most recent active ritual, or create new Idle state.
+    /// Also migrates legacy single-file state if found.
+    pub fn load_state(&self) -> Result<RitualState> {
+        // Try to find active ritual in rituals dir
+        if let Some(state) = self.find_latest_active()? {
+            return Ok(state);
         }
+        // Legacy fallback
+        if self.legacy_state_path.exists() {
+            let data = std::fs::read_to_string(&self.legacy_state_path)?;
+            let state: RitualState = serde_json::from_str(&data)?;
+            return Ok(state);
+        }
+        Ok(RitualState::new())
+    }
+
+    /// List all ritual states (active and terminal).
+    pub fn list_rituals(&self) -> Result<Vec<RitualState>> {
+        let mut rituals = Vec::new();
+
+        // Check rituals dir
+        if self.rituals_dir.exists() {
+            for entry in std::fs::read_dir(&self.rituals_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().map_or(false, |e| e == "json") {
+                    if let Ok(data) = std::fs::read_to_string(&path) {
+                        if let Ok(state) = serde_json::from_str::<RitualState>(&data) {
+                            rituals.push(state);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Legacy fallback
+        if rituals.is_empty() && self.legacy_state_path.exists() {
+            if let Ok(data) = std::fs::read_to_string(&self.legacy_state_path) {
+                if let Ok(state) = serde_json::from_str::<RitualState>(&data) {
+                    rituals.push(state);
+                }
+            }
+        }
+
+        // Sort by updated_at descending
+        rituals.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        Ok(rituals)
+    }
+
+    /// Find the latest active (non-terminal, non-idle) ritual.
+    fn find_latest_active(&self) -> Result<Option<RitualState>> {
+        let rituals = self.list_rituals()?;
+        Ok(rituals.into_iter().find(|r| {
+            !r.phase.is_terminal() && r.phase != gid_core::ritual::V2Phase::Idle
+        }))
+    }
+
+    /// Save state to disk (uses ritual ID for path).
+    pub fn save_state(&self, state: &RitualState) -> Result<()> {
+        std::fs::create_dir_all(&self.rituals_dir)?;
+        let path = self.state_path_for(&state.id);
         let data = serde_json::to_string_pretty(state)?;
-        std::fs::write(&self.state_path, data)?;
+        std::fs::write(&path, data)?;
         Ok(())
     }
 
     /// Start a new ritual with a task description.
-    /// Returns error if another ritual is already in progress.
+    /// Multiple rituals can now run in parallel.
     pub async fn start(&self, task: String) -> Result<RitualState> {
-        // Check for existing active ritual
-        if self.state_path.exists() {
-            let existing = self.load_state()?;
-            if !existing.phase.is_terminal() && existing.phase != gid_core::ritual::V2Phase::Idle {
-                return Err(anyhow::anyhow!(
-                    "Another ritual is already in progress (phase: {}, task: \"{}\"). \
-                     Use `/ritual cancel` first, or `/ritual status` to check.",
-                    existing.phase.display_name(),
-                    gid_core::ritual::truncate(&existing.task, 80),
-                ));
-            }
-        }
-
         let state = RitualState::new();
+        tracing::info!(ritual_id = %state.id, task = %task, "Starting new ritual");
         let event = RitualEvent::Start { task };
         self.run_loop(state, event).await
     }
@@ -710,10 +764,11 @@ Guidelines:
 
     /// Clean up ritual artifacts.
     async fn cleanup(&self) {
-        // Remove ritual state file
-        if self.state_path.exists() {
-            if let Err(e) = tokio::fs::remove_file(&self.state_path).await {
-                tracing::warn!("Failed to remove ritual-state.json: {}", e);
+        // Note: we keep the ritual state file as a record (terminal state).
+        // Legacy state file cleanup
+        if self.legacy_state_path.exists() {
+            if let Err(e) = tokio::fs::remove_file(&self.legacy_state_path).await {
+                tracing::warn!("Failed to remove legacy ritual-state.json: {}", e);
             }
         }
         // Remove ritual.yml if present
