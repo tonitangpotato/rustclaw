@@ -821,25 +821,36 @@ Choose a model:", current),
                 }
             }
             task => {
-                // Start new ritual with task description
+                // Start new ritual as an isolated sub-agent (independent session/context)
+                // This prevents ritual phases from polluting the main agent's context
                 self.send_message(chat_id, &format!("🚀 Starting ritual: \"{}\"", task), None).await?;
                 let bot = self.clone();
                 let task_string = task.to_string();
+                let notify_fn = self.make_notify_fn(chat_id);
+                let cancel_registry = self.ritual_cancel_registry.clone();
                 tokio::spawn(async move {
-                    let runner = bot.make_ritual_runner(chat_id);
+                    // Create ritual runner with its own LLM client (separate from main agent)
+                    let ritual_llm = match crate::llm::create_client(&bot.runner.config().llm) {
+                        Ok(c) => Arc::new(tokio::sync::RwLock::new(c)),
+                        Err(e) => {
+                            let _ = bot.send_message(chat_id, &format!("❌ Failed to create ritual LLM client: {}", e), None).await;
+                            return;
+                        }
+                    };
+                    let runner = crate::ritual_runner::RitualRunner::with_cancel_registry(
+                        bot.runner.workspace_root().to_path_buf(),
+                        ritual_llm,
+                        notify_fn,
+                        cancel_registry,
+                    );
                     match runner.start(task_string).await {
                         Ok(state) => {
-                            // Save final state
                             if let Err(e) = runner.save_state(&state) {
                                 tracing::error!("Failed to save final ritual state: {}", e);
                             }
-                            // Terminal notification already sent by run_loop's send_terminal_notification()
-                            // Only log here — no duplicate message to user
                             tracing::info!("Ritual finished in {} phase", state.phase.display_name());
                         }
                         Err(e) => {
-                            // This is an executor-level error (not a ritual phase failure)
-                            // send_terminal_notification won't fire, so we must notify
                             let _ = bot.send_message(
                                 chat_id,
                                 &format!("❌ Ritual failed: {}", e),
