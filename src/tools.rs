@@ -69,6 +69,10 @@ pub struct ToolRegistry {
     /// Shared mutable slot for ritual notify — set per-request with chat context,
     /// read by StartRitualTool at execution time.
     pub ritual_notify: Arc<std::sync::Mutex<Option<crate::ritual_runner::NotifyFn>>>,
+    /// Current parent session key + chat_id — set per-request by telegram.rs,
+    /// used by fire-and-forget sub-agents to inject completion back into parent.
+    pub current_session_key: Arc<std::sync::Mutex<Option<String>>>,
+    pub current_chat_id: Arc<std::sync::Mutex<Option<i64>>>,
 }
 
 impl ToolRegistry {
@@ -78,6 +82,8 @@ impl ToolRegistry {
             llm_client: None,
             workspace_root: None,
             ritual_notify: Arc::new(std::sync::Mutex::new(None)),
+            current_session_key: Arc::new(std::sync::Mutex::new(None)),
+            current_chat_id: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -167,7 +173,8 @@ impl ToolRegistry {
     /// The runner handle is initially empty and must be set after AgentRunner creation.
     pub fn with_spawn_specialist(mut self, runner: SharedAgentRunner, orchestrator: Option<SharedOrchestrator>) -> Self {
         let notify_slot = self.ritual_notify.clone();
-        self.register(Box::new(SpawnSpecialistTool::new(runner, orchestrator, notify_slot)));
+        let session_key_slot = self.current_session_key.clone();
+        self.register(Box::new(SpawnSpecialistTool::new(runner, orchestrator, notify_slot, session_key_slot)));
         self
     }
 
@@ -2114,6 +2121,7 @@ pub struct SpawnSpecialistTool {
     runner: SharedAgentRunner,
     orchestrator: Option<SharedOrchestrator>,
     notify_slot: Arc<std::sync::Mutex<Option<crate::ritual_runner::NotifyFn>>>,
+    session_key_slot: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl SpawnSpecialistTool {
@@ -2121,8 +2129,9 @@ impl SpawnSpecialistTool {
         runner: SharedAgentRunner,
         orchestrator: Option<SharedOrchestrator>,
         notify_slot: Arc<std::sync::Mutex<Option<crate::ritual_runner::NotifyFn>>>,
+        session_key_slot: Arc<std::sync::Mutex<Option<String>>>,
     ) -> Self {
-        Self { runner, orchestrator, notify_slot }
+        Self { runner, orchestrator, notify_slot, session_key_slot }
     }
 
     /// Fire-and-forget notification via the shared notify slot (Telegram).
@@ -2298,12 +2307,14 @@ impl Tool for SpawnSpecialistTool {
 
         if !wait {
             // Fire-and-forget mode: spawn task in background, return immediately
-            // Completion/failure will be notified via Telegram
+            // Completion/failure will be notified via Telegram + injected back to parent session
             let runner_clone = runner.clone();
             let task_owned = task.to_string();
             let final_config_clone = final_config.clone();
             let notify_slot = self.notify_slot.clone();
             let notify_slot_ping = self.notify_slot.clone();
+            // Capture parent session key for completion injection
+            let parent_session_key = self.session_key_slot.lock().unwrap().clone();
             let start_time = std::time::Instant::now();
             let task_summary = if task.chars().count() > 80 {
                 format!("{}...", task.chars().take(80).collect::<String>())
@@ -2361,25 +2372,53 @@ impl Tool for SpawnSpecialistTool {
                                     result.clone()
                                 };
                                 tracing::info!("Background sub-agent {} completed: {} chars", final_config_clone.id, result.len());
-                                send_notify(format!(
+                                let completion_msg = format!(
                                     "✅ **Sub-agent completed** ({})\n\n\
                                      📋 Task: {}\n\
                                      🆔 ID: {}\n\
                                      📝 Result:\n{}",
                                     duration, task_summary, final_config_clone.id, result_preview
-                                ));
+                                );
+                                // Notify user via Telegram
+                                send_notify(completion_msg.clone());
+                                // Queue completion into parent session so agent sees it on next turn
+                                if let Some(ref parent_key) = parent_session_key {
+                                    runner_clone.queue_message(
+                                        parent_key,
+                                        &format!(
+                                            "[system] Your sub-agent '{}' has completed.\nTask: {}\nResult summary: {}",
+                                            final_config_clone.id, task_summary, result_preview
+                                        ),
+                                        None,
+                                        crate::message_queue::Priority::Next,
+                                    ).await;
+                                    tracing::info!("Queued sub-agent completion into parent session: {}", parent_key);
+                                }
                             }
                             Err(e) => {
                                 let elapsed = start_time.elapsed();
                                 let duration = format_subagent_duration(elapsed);
                                 tracing::error!("Background sub-agent {} failed: {}", final_config_clone.id, e);
-                                send_notify(format!(
+                                let fail_msg = format!(
                                     "❌ **Sub-agent failed** ({})\n\n\
                                      📋 Task: {}\n\
                                      🆔 ID: {}\n\
                                      💥 Error: {}",
                                     duration, task_summary, final_config_clone.id, e
-                                ));
+                                );
+                                send_notify(fail_msg.clone());
+                                // Queue failure into parent session
+                                if let Some(ref parent_key) = parent_session_key {
+                                    runner_clone.queue_message(
+                                        parent_key,
+                                        &format!(
+                                            "[system] Your sub-agent '{}' has FAILED.\nTask: {}\nError: {}",
+                                            final_config_clone.id, task_summary, e
+                                        ),
+                                        None,
+                                        crate::message_queue::Priority::Next,
+                                    ).await;
+                                }
                             }
                         }
                     }
