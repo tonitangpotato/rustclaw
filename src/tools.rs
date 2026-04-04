@@ -2195,8 +2195,30 @@ impl Tool for SpawnSpecialistTool {
         let model_override = input["model"].as_str();
         let workspace_override = input["workspace"].as_str();
 
-        // If skill is specified, read SKILL.md and prepend to task
-        let task: String = if let Some(skill) = skill_name {
+        // Auto-detect skill: scan skills/ directory for matching skill name in task text
+        let effective_skill: Option<String> = skill_name.map(String::from).or_else(|| {
+            let task_lower = raw_task.to_lowercase();
+            let workspace = workspace_override
+                .unwrap_or_else(|| runner.config().workspace.as_deref().unwrap_or("."));
+            let skills_dir = std::path::Path::new(workspace).join("skills");
+            if let Ok(entries) = std::fs::read_dir(&skills_dir) {
+                for entry in entries.flatten() {
+                    if entry.path().join("SKILL.md").exists() {
+                        let skill_name = entry.file_name().to_string_lossy().to_string();
+                        // Match "review-requirements" as "review requirements" in task
+                        let skill_words = skill_name.replace('-', " ");
+                        if task_lower.contains(&skill_words) || task_lower.contains(&skill_name) {
+                            tracing::info!("Auto-detected skill '{}' from task content", skill_name);
+                            return Some(skill_name);
+                        }
+                    }
+                }
+            }
+            None
+        });
+
+        // If skill is specified (or auto-detected), read SKILL.md and prepend to task
+        let task: String = if let Some(ref skill) = effective_skill {
             let workspace = workspace_override
                 .unwrap_or_else(|| runner.config().workspace.as_deref().unwrap_or("."));
             let skill_path = std::path::Path::new(workspace)
