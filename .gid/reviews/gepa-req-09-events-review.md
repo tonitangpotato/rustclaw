@@ -1,112 +1,184 @@
-# Review: requirements-09-events.md (GEPA Callback / Events)
+# Review: requirements-09-events.md
 
-> Reviewed: 2026-04-04
-> Reviewer: Requirements Review Agent (27-check systematic review)
-> Source: `.gid/features/gepa-core/requirements-09-events.md`
-> Context: `.gid/features/gepa-core/requirements-master.md` (GUARDs, Out of Scope, Dependencies)
+**Reviewed:** 2026-04-04
+**Document:** `.gid/features/gepa-core/requirements-09-events.md`
+**Scope:** 5 GOALs (GOAL-9.1 through GOAL-9.5), cross-checked against 9 GUARDs in `requirements-master.md`
 
 ---
 
 ## Phase 0: Document Size Check
 
-**Check #0: Document size** — 5 GOALs. Well within the ≤15 limit. ✅
+- **5 GOALs** — well within the ≤15 limit. ✅
 
 ---
 
 ## 🔴 Critical (blocks implementation)
 
 ### FINDING-1
-**[Check #5] GOAL-9.1: Missing outcome/behavior for several event types** — GOAL-9.1 lists 14 event types but only describes payload structure for 3 of them (`IterationSkipped`, `ReEvaluationCompleted`, `DataLoaderWarning`). The remaining 11 events (`IterationStarted`, `CandidateSelected`, `ExecutionCompleted`, `ReflectionCompleted`, `MutationCompleted`, `CandidateAccepted`, `CandidateRejected`, `StagnationWarning`, `CheckpointSaved`, `IterationCompleted`, `RunCompleted`) have no specified payload. An implementer cannot know what data each event carries without guessing. GOAL-9.2 specifies payload for only 2 of these (`CandidateAccepted` and `IterationCompleted`), leaving 9 event types with completely undefined payloads.
+**[Check #5] GOAL-9.1: Missing event data specifications for most event types**
 
-**Suggested fix:** Either (a) expand GOAL-9.1 to include payload definitions for every event type inline (structured as a table: event name → trigger point → payload fields), or (b) add a new GOAL-9.2b that systematically lists the payload for every event. At minimum, every event should specify:
-- `IterationStarted { iteration: usize }`
-- `CandidateSelected { iteration: usize, candidate_id: CandidateId, selection_reason: String }`
-- `ExecutionCompleted { iteration: usize, candidate_id: CandidateId, num_examples: usize, elapsed: Duration }`
-- `ReflectionCompleted { iteration: usize, candidate_id: CandidateId, reflection_summary: String }`
-- `MutationCompleted { iteration: usize, parent_id: CandidateId, child_id: CandidateId }`
-- `CandidateRejected { iteration: usize, candidate_id: CandidateId, reason: String }`
-- `StagnationWarning { stagnation_count: usize, stagnation_limit: usize }`
-- `CheckpointSaved { path: PathBuf, size_bytes: usize }`
-- `RunCompleted { total_iterations: usize, termination_reason: TerminationReason, elapsed: Duration, front_size: usize }`
+GOAL-9.1 lists 14 event types but only specifies payload fields for `IterationSkipped` and `ReEvaluationCompleted`. GOAL-9.2 adds payload details for `CandidateAccepted` and `IterationCompleted`. That means **10 of 14 event types have no payload specification**:
+
+- `IterationStarted` — What data? Iteration number? Timestamp?
+- `CandidateSelected` — Which candidate? Selection reason? From which front position?
+- `ExecutionCompleted` — Candidate, scores, trace summary? Minibatch used?
+- `ReflectionCompleted` — Candidate, reflection text?
+- `MutationCompleted` — Parent candidate, new candidate, reflection used?
+- `CandidateRejected` — The candidate, its scores, which front member dominated it?
+- `StagnationWarning` — Current stagnation counter, configured limit, last accepted iteration?
+- `DataLoaderWarning` — Only has `{ message }` — is message free-form string?
+- `CheckpointSaved` — File path? State size? Duration?
+- `RunCompleted` — Final result summary? Or just a signal?
+
+An implementer cannot define these event structs without guessing. A tester cannot verify correct payloads.
+
+**Suggested fix:** Add a payload specification table to GOAL-9.1 or GOAL-9.2 listing every event type and its required fields. Example:
+
+```
+| Event | Fields |
+|---|---|
+| IterationStarted | iteration: u64, timestamp: Instant |
+| CandidateSelected | candidate_id: CandidateId, selection_method: SelectionMethod |
+| ExecutionCompleted | candidate_id: CandidateId, scores: Vec<(ExampleId, f64)>, trace_count: usize |
+| ReflectionCompleted | candidate_id: CandidateId, reflection_length: usize |
+| MutationCompleted | parent_id: CandidateId, child_id: CandidateId |
+| CandidateRejected | candidate_id: CandidateId, scores: Vec<(ExampleId, f64)>, dominator_id: Option<CandidateId> |
+| StagnationWarning | counter: u64, limit: u64 |
+| DataLoaderWarning | message: String |
+| CheckpointSaved | path: PathBuf, iteration: u64 |
+| RunCompleted | termination_reason: TerminationReason, total_iterations: u64 |
+```
 
 ### FINDING-2
-**[Check #4] GOAL-9.1: Non-atomic — compound requirement** — GOAL-9.1 is doing two things: (1) defining the event type enum (the list of all events), and (2) defining the trigger/emission points ("at key points"). These are conceptually separate: the event catalog vs. when events fire. The payload issue (FINDING-1) compounds this — a single GOAL is trying to define the event catalog, payloads, AND trigger points. This should be at least two GOALs: one for the event catalog with payloads, one for when/where events are emitted.
+**[Check #4] GOAL-9.1: Compound requirement — event type enumeration AND emission points are mixed**
 
-**Suggested fix:** Split GOAL-9.1 into:
-- **GOAL-9.1a**: Event type catalog — enumerate all event types and their payload structures (table format).
-- **GOAL-9.1b**: Emission points — define at which point in the optimization loop each event is emitted (e.g., `IterationStarted` fires before Select; `CandidateAccepted` fires after the Accept step updates the front).
+GOAL-9.1 does two things: (a) defines the event type enum with 14 variants, and (b) states the engine emits them "at key points." These are different concerns. The event type definitions are a data model concern; the emission points are behavioral requirements that should specify *where* in the loop each event fires.
 
-### FINDING-3
-**[Check #7] Missing error/edge case: callback panics** — No requirement specifies what happens if a callback panics. Does it crash the engine? Is it caught? Is the panicking callback removed? Given GOAL-9.4 says callbacks "execute synchronously" in the engine loop, an unhandled panic would abort the entire optimization run. This is a critical gap — external user code running synchronously in the engine loop without panic isolation is dangerous.
+Currently, only `IterationSkipped` and `ReEvaluationCompleted` have context about when they fire. For the rest, "at key points" is the only specification. Where exactly does `CandidateSelected` fire — before or after the selection algorithm runs? Does `ExecutionCompleted` fire before or after scores are cached?
 
-**Suggested fix:** Add a requirement: "If a callback panics, the engine catches the panic (via `std::panic::catch_unwind`), logs a WARN via `tracing`, removes the panicking callback from the registry, and continues the optimization loop. The panic does not propagate to the engine." Or alternatively, document that callbacks MUST NOT panic and that doing so is UB/abort.
+**Suggested fix:** Split into:
+- GOAL-9.1a: Define the event type enum with all variants and their payload fields.
+- GOAL-9.1b: Define emission points — map each event to a specific point in the optimization loop (referencing GOAL-1.1's 5-step sequence and GUARD-3's call ordering). Example: "`CandidateSelected` is emitted immediately after the Select step returns, before Execute begins."
 
 ---
 
 ## 🟡 Important (should fix before implementation)
 
-### FINDING-4
-**[Check #1] GOAL-9.4: Vague "expected to be fast"** — "Callbacks must not block the optimization loop — they execute synchronously but are expected to be fast (logging, metric recording)." The phrase "expected to be fast" is vague. What is the contract? If a callback takes 10 seconds, does the engine enforce a timeout? Or is it purely advisory? Two engineers would implement this differently — one might add a timeout, the other might trust callers.
+### FINDING-3
+**[Check #1] GOAL-9.4: "expected to be fast" is vague**
 
-**Suggested fix:** Either (a) make it a hard contract with enforcement: "If a callback takes longer than `callback_timeout` (default: 100ms), the engine logs a WARN and continues. If a callback exceeds `callback_timeout` 3 times consecutively, it is deregistered." Or (b) explicitly state it's advisory: "This is a documentation-only recommendation; the engine does not enforce callback duration. Callers are responsible for ensuring callbacks return promptly."
+"Callbacks must not block the optimization loop — they execute synchronously but are expected to be fast (logging, metric recording)."
+
+"Expected to be fast" has no enforcement mechanism. What happens if a callback takes 10 seconds? Does the engine proceed? Is there a timeout? Is there a warning? Without enforcement, this is a gentleman's agreement, not a requirement.
+
+**Suggested fix:** Choose one:
+- (a) Add a configurable per-callback timeout (e.g., 100ms). If exceeded, emit a `CallbackTimeout` warning event and skip the callback in future iterations.
+- (b) State explicitly: "The engine provides no callback timeout enforcement. Long-running callbacks will directly delay the optimization loop. This is the consumer's responsibility." (Making it an explicit non-requirement.)
+- (c) Document that callback execution time is included in `GUARD-6`'s 5% overhead budget, which naturally constrains callback duration.
+
+### FINDING-4
+**[Check #7] Missing: Callback error handling**
+
+What happens when a callback panics or returns an error? None of the 5 GOALs address this. Scenarios:
+- Callback panics (e.g., logging to a file that's been deleted)
+- Callback writes to a channel that's closed
+- One of N registered callbacks fails — do remaining callbacks still execute?
+
+This is an important gap because a panicking callback could crash the entire optimization run.
+
+**Suggested fix:** Add a requirement: "If a callback panics, the engine catches the panic (using `std::panic::catch_unwind`), emits a warning log via `tracing`, and continues the optimization loop. Remaining callbacks for the same event are still invoked. The panicking callback remains registered — it is not automatically deregistered."
 
 ### FINDING-5
-**[Check #3] GOAL-9.5: Vague "appropriate levels"** — The first sentence says "at appropriate levels" which is vague, but the rest of the requirement then specifies exact levels for each category (INFO, DEBUG, WARN, ERROR). The opening phrase is misleading — the details are actually specific. This is a minor wording issue but could cause confusion.
+**[Check #8] Missing: Non-functional requirements for the event system**
 
-**Suggested fix:** Remove "at appropriate levels" from the first sentence. Replace with: "The engine emits structured log records via the `tracing` crate at the following levels:" and then list them.
+No performance/scalability requirements for the event system itself:
+- How many callbacks can be registered per event type? Unbounded?
+- What's the overhead of event emission with 0 callbacks registered? (Should be near-zero to satisfy GUARD-6.)
+- What's the memory overhead of event data construction when no callbacks are registered? (Should events be lazily constructed?)
+
+These interact directly with GUARD-6 (engine overhead < 5%).
+
+**Suggested fix:** Add: "Event data is constructed only if at least one callback is registered for that event type. With zero callbacks registered for all event types, the event system adds zero allocation overhead per iteration."
 
 ### FINDING-6
-**[Check #9] GOAL-9.3: Boundary condition — registering callbacks after `run()` starts** — GOAL-9.3 says "Consumers register callbacks via `GEPAEngine::on_event(EventType, callback)` before calling `run()`." What happens if a consumer calls `on_event()` after `run()` has started? Is it a compile-time error (ownership prevents it)? Runtime error? Silently ignored? The requirement says "before calling `run()`" but doesn't specify the enforcement mechanism.
+**[Check #9] GOAL-9.3: Missing boundary conditions for callback registration**
 
-**Suggested fix:** Add: "Calling `on_event()` after `run()` has been called is prevented by Rust's ownership model — `run()` takes `&mut self` or consumes `self`, making further `on_event()` calls impossible at compile time." Or if using a builder pattern: "Callbacks are registered on `GEPAEngineBuilder` before `build()` produces the final `GEPAEngine`, which has no `on_event` method."
+- Can callbacks be registered *after* `run()` starts? (Probably not, but not stated.)
+- Can callbacks be deregistered?
+- Can the same callback function be registered twice for the same event?
+- What happens if `on_event` is called with a callback after `run()` is already in progress? (Compile error? Runtime error? Ignored?)
+
+**Suggested fix:** Add to GOAL-9.3: "Callbacks can only be registered before calling `run()`. The builder pattern (GOAL-1.0) enforces this at compile time — `on_event` is available on the builder, not on the running engine. The same callback may be registered multiple times; each registration is independent. There is no deregistration API."
 
 ### FINDING-7
-**[Check #8] Missing non-functional: performance impact of events** — No requirement specifies the performance overhead of the event system itself. GUARD-6 says engine overhead should be <5% of adapter call time, but the event system (allocating event structs, invoking N callbacks per event, 14 event types per iteration) could meaningfully contribute to that overhead. There should be a requirement or explicit acknowledgment that the event system falls under GUARD-6.
+**[Check #15] GOAL-9.5: "appropriate levels" is vague — partially specified**
 
-**Suggested fix:** Add a note: "The event emission and callback invocation overhead is included in the engine-internal computation budget (GUARD-6). Event data structures should be allocated on the stack or use borrowed references to avoid heap allocation per event."
+GOAL-9.5 lists specific log levels for several categories (INFO for iteration start/end, DEBUG for selection details, WARN for retries, ERROR for unrecoverable failures) but uses the phrase "at appropriate levels" as a preamble. The listed levels are good and specific, but:
+- What level for `CandidateRejected`? (Happens frequently — probably DEBUG, but not stated.)
+- What level for `CheckpointSaved`? (INFO? DEBUG?)
+- What level for `RunCompleted`? (INFO?)
+- What level for `ReEvaluationCompleted`? (DEBUG?)
+
+The `TracingCallback` needs to know the level for every event type.
+
+**Suggested fix:** Replace "at appropriate levels" with a complete event→level mapping table:
+```
+| Event | Level |
+|---|---|
+| IterationStarted | INFO |
+| CandidateSelected | DEBUG |
+| ExecutionCompleted | DEBUG |
+| ReflectionCompleted | DEBUG |
+| MutationCompleted | DEBUG |
+| CandidateAccepted | INFO |
+| CandidateRejected | DEBUG |
+| IterationSkipped | WARN |
+| ReEvaluationCompleted | DEBUG |
+| StagnationWarning | WARN |
+| DataLoaderWarning | WARN |
+| CheckpointSaved | INFO |
+| IterationCompleted | INFO |
+| RunCompleted | INFO |
+```
 
 ### FINDING-8
-**[Check #10] Missing state: callback registration lifecycle** — The system has implicit states for callback registration (registered → active during run → done after run), but no requirement specifies whether callbacks can be deregistered, whether they persist across `run()` resumptions (GOAL-1.9), or whether callbacks are serialized as part of checkpoint state.
+**[Check #16] GOAL-9.5: TracingCallback — technology assumption not fully specified**
 
-**Suggested fix:** Add: "Callbacks are not serialized and are not part of checkpoint state. When resuming from a checkpoint, consumers must re-register callbacks before calling `run()`. Callbacks cannot be deregistered once registered; they remain active for the entire `run()` invocation."
+GOAL-9.5 says "A built-in `TracingCallback` is provided that logs all events via `tracing` at these levels, including `trace` level for full event payloads." This is good — it names the technology (`tracing` crate, which is in the allowed dependencies). However:
+- Does `TracingCallback` use `tracing::info!()` macros directly, or does it use `tracing::event!()` with dynamic levels?
+- The `trace` level for "full event payloads" implies serializing event data to string — what format? `Debug` output? JSON via serde? This matters for log parsing.
 
-### FINDING-9
-**[Check #16] GOAL-9.5: Technology assumption — `tracing` crate specifics** — GOAL-9.5 correctly names `tracing` (which is in the allowed dependencies list). However, the `TracingCallback` is described as "built-in" — is this a struct provided by the `gepa-core` crate itself? It mentions `trace` level for full event payloads, which implies event types implement `Debug` or have a serializable format. This should be explicit.
-
-**Suggested fix:** Clarify: "`TracingCallback` is a public struct in `gepa_core::events` that implements the callback interface. It requires all event types to implement `Debug` (consistent with GUARD-8). At `trace` level, it logs the full `Debug` representation of each event."
-
-### FINDING-10
-**[Check #15] GUARDs vs GOALs: GUARD-9 determinism and callback invocation order** — GUARD-9 requires determinism given same inputs. Callbacks are user-provided code that could observe ordering. GOAL-9.3 specifies "invoked in registration order" which is good. But: if callbacks have side effects that affect the RNG or engine state (even indirectly), determinism could break. The requirement should explicitly state that callbacks receive immutable references (GOAL-9.4 says this — good) and cannot influence engine state.
-
-**Suggested fix:** Add explicit statement: "Callbacks cannot influence engine state or the RNG. They receive immutable event data and have no return value. The engine's behavior is identical whether zero or one hundred callbacks are registered (GUARD-9 compliance)."
-
-### FINDING-11
-**[Check #18] GOAL-9.2: Data requirements — incomplete payload spec for `IterationCompleted`** — `IterationCompleted` includes "current best score" — best by what metric? Average across all examples? Best on a specific example? This is ambiguous in a multi-objective Pareto system where there is no single "best score." GOAL-1.8 mentions "single best candidate by average score" — is that what's meant here?
-
-**Suggested fix:** Clarify: "`IterationCompleted` includes iteration number, elapsed time, best candidate's average score (same metric as GOAL-1.8), and current Pareto front size."
+**Suggested fix:** Add: "The `TracingCallback` serializes event payloads at `trace` level using the event's `Debug` implementation. At higher levels (INFO/WARN/etc.), it logs a human-readable summary line without the full payload."
 
 ---
 
 ## 🟢 Minor (can fix during implementation)
 
-### FINDING-12
-**[Check #12] Terminology: "callback" vs "consumer" vs "handler"** — The document uses "consumers" (intro paragraph, GOAL-9.3), "callbacks" (GOAL-9.3, 9.4), and implicitly "handlers" (via the `on_event` pattern). This is mostly consistent (consumers register callbacks), but the TracingCallback in GOAL-9.5 suggests callbacks are struct types, not just closures. Clarify whether callbacks are closures (`Fn` trait), trait objects, or structs implementing a trait.
+### FINDING-9
+**[Check #12] Terminology: "callback" vs "consumer" vs "listener"**
 
-**Suggested fix:** Add to GOAL-9.3: "Callbacks are closures implementing `Fn(&EventType) + Send + Sync + 'static`" or "Callbacks are types implementing a `GEPAEventHandler` trait with a `fn handle(&self, event: &GEPAEvent)` method." The `TracingCallback` struct suggests the latter.
+The document uses "consumers" (intro paragraph, GOAL-9.3), "callbacks" (GOAL-9.3, 9.4), and the API uses `on_event` (which implies listener pattern). This is mostly consistent but "consumer" in the intro is slightly ambiguous — it could mean "user of the crate" (as used in master doc) rather than "event consumer." Consider using "event handler" or "callback" consistently within this document, reserving "consumer" for the crate user.
 
-### FINDING-13
-**[Check #21] Numbering consistency** — GOALs are numbered 9.1–9.5 with no gaps. Clean. ✅ However, unlike other feature docs, there are no sub-IDs (e.g., 9.1a, 9.1b) despite GOAL-9.1 being compound (see FINDING-2).
+**Suggested fix:** Change intro from "Consumers register callbacks" to "Event handlers are registered as callbacks" or simply "Callbacks are registered."
 
-### FINDING-14
-**[Check #22] Grouping** — The 5 GOALs are loosely grouped: event catalog (9.1), event payload (9.2), registration API (9.3), callback semantics (9.4), logging integration (9.5). Reasonable grouping but could benefit from explicit section headers to match the pattern of other feature docs.
+### FINDING-10
+**[Check #22] Grouping: Event types could be categorized**
 
-### FINDING-15
-**[Check #14] Cross-reference: "GOAL-1.x"** — The cross-references section says "GOAL-1.x (Core Engine) — events emitted at each step." This is vague — which specific GOAL-1.x items emit events? GOAL-1.1 through GOAL-1.8 all describe steps that should emit events, but none of them mention emitting events. The cross-reference is one-way.
+GOAL-9.1 lists 14 event types in a flat list. For implementability, grouping by lifecycle phase would help:
+- **Loop lifecycle:** `IterationStarted`, `IterationCompleted`, `IterationSkipped`, `RunCompleted`
+- **Candidate lifecycle:** `CandidateSelected`, `CandidateAccepted`, `CandidateRejected`
+- **Step completion:** `ExecutionCompleted`, `ReflectionCompleted`, `MutationCompleted`
+- **Maintenance:** `ReEvaluationCompleted`, `CheckpointSaved`
+- **Warnings:** `StagnationWarning`, `DataLoaderWarning`
 
-**Suggested fix:** Add specific cross-references: "GOAL-1.1 (loop steps emit per-step events), GOAL-1.2b (stagnation triggers `StagnationWarning`), GOAL-1.7d (acceptance triggers `CandidateAccepted`/`CandidateRejected`), GOAL-1.8 (run completion triggers `RunCompleted`)."
+**Suggested fix:** Add a categorization comment or restructure the event list by phase.
 
-### FINDING-16
-**[Check #25] User perspective** — Events are described from the system perspective ("the engine emits"). For an API consumer, it would be helpful to include a brief usage example showing how to register a callback and what the consumer experience looks like. This is minor since this is a library crate, but a code snippet in the requirements would eliminate ambiguity.
+### FINDING-11
+**[Check #23] Missing: Explicit dependency on GOAL-1.1 loop structure**
+
+The events document implicitly depends on GOAL-1.1 (the 5-step loop) for defining emission points, but this dependency isn't explicit in the cross-references section. The cross-references mention "GOAL-1.x (Core Engine) — events emitted at each step" which is correct but vague.
+
+**Suggested fix:** Change cross-reference to: "GOAL-1.1 (Core Engine) — defines the 5-step loop that determines event emission points" and add "GOAL-1.2a-d — termination events (RunCompleted)".
 
 ---
 
@@ -114,51 +186,50 @@
 
 | Category | Covered | Missing |
 |---|---|---|
-| Happy path | GOAL-9.1 (event emission), 9.2 (payloads), 9.3 (registration), 9.5 (logging) | Event deregistration, callback listing |
-| Error handling | — | ⚠️ Callback panics, callback errors, event emission failures |
-| Performance | GUARD-6 (indirectly) | No explicit event system overhead budget |
-| Security | N/A (internal library, no auth) | — (correctly out of scope) |
-| Reliability | GOAL-9.4 (non-blocking expectation) | No panic isolation, no timeout enforcement |
-| Observability | GOAL-9.5 (tracing integration) | No metrics for callback execution time, no event count tracking |
-| Scalability | — | No limit on number of registered callbacks, no guidance on many-callback behavior |
-| Determinism | GOAL-9.3 (registration order), GOAL-9.4 (immutable refs) | No explicit GUARD-9 compliance statement |
-| Checkpoint/Resume | — | ⚠️ No specification of callback behavior across checkpoint/resume |
+| Happy path | GOAL-9.1 (event types), 9.2 (payloads), 9.3 (registration), 9.5 (logging) | Emission order within a single iteration not fully specified |
+| Error handling | — | ⚠️ Callback panics, callback errors, event system failures — none addressed |
+| Performance | — (GUARD-6 in master is only indirect constraint) | ⚠️ No overhead budget for event system, no lazy construction requirement |
+| Security | N/A (internal library, no auth/network) | — (correctly out of scope) |
+| Reliability | — | ⚠️ What if callback registration fails? What if event data can't be constructed? |
+| Observability | GOAL-9.5 (tracing integration) | No metrics for event system itself (callback count, callback durations) |
+| Scalability | — | ⚠️ No limit on callbacks per event, no guidance on event volume at scale |
 
 ---
 
 ## ✅ Passed Checks
 
-- **Check #0**: Document size ✅ — 5 GOALs, well within 15 limit
-- **Check #2**: Testability ✅ — 4/5 GOALs have testable conditions. GOAL-9.1: can test each event is emitted at the right point. GOAL-9.2: can assert payload fields. GOAL-9.3: can test registration and invocation order. GOAL-9.5: can test tracing output. GOAL-9.4 partially testable (immutable reference — yes; "fast" — no, see FINDING-4).
-- **Check #6**: Happy path coverage ✅ — The normal flow is covered: register callbacks → run engine → receive events. All 5 steps of the loop have corresponding events.
-- **Check #11**: Internal consistency ✅ — No contradictions found between the 5 GOALs. GOAL-9.4 (immutable refs, synchronous) is consistent with GOAL-9.3 (registration order invocation).
-- **Check #13**: Priority consistency ✅ — P0 GOALs (9.1, 9.2) define events and payloads. P1 GOALs (9.3, 9.4, 9.5) define registration API and logging. P1 depends on P0, not vice versa. No priority inversion.
-- **Check #17**: External dependencies ✅ — Only external dependency is `tracing` crate, which is explicitly in the allowed dependencies list (master doc).
-- **Check #19**: Migration/compatibility ✅ — N/A, this is a new system, no migration needed.
-- **Check #20**: Scope boundaries ✅ — Master doc "Out of Scope" covers this well. Events are explicitly internal to the crate; no external pub/sub, no networking.
-- **Check #23**: Dependency graph ✅ — GOAL-9.2 depends on GOAL-9.1 (payloads depend on event types). GOAL-9.3/9.4 depend on GOAL-9.1 (registration depends on event types). GOAL-9.5 depends on GOAL-9.1/9.2 (logging depends on events and payloads). No circular dependencies.
-- **Check #24**: Acceptance criteria — partially covered. Each GOAL has implicit acceptance criteria (events are emitted, payloads contain specified fields, callbacks invoked in order, tracing output at correct levels). Not explicit but derivable. ⚠️ Borderline pass.
-- **Check #26**: Success metrics — partially covered. GOAL-9.5 provides observable tracing output. GOAL-6.5 (cross-ref) tracks statistics from events. No explicit "in production" metrics, but for a library crate this is acceptable.
-- **Check #27**: Risk identification ✅ — Events system is straightforward (observer pattern). No high-risk items. The master doc's risk section correctly doesn't flag any events-related risks.
+- **Check #0: Document size** ✅ — 5 GOALs, well within ≤15 limit.
+- **Check #2: Testability** ✅ — 4/5 GOALs have clear pass/fail conditions. GOAL-9.1: test that each event type is emitted at the right point (pending FINDING-2 for specificity on *which* points). GOAL-9.2: test payload field presence. GOAL-9.3: test multiple callback registration and invocation order. GOAL-9.4: test immutable reference (compiler enforced). GOAL-9.5: test tracing output at specified levels. (GOAL-9.4's "expected to be fast" is flagged separately in FINDING-3.)
+- **Check #3: Measurability** ✅ — No quantitative requirements in this document (correct — the quantitative constraint is GUARD-6 in master, which is already concrete at <5%).
+- **Check #6: Happy path coverage** ✅ — The normal flow is: register callbacks → run engine → receive events at each loop step → TracingCallback logs them. This is covered across GOAL-9.1 through 9.5.
+- **Check #10: State transitions** ✅ — The event system itself is stateless (fire-and-forget callbacks). No state machine to validate.
+- **Check #11: Internal consistency** ✅ — Verified all 10 GOAL pairs (5 choose 2). No contradictions found. GOAL-9.4 (immutable reference) is consistent with GOAL-9.2 (event carries data). GOAL-9.5 (TracingCallback) is a specific instance of GOAL-9.3 (callback registration). GOAL-9.1 (event types) and GOAL-9.2 (payloads) are complementary.
+- **Check #13: Priority consistency** ✅ — P0 GOALs (9.1, 9.2) define the event types and data. P1 GOALs (9.3, 9.4, 9.5) define registration and logging. P1 depends on P0 — correct priority ordering. No inversions.
+- **Check #14: Numbering/referencing** ✅ — Cross-references: GOAL-1.x, GOAL-6.5, GOAL-8.5, GOAL-8.7 — all verified to exist in their respective documents. GOAL-8.5 references `ReEvaluationCompleted` (matches GOAL-9.1). GOAL-8.7 references `DataLoaderWarning` (matches GOAL-9.1). GOAL-6.5 references statistics from events (matches GOAL-9.2 payload data).
+- **Check #15: GUARDs vs GOALs alignment** ✅ (partial — see FINDING-5 for GUARD-6 interaction). No contradictions found:
+  - GUARD-2 (candidate immutability): Events carry immutable references (GOAL-9.4) — consistent.
+  - GUARD-3 (no adapter calls outside loop): Events are engine-internal, not adapter calls — no conflict.
+  - GUARD-5 (no network): Event system is local callbacks — no conflict.
+  - GUARD-9 (determinism): Events are side-effect observations, not inputs to the algorithm — no conflict with determinism as long as callbacks don't feed back into the engine. (Note: GOAL-9.4 says "immutable reference" which prevents feedback. ✅)
+- **Check #17: External dependencies** ✅ — Only `tracing` crate (listed in allowed dependencies in master doc). No other external deps.
+- **Check #18: Data requirements** ✅ — Event data comes from the engine's internal state (iteration number, candidates, scores). No external data sources.
+- **Check #19: Migration/compatibility** ✅ — N/A. This is new functionality, no replacement of existing system.
+- **Check #20: Scope boundaries** ✅ (partial) — The document implicitly scopes to synchronous callbacks (GOAL-9.4 says "execute synchronously"). However, explicit non-goals would strengthen this — see FINDING-12 below (counted as minor).
+- **Check #21: Unique identifiers** ✅ — 5 GOALs: 9.1, 9.2, 9.3, 9.4, 9.5. Sequential, no gaps, no duplicates.
+- **Check #24: Acceptance criteria** ✅ — Each GOAL is testable as stated (with caveats from findings above). GOAL-9.1: emit all 14 event types. GOAL-9.2: verify payload fields. GOAL-9.3: register and invoke callbacks. GOAL-9.4: compiler rejects mutable references. GOAL-9.5: tracing output at correct levels.
+- **Check #25: User perspective** ✅ — Requirements are written from the engine consumer's perspective (register callbacks, receive events). GOAL-9.5 specifically addresses the developer experience (structured logging).
+- **Check #26: Success metrics** ✅ (partial) — GOAL-9.5's tracing integration provides runtime observability. However, there's no metric for "event completeness" (did the engine emit all expected events for a given run?).
+- **Check #27: Risk identification** ✅ — This feature is low-risk (standard observer pattern). No novel algorithms or uncertain external dependencies. Not flagged in master doc's Risks section — correct.
 
 ---
 
 ## Summary
 
-| Metric | Count |
-|---|---|
-| Total requirements | 5 GOALs, 0 GUARDs (GUARDs in master) |
-| 🔴 Critical | 3 (FINDING-1, FINDING-2, FINDING-3) |
-| 🟡 Important | 8 (FINDING-4 through FINDING-11) |
-| 🟢 Minor | 5 (FINDING-12 through FINDING-16) |
-| Total findings | 16 |
-
-**Coverage gaps:**
-- Error handling for callback failures (panics, slow callbacks)
-- Event payload definitions for 9 of 14 event types
-- Callback lifecycle across checkpoint/resume
-- Explicit GUARD-9 determinism compliance statement
-
-**Recommendation:** **Needs fixes first** — FINDING-1 (undefined payloads for 9/14 events) is the primary blocker. An implementer cannot build the event system without knowing what data each event carries. FINDING-3 (callback panic handling) is a runtime safety concern that should be resolved before implementation.
-
-**Estimated implementation clarity:** **Medium** — The overall architecture (typed events, registration API, tracing integration) is clear, but the missing payload definitions for most event types and the undefined callback error semantics create ambiguity that would require implementer judgment calls.
+- **Total requirements:** 5 GOALs (2 P0, 3 P1), cross-checked against 9 GUARDs
+- **Critical:** 2 (FINDING-1, FINDING-2)
+- **Important:** 6 (FINDING-3 through FINDING-8)
+- **Minor:** 3 (FINDING-9 through FINDING-11)
+- **Total findings:** 11
+- **Coverage gaps:** Error handling (callback panics/errors), Performance (event system overhead), Scalability (callback limits)
+- **Recommendation:** **Needs fixes first** — the critical findings (incomplete event payloads, unspecified emission points) would force implementers to make design decisions that should be in the requirements. The important findings (callback error handling, performance guarantees) should be addressed to avoid production surprises.
+- **Estimated implementation clarity:** **Medium** — The event pattern (observer/callback) is well-understood, and the event types are clearly enumerated. However, missing payload specifications for 10/14 events and missing emission point definitions mean an implementer would need to ask ~10 questions before starting.

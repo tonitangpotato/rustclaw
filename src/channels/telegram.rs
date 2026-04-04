@@ -568,17 +568,33 @@ Choose a model:", current),
                 Ok(true)
             }
             "/stop" => {
+                let args: Vec<&str> = text.split_whitespace().skip(1).collect();
                 let session_key = format!("telegram:{}", chat_id);
-                let cancelled = self.runner.cancel_session(&session_key).await;
-                // Also remove from active sessions so new messages aren't queued
-                {
-                    let mut active = self.active_sessions.lock().await;
-                    active.remove(&session_key);
-                }
-                if cancelled {
-                    self.send_message(chat_id, "⛔ Stopped.", None).await?;
+
+                if let Some(task_id) = args.first() {
+                    // /stop <task_id> — cancel specific sub-agent
+                    let cancelled = self.runner.cancel_subagent(task_id).await;
+                    if cancelled {
+                        self.send_message(chat_id, &format!("⛔ Sub-agent `{}` stopped.", task_id), None).await?;
+                    } else {
+                        self.send_message(chat_id, &format!("Sub-agent `{}` not found.", task_id), None).await?;
+                    }
                 } else {
-                    self.send_message(chat_id, "Nothing running.", None).await?;
+                    // /stop — cancel main session + all sub-agents
+                    let main_cancelled = self.runner.cancel_session(&session_key).await;
+                    let sub_count = self.runner.cancel_all_subagents().await;
+                    // Also remove from active sessions so new messages aren't queued
+                    {
+                        let mut active = self.active_sessions.lock().await;
+                        active.remove(&session_key);
+                    }
+                    let msg = match (main_cancelled, sub_count) {
+                        (true, 0) => "⛔ Stopped.".to_string(),
+                        (true, n) => format!("⛔ Stopped + cancelled {} sub-agent(s).", n),
+                        (false, 0) => "Nothing running.".to_string(),
+                        (false, n) => format!("⛔ Cancelled {} sub-agent(s).", n),
+                    };
+                    self.send_message(chat_id, &msg, None).await?;
                 }
                 Ok(true)
             }

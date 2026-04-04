@@ -6,7 +6,7 @@ The main GEPA optimization loop. Orchestrates the Select → Execute → Reflect
 
 ## Goals
 
-- **GOAL-1.0** [P1]: The complete happy path is: construct `GEPAConfig` (with defaults or custom) → construct `GEPAEngine` with config + adapter + data_loader + seed candidates → call `engine.run()` → receive `GEPAResult`. The engine builder validates all inputs at construction time (GOAL-7.3) so `run()` cannot fail due to misconfiguration.
+- **GOAL-1.0** [P1]: The complete happy path is: construct `GEPAConfig` (with defaults or custom) → construct `GEPAEngine` with config + adapter + data_loader + seed candidates → call `engine.run()` → receive `GEPAResult`. The engine builder validates config parameters at construction time (GOAL-7.3). Data-dependent validation (e.g., `min_shared_examples > total training examples`) is performed at the start of `run()`, before the optimization loop begins, and returns `Err` if invalid. This two-phase validation ensures that `run()` can still fail for data-dependent reasons, but never for config-only reasons.
 
 - **GOAL-1.1** [P0]: `GEPAEngine::run()` executes the full optimization loop: select a candidate from the Pareto front, execute it on a minibatch, reflect on traces, mutate to produce a new candidate, and accept/reject based on score comparison. Each iteration performs all 5 steps in order.
 
@@ -36,11 +36,57 @@ The main GEPA optimization loop. Orchestrates the Select → Execute → Reflect
 
 - **GOAL-1.7d** [P0]: **Acceptance rule** — the new candidate is accepted if it is non-dominated by any existing front member on their shared examples — i.e., no front member scores ≥ on every shared example and strictly > on at least one. After acceptance, any existing front members now dominated by the new candidate (on their shared examples, with sufficient intersection) are removed. **Edge case: mutual non-dominance** — if the new candidate and an existing front member each score higher on different examples (neither dominates the other), both remain on the front. This is the expected behavior and enables diversity. Front size is bounded by GOAL-2.4.
 
-- **GOAL-1.8** [P0]: `GEPAEngine::run()` returns a `GEPAResult` containing: the final Pareto front (all non-dominated candidates), the single best candidate by average score, total iterations run, total wall-clock time, and the termination reason.
+- **GOAL-1.8** [P0]: `GEPAEngine::run()` returns a `GEPAResult` containing: the final Pareto front (all non-dominated candidates), the single best candidate by average score across all training examples on which the candidate has been evaluated (ties broken by candidate age — oldest wins — for GUARD-9 determinism), total iterations run, total wall-clock time, and the termination reason.
 
 - **GOAL-1.9** [P1]: The engine supports resumption from a previously checkpointed `GEPAState`. Calling `GEPAEngine::run()` with a restored state continues optimization from where it left off, preserving the Pareto front, candidate history, and iteration count.
 
 - **GOAL-1.10** [P2]: The engine supports a merge step: periodically (configurable interval), select two Pareto-optimal candidates that excel on different task subsets and ask the adapter to produce a merged candidate combining both strengths. The merged candidate is evaluated and accepted/rejected like any mutation.
+
+- **GOAL-1.11** [P0]: **Cancellation mechanism** — The engine accepts a `CancellationToken` (or equivalent) at construction time. When the token is triggered, the engine completes the current adapter call (does not abort mid-call), then terminates with `TerminationReason::Cancelled`. The token must be `Clone + Send + Sync + 'static`. If no cancellation token is provided, the engine runs until another termination condition is met.
+
+- **GOAL-1.12** [P0]: **Seed evaluation at initialization** — Before iteration 1 begins, the engine evaluates all seed candidates on the initial training minibatch (first minibatch sampled per GOAL-8.3) via the adapter's `evaluate` method (GOAL-3.5). Seeds that fail evaluation after retry exhaustion (GOAL-7.5) are discarded (logged via event system). If all seeds fail evaluation, the engine returns `Err(GEPAError::AllSeedsFailedError)`. Successfully evaluated seeds are inserted into the Pareto front with their initial scores stored in the evaluation cache (GOAL-6.3).
+
+## State Transitions
+
+The engine follows this state progression:
+
+```
+Construction → Validation → Seed Evaluation → Optimization Loop → Final Validation → Complete
+                  ↓              ↓                    ↓                   ↓
+              Err(config)   Err(all seeds       ┌─ per iteration ──┐   GEPAResult
+                            failed)             │  Select          │
+                                                │  Execute         │
+                                                │  Reflect         │
+                                                │  Mutate          │
+                                                │  Evaluate        │
+                                                │  Accept/Reject   │
+                                                │  [Checkpoint]    │
+                                                │  [Re-evaluate]   │
+                                                │  [Merge]         │
+                                                └──────────────────┘
+                                                      ↓
+                                                 Termination:
+                                                 MaxIterations | TimeBudget |
+                                                 Stagnation | TooManySkips |
+                                                 Cancelled
+```
+
+1. **Construction**: Config validated (GOAL-7.3), engine built with adapter + data_loader + seeds
+2. **Validation**: Data-dependent checks at `run()` start (GOAL-8.7, GOAL-1.0)
+3. **Seed Evaluation**: All seeds evaluated on initial minibatch (GOAL-1.12)
+4. **Optimization Loop**: Iterates Select→Execute→Reflect→Mutate→Evaluate→Accept
+5. **Final Validation**: Front candidates evaluated on validation set (GOAL-8.6)
+6. **Complete**: Returns `GEPAResult`
+
+## Applicable GUARDs
+
+- **GUARD-1** — Pareto front invariant (maintained at Accept step)
+- **GUARD-2** — Candidate immutability (mutation produces new candidates)
+- **GUARD-3** — Adapter call order (select → execute → reflect → mutate → evaluate → accept)
+- **GUARD-6** — Engine overhead < 5% of adapter time
+- **GUARD-9** — Determinism with seeded RNG
+- **GUARD-10** — Score semantics (higher is better, NaN/Inf handling)
+- **GUARD-11** — Async compatibility (Send + Sync)
 
 ## Cross-references
 
@@ -50,4 +96,4 @@ The main GEPA optimization loop. Orchestrates the Select → Execute → Reflect
 - GOAL-7.x (Config) — stopping criteria, retry policy
 - GOAL-8.x (Data Loading) — minibatch sampling
 
-**Summary: 14 GOALs** (11 P0, 2 P1, 1 P2)
+**Summary: 20 GOALs** (17 P0, 2 P1, 1 P2)

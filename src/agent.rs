@@ -66,6 +66,8 @@ pub struct AgentRunner {
     pub message_queues: crate::message_queue::SessionQueues,
     /// Per-session cancellation tokens for /stop support
     cancellation_tokens: Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio_util::sync::CancellationToken>>>,
+    /// Parent session → child sub-agent session keys (for cascade cancel)
+    subagent_children: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Vec<String>>>>,
     /// Tool call frequency and duration statistics
     pub tool_stats: Arc<crate::tool_stats::ToolStatsTracker>,
 }
@@ -150,6 +152,7 @@ impl AgentRunner {
             voice_mode,
             message_queues: crate::message_queue::SessionQueues::new(),
             cancellation_tokens: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            subagent_children: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             tool_stats: Arc::new(crate::tool_stats::ToolStatsTracker::new()),
         }
     }
@@ -253,6 +256,49 @@ impl AgentRunner {
         } else {
             false
         }
+    }
+
+    /// Cancel all active sub-agent sessions (cascade cancel).
+    /// Returns the number of sessions cancelled.
+    pub async fn cancel_all_subagents(&self) -> usize {
+        let mut tokens = self.cancellation_tokens.lock().await;
+        let subagent_keys: Vec<String> = tokens.keys()
+            .filter(|k| k.contains("spawn_") || k.contains("ritual_"))
+            .cloned()
+            .collect();
+        let count = subagent_keys.len();
+        for key in &subagent_keys {
+            if let Some(token) = tokens.remove(key) {
+                token.cancel();
+                tracing::info!("Cascade cancel: sub-agent session '{}'", key);
+            }
+        }
+        count
+    }
+
+    /// Cancel a specific sub-agent by task ID (e.g., "spawn_4e3e74f0").
+    pub async fn cancel_subagent(&self, task_id: &str) -> bool {
+        let mut tokens = self.cancellation_tokens.lock().await;
+        let matching_key = tokens.keys()
+            .find(|k| k.contains(task_id))
+            .cloned();
+        if let Some(key) = matching_key {
+            if let Some(token) = tokens.remove(&key) {
+                token.cancel();
+                tracing::info!("Sub-agent cancelled: {} (session: {})", task_id, key);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// List active sub-agent session keys.
+    pub async fn list_active_subagents(&self) -> Vec<String> {
+        let tokens = self.cancellation_tokens.lock().await;
+        tokens.keys()
+            .filter(|k| k.contains("spawn_") || k.contains("ritual_"))
+            .cloned()
+            .collect()
     }
 
     /// Queue a message for later injection (used when agent is busy processing).
@@ -1181,7 +1227,35 @@ CRITICAL CONSTRAINTS:
         // Register cancellation token for sub-agent so it can be cancelled externally
         let cancel_token = self.get_cancellation_token(&session_key).await;
 
+        // Track parent→child relationship for cascade cancel
+        // Parent session is derived from sub-agent prefix (e.g., "agent:spawn_xxx:" → parent is main session)
+        {
+            let parent_key = format!("telegram:{}", subagent.session_prefix.split(':').nth(1).unwrap_or("unknown"));
+            // Use a catch-all "main" parent for sub-agents spawned from any context
+            let parent = if parent_key.contains("spawn_") || parent_key.contains("ritual_") {
+                // Sub-agent spawned from main session — use the chat session key
+                "telegram:main".to_string()
+            } else {
+                parent_key
+            };
+            let mut children = self.subagent_children.lock().await;
+            children.entry(parent).or_default().push(session_key.clone());
+        }
+
+        // Wall-clock timeout: sub-agents get 10 minutes max
+        let wall_clock_start = std::time::Instant::now();
+        let wall_clock_limit = std::time::Duration::from_secs(600); // 10 minutes
+
         for turn in 0..max_turns {
+            // Check wall-clock timeout
+            if wall_clock_start.elapsed() > wall_clock_limit {
+                tracing::warn!(
+                    "Sub-agent '{}' wall-clock timeout ({:.0}s > {}s) at turn {}",
+                    subagent.name, wall_clock_start.elapsed().as_secs_f64(), wall_clock_limit.as_secs(), turn
+                );
+                response_text = format!("(Sub-agent timed out after {:.0}s at turn {})", wall_clock_start.elapsed().as_secs_f64(), turn);
+                break;
+            }
             // Check if cancelled
             if cancel_token.is_cancelled() {
                 tracing::info!("Sub-agent '{}' cancelled at turn {}", subagent.name, turn);
