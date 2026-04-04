@@ -995,99 +995,133 @@ Guidelines:
                     review_docs.sort();
                 }
             }
-            // If only 1-2 docs, inline them (small enough for one sub-agent)
-            if review_docs.len() <= 2 {
-                if !review_docs.is_empty() {
+            // Group docs into batches by size (target ~50KB per batch)
+            // This balances cross-doc reference ability vs context explosion
+            if !review_docs.is_empty() {
+                let max_batch_bytes: u64 = 50_000;
+                let mut batches: Vec<Vec<String>> = Vec::new();
+                let mut current_batch: Vec<String> = Vec::new();
+                let mut current_size: u64 = 0;
+
+                for doc in &review_docs {
+                    let full_path = self.project_root.join(doc);
+                    let file_size = std::fs::metadata(&full_path).map(|m| m.len()).unwrap_or(5000);
+                    
+                    if !current_batch.is_empty() && current_size + file_size > max_batch_bytes {
+                        batches.push(std::mem::take(&mut current_batch));
+                        current_size = 0;
+                    }
+                    current_batch.push(doc.clone());
+                    current_size += file_size;
+                }
+                if !current_batch.is_empty() {
+                    batches.push(current_batch);
+                }
+
+                if batches.len() <= 1 {
+                    // All docs fit in one batch — single sub-agent with doc list
                     extra_context = format!(
-                        "\n\n## DOCUMENT TO REVIEW\nReview this document and write findings to `.gid/reviews/`.\n\n{}",
+                        "\n\n## DOCUMENTS TO REVIEW\n\
+                         Review all documents below and write findings to `.gid/reviews/`.\n\
+                         Do NOT spawn sub-agents.\n\n{}",
                         review_docs.iter().enumerate()
                             .map(|(i, d)| format!("{}. {}", i + 1, d))
                             .collect::<Vec<_>>()
                             .join("\n")
                     );
+                    review_docs.clear(); // Don't trigger per-batch loop
+                } else {
+                    // Multiple batches needed — store for per-batch loop
+                    tracing::info!(
+                        "Review docs split into {} batches (total {} docs, target ≤{}KB per batch)",
+                        batches.len(), review_docs.len(), max_batch_bytes / 1000
+                    );
+                    // Replace review_docs with batch info for the loop below
+                    review_docs.clear(); // Clear — we'll use batches directly
+                    
+                    // Store batches in a separate variable for the per-batch loop
+                    // We need to handle this before the per-doc loop check
+                    let review_batches = batches;
+                    
+                    // --- Per-batch review loop ---
+                    let mut all_outputs = Vec::new();
+                    let mut total_tokens = 0u64;
+                    let start = std::time::Instant::now();
+
+                    for (i, batch) in review_batches.iter().enumerate() {
+                        let batch_phase_id = format!("{}_batch{}", phase_id, i);
+                        let batch_task = format!(
+                            "You are executing a ritual phase: **{}** (batch {}/{})\n\n\
+                             Working directory: {}\n\
+                             Allowed tools: {}\n\n\
+                             {}\n\n\
+                             ## DOCUMENTS TO REVIEW IN THIS BATCH\n\
+                             Review these documents and write findings to `.gid/reviews/`.\n\
+                             Write ONE review file per document. Do NOT spawn sub-agents.\n\n{}\n\n\
+                             Complete the task using the tools. When done, summarize what you did.",
+                            name, i + 1, review_batches.len(),
+                            self.project_root.display(),
+                            tool_names.join(", "),
+                            skill_prompt,
+                            batch.iter().enumerate()
+                                .map(|(j, d)| format!("{}. {}", j + 1, d))
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        );
+
+                        tracing::info!(
+                            "Review batch {}/{}: {} docs → sub-agent '{}'",
+                            i + 1, review_batches.len(), batch.len(), batch_phase_id
+                        );
+
+                        let batch_subagent = runner.spawn_agent_with_options(
+                            &crate::config::AgentConfig {
+                                id: batch_phase_id.clone(),
+                                name: Some(format!("{} (batch {})", name, i + 1)),
+                                model: Some(model.to_string()),
+                                workspace: Some(self.project_root.to_string_lossy().to_string()),
+                                default: false,
+                            },
+                            max_iterations,
+                        )?;
+
+                        match runner.process_with_subagent(&batch_subagent, &batch_task, Some(&batch_phase_id)).await {
+                            Ok(output) => {
+                                let session_key = format!("agent:{}:{}", batch_phase_id, batch_phase_id);
+                                let tokens = runner.sessions().get_session(&session_key).await
+                                    .map(|s| s.total_tokens).unwrap_or(0);
+                                total_tokens += tokens;
+                                all_outputs.push(format!("Batch {}: {}", i + 1,
+                                    if output.len() > 200 { format!("{}...", &output[..200]) } else { output }
+                                ));
+                                tracing::info!("Review batch {}/{} completed ({} tokens)", i + 1, review_batches.len(), tokens);
+                            }
+                            Err(e) => {
+                                tracing::warn!("Review batch {}/{} failed: {}", i + 1, review_batches.len(), e);
+                                all_outputs.push(format!("Batch {}: FAILED - {}", i + 1, e));
+                            }
+                        }
+                    }
+
+                    let elapsed = start.elapsed();
+                    tracing::info!(
+                        "Batched review completed: {} batches in {:.1}s, {} total tokens",
+                        review_batches.len(), elapsed.as_secs_f64(), total_tokens
+                    );
+
+                    return Ok((
+                        RitualEvent::SkillCompleted {
+                            phase: name.to_string(),
+                            artifacts: all_outputs,
+                        },
+                        total_tokens,
+                    ));
                 }
-                review_docs.clear(); // Don't trigger per-doc loop
             }
         }
 
-        // Per-doc review: spawn one sub-agent per document (avoids 148KB context explosion)
-        if !review_docs.is_empty() {
-            tracing::info!(
-                "Running per-doc review: {} documents, skill='{}'",
-                review_docs.len(), name
-            );
-            let mut all_outputs = Vec::new();
-            let mut total_tokens = 0u64;
-            let start = std::time::Instant::now();
-
-            for (i, doc_path) in review_docs.iter().enumerate() {
-                let doc_phase_id = format!("{}_doc{}", phase_id, i);
-                let doc_task = format!(
-                    "You are executing a ritual phase: **{}** (document {}/{})\n\n\
-                     Working directory: {}\n\
-                     Allowed tools: {}\n\n\
-                     {}\n\n\
-                     ## YOUR SINGLE DOCUMENT TO REVIEW\n\
-                     Review ONLY this document: `{}`\n\
-                     Write findings to `.gid/reviews/` with the document name in the review filename.\n\
-                     Do NOT read other documents. Focus only on the one assigned.\n\n\
-                     Complete the task using the tools. When done, summarize what you did.",
-                    name, i + 1, review_docs.len(),
-                    self.project_root.display(),
-                    tool_names.join(", "),
-                    skill_prompt,
-                    doc_path,
-                );
-
-                tracing::info!(
-                    "Per-doc review {}/{}: '{}' → sub-agent '{}'",
-                    i + 1, review_docs.len(), doc_path, doc_phase_id
-                );
-
-                let doc_subagent = runner.spawn_agent_with_options(
-                    &crate::config::AgentConfig {
-                        id: doc_phase_id.clone(),
-                        name: Some(format!("{} (doc {})", name, i + 1)),
-                        model: Some(model.to_string()),
-                        workspace: Some(self.project_root.to_string_lossy().to_string()),
-                        default: false,
-                    },
-                    max_iterations,
-                )?;
-
-                match runner.process_with_subagent(&doc_subagent, &doc_task, Some(&doc_phase_id)).await {
-                    Ok(output) => {
-                        let session_key = format!("agent:{}:{}", doc_phase_id, doc_phase_id);
-                        let tokens = runner.sessions().get_session(&session_key).await
-                            .map(|s| s.total_tokens).unwrap_or(0);
-                        total_tokens += tokens;
-                        all_outputs.push(format!("Document {}: {}", i + 1, 
-                            if output.len() > 200 { format!("{}...", &output[..200]) } else { output }
-                        ));
-                        tracing::info!("Per-doc review {}/{} completed ({} tokens)", i + 1, review_docs.len(), tokens);
-                    }
-                    Err(e) => {
-                        tracing::warn!("Per-doc review {}/{} failed: {}", i + 1, review_docs.len(), e);
-                        all_outputs.push(format!("Document {}: FAILED - {}", i + 1, e));
-                    }
-                }
-            }
-
-            let elapsed = start.elapsed();
-            let combined_output = all_outputs.join("\n\n");
-            tracing::info!(
-                "Per-doc review completed: {} docs in {:.1}s, {} total tokens",
-                review_docs.len(), elapsed.as_secs_f64(), total_tokens
-            );
-
-            return Ok((
-                RitualEvent::SkillCompleted {
-                    phase: name.to_string(),
-                    artifacts: vec![combined_output],
-                },
-                total_tokens,
-            ));
-        }
+        // review_docs is empty here — either all docs fit in one batch (extra_context set),
+        // or batched loop already returned above
 
         // Compose the task for the sub-agent (single-doc or non-review phases)
         let task = format!(

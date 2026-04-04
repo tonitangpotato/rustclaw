@@ -20,7 +20,7 @@
 
 ## Cross-Document Consistency Findings
 
-### FINDING-1 🔴 Critical — CandidateId type inconsistency across documents
+### FINDING-1 ✅🔴 Critical — CandidateId type inconsistency across documents
 
 **design-02** (Pareto Front §2.1): `pub type CandidateId = u64;`
 **design-05** (Candidates §2.2): ID generator produces `u64`, struct field `pub id: u64`
@@ -30,7 +30,7 @@ This is a direct contradiction. design-02 and design-05 define `CandidateId = u6
 
 **Suggested fix:** Update design-09 §2.1 Key Details to say `CandidateId = u64` (matching design-02/05). Remove the "(String)" claim. Also update `ExampleId` description to match design-08's `ExampleId(pub String)` newtype wrapper.
 
-### FINDING-2 🔴 Critical — ExampleId type inconsistency: String newtype vs u64 in EvalCache
+### FINDING-2 ✅🔴 Critical — ExampleId type inconsistency: String newtype vs u64 in EvalCache
 
 **design-08** (Data Loading §2.2): `pub struct ExampleId(pub String);` — newtype wrapper around String
 **design-06** (State §2.2): `entries: HashMap<(u64, u64), CacheEntry>` — cache keyed by `(u64, u64)`
@@ -45,7 +45,7 @@ Additionally, design-06 §2.3 shows serialization as `"candidate_id:example_id"`
 
 Recommend option (A) since the cache is a hot path and u64 keys are much faster. The DataLoader assigns numeric IDs; string IDs can be kept in a separate lookup table.
 
-### FINDING-3 🟡 Important — RNG type inconsistency: StdRng vs ChaCha8Rng
+### FINDING-3 ✅🟡 Important — RNG type inconsistency: StdRng vs ChaCha8Rng
 
 **design.md** (master §3.3): "A single `ChaCha8Rng` seeded at engine construction" — explicit choice for cross-version determinism.
 **design-01** (Core Engine §2.1, §2.2): `GEPAEngine` struct field `rng: StdRng`. MinibatchSampler uses `StdRng`.
@@ -56,7 +56,7 @@ The master design explicitly says ChaCha8Rng for determinism (GUARD-9), and desi
 
 **Suggested fix:** Replace all `StdRng` references with `ChaCha8Rng` in design-01 (engine struct, MinibatchSampler) and design-04 (proposer trait parameter, MutationProposer methods). The master design's rationale is correct — `StdRng` is explicitly documented in rand as potentially changing algorithm across versions.
 
-### FINDING-4 🟡 Important — SelectionMethod enum referenced but never defined
+### FINDING-4 ✅🟡 Important — SelectionMethod enum referenced but never defined
 
 **design-09** (Events §2.1): `CandidateSelected { selection_method: SelectionMethod }` — uses `SelectionMethod` type.
 **design-09** (Events §2.1 Key Details): Lists variants `Tournament, LeastCrowded, Random, MergeComplement`.
@@ -67,7 +67,7 @@ The enum is used in events but never formally defined in any feature design. Als
 
 **Suggested fix:** Define `SelectionMethod` in design-02 or design-04 with variants matching actual algorithms: `RoundRobinOverfitting`, `ComplementaryPair`, `Random` (if applicable). Remove `Tournament` and `LeastCrowded` which don't exist in the design.
 
-### FINDING-5 🟡 Important — TerminationReason variants inconsistent
+### FINDING-5 ✅🟡 Important — TerminationReason variants inconsistent
 
 **design-01** (Core Engine §2.3): `MaxIterations, TimeBudget, Stagnation, TooManySkips, Cancelled`
 **design-09** (Events §2.1 Key Details): Claims `MaxIterations, Stagnation, TimeBudget, ConvergedFront, TooManySkips`
@@ -77,7 +77,7 @@ design-09 has `ConvergedFront` (not in design-01 or master) and is missing `Canc
 
 **Suggested fix:** Align design-09's claimed variants with design-01/master: `MaxIterations, TimeBudget, Stagnation, TooManySkips, Cancelled`. Remove `ConvergedFront`.
 
-### FINDING-6 🟡 Important — MinibatchIterator state not captured in EngineState checkpoint
+### FINDING-6 ✅🟡 Important — MinibatchIterator state not captured in EngineState checkpoint
 
 **design-06** (State §2.1): `EngineState` contains: pareto_front, candidates, eval_cache, next_candidate_id, rng_state, proposer_state, statistics, config_snapshot, stagnation_counter, consecutive_skips.
 
@@ -95,7 +95,7 @@ pub merge_disabled: bool,
 pub elapsed_before_resume: Duration, // accumulated time from previous segments
 ```
 
-### FINDING-7 🟡 Important — EvalCache API signatures inconsistent between definition and callers
+### FINDING-7 ✅🟡 Important — EvalCache API signatures inconsistent between definition and callers
 
 **design-06** (State §2.2 — definition):
 - `get(&mut self, candidate_id: u64, example_id: u64) -> Option<f64>`
@@ -115,7 +115,7 @@ pub elapsed_before_resume: Duration, // accumulated time from previous segments
 3. Standardize return type: owned `Vec` (not borrowed slice — HashMap can't return contiguous slices)
 4. Use `u64` consistently for example IDs in cache API (or `ExampleId` consistently — pick one)
 
-### FINDING-8 🟡 Important — adapter.evaluate return type inconsistency
+### FINDING-8 ✅🟡 Important — adapter.evaluate return type inconsistency
 
 **design-03** (Adapter §2.2): `evaluate` returns `Vec<f64>` — one score per example, same order
 **design-08** (Data Loading §2.6, Integration Points): States adapter's evaluate returns `Vec<(ExampleId, f64)>`
@@ -124,7 +124,7 @@ These are different types. `Vec<f64>` relies on positional correspondence with t
 
 **Suggested fix:** Use `Vec<f64>` (matching design-03 §2.2 which is the authoritative trait definition). The engine correlates scores to examples by position. Update design-08's integration point reference.
 
-### FINDING-9 🟡 Important — GEPAResult struct defined inconsistently
+### FINDING-9 ✅🟡 Important — GEPAResult struct defined inconsistently
 
 **design.md** (master §6):
 ```rust
@@ -155,7 +155,7 @@ Fields differ: master has `validation_scores`, `validation_skipped`, `state`; de
 
 **Suggested fix:** Reconcile into one canonical definition (preferably in design-01 since it owns `run()`). Include all fields from both. Use consistent naming (`statistics` or `stats`).
 
-### FINDING-10 🟡 Important — ParetoFront::select signature inconsistency
+### FINDING-10 ✅🟡 Important — ParetoFront::select signature inconsistency
 
 **design-02** (Pareto Front §2.3): `select(&mut self, cache: &EvalCache, overfitting_deltas: &HashMap<CandidateId, f64>, rng: &mut StdRng) -> Result<CandidateId, GEPAError>`
 
@@ -169,7 +169,7 @@ So the proposer's `select_parent` is different from `ParetoFront::select`. desig
 
 **Suggested fix:** Clarify the boundary: Either (A) proposers call `ParetoFront::select()` directly (removing `MutationProposer::select_parent`), or (B) document that `MutationProposer` wraps `ParetoFront::select()` with additional tracking. Currently they appear to be two competing implementations of the same requirement.
 
-### FINDING-11 🟢 Minor — Reflection struct field name inconsistency
+### FINDING-11 ✅🟢 Minor — Reflection struct field name inconsistency
 
 **design-03** (Adapter §2.2): `Reflection { diagnosis: String, directions: Vec<String> }`
 **design.md** (master §6): `Reflection { diagnosis: String, improvement_directions: Vec<String> }`
@@ -178,7 +178,7 @@ Field name: `directions` vs `improvement_directions`.
 
 **Suggested fix:** Pick one. `improvement_directions` is more descriptive.
 
-### FINDING-12 🟢 Minor — Expected output type inconsistency in Example struct
+### FINDING-12 ✅🟢 Minor — Expected output type inconsistency in Example struct
 
 **design.md** (master §6): `expected_output: Option<String>`
 **design-08** (Data Loading §2.2): `expected_output: Option<serde_json::Value>`
@@ -187,7 +187,7 @@ Field name: `directions` vs `improvement_directions`.
 
 **Suggested fix:** Use `Option<serde_json::Value>` (design-08) since it's more flexible and aligns with `input: serde_json::Value`.
 
-### FINDING-13 🟢 Minor — GEPAError missing variant: AllSeedsFailedError
+### FINDING-13 ✅🟢 Minor — GEPAError missing variant: AllSeedsFailedError
 
 **design.md** (master §3.1): `GEPAError` enum lists variants. Does not include `AllSeedsFailed`.
 **design-04** (Proposers §2.4): References `GEPAError::AllSeedsFailedError`
@@ -198,7 +198,7 @@ Neither `AllSeedsFailed`/`AllSeedsFailedError` nor `EmptyFrontError` nor `Insuff
 
 **Suggested fix:** Update master design §3.1 GEPAError to include all variants referenced across feature docs: `AllSeedsFailed`, `EmptyFrontError`, `InsufficientFrontSize`, `Internal { message: String }`, `ValidationError(String)`.
 
-### FINDING-14 🟢 Minor — Statistics type name inconsistency
+### FINDING-14 ✅🟢 Minor — Statistics type name inconsistency
 
 **design.md** (master §6): `RunStatistics` in GEPAResult
 **design-06** (State §2.5): Defines `GEPAStatistics`
@@ -207,7 +207,7 @@ Neither `AllSeedsFailed`/`AllSeedsFailedError` nor `EmptyFrontError` nor `Insuff
 
 **Suggested fix:** Standardize on one name. `GEPAStatistics` (design-06) since it's fully defined there.
 
-### FINDING-15 🟢 Minor — design-06 EngineState vs GEPAState naming
+### FINDING-15 ✅🟢 Minor — design-06 EngineState vs GEPAState naming
 
 **design.md** (master): References `GEPAState` (§2, §5 step 11)
 **design-01**: Uses both `GEPAState` and `EngineState` (§2.2 field `state: GEPAState`)
@@ -217,7 +217,7 @@ Neither `AllSeedsFailed`/`AllSeedsFailedError` nor `EmptyFrontError` nor `Insuff
 
 **Suggested fix:** Pick one. `GEPAState` is used more frequently. Update design-06 to use `GEPAState`.
 
-### FINDING-16 🟢 Minor — CheckpointSaved event payload inconsistency
+### FINDING-16 ✅🟢 Minor — CheckpointSaved event payload inconsistency
 
 **design-09** (Events §2.1): `CheckpointSaved { path: PathBuf, iteration: u64 }`
 **design-06** (State §2.4): References emitting `CheckpointSaved { success: bool, path: PathBuf, error: Option<String> }`
@@ -226,7 +226,7 @@ design-06 includes `success` and `error` fields that design-09 doesn't have.
 
 **Suggested fix:** Align. Add `success: bool` and `error: Option<String>` to the event variant in design-09 (failed checkpoints should be observable).
 
-### FINDING-17 🟢 Minor — EvalCache peek() vs get() semantics unclear for dominance
+### FINDING-17 ✅🟢 Minor — EvalCache peek() vs get() semantics unclear for dominance
 
 **design-06** (State §2.2): `peek()` does NOT update LRU counter. `get()` does. States peek is "used for dominance comparisons."
 
@@ -234,7 +234,7 @@ But design-02 (Pareto Front §2.2) references `cache.scores_for(a)` / `cache.exa
 
 **Suggested fix:** Document explicitly: dominance checks should use `peek()` semantics (no LRU update) to avoid keeping rejected candidates' scores alive. Add a `peek_scores_for(candidate_id)` method to the EvalCache interface.
 
-### FINDING-18 🟢 Minor — design-03 adapter example uses `expected` field not in Example struct
+### FINDING-18 ✅🟢 Minor — design-03 adapter example uses `expected` field not in Example struct
 
 **design-03** (Adapter §3, example implementation): `ex.expected.as_deref()` — references `expected` field.
 **design-08** (Data Loading §2.2): Field is `expected_output`, not `expected`.

@@ -81,7 +81,7 @@ impl CandidateIdGenerator {
 - IDs are `u64` values starting at 0, monotonically increasing per run (GOAL-5.4)
 - Seed candidates receive IDs 0..N-1 in the order provided to `GEPAEngine::new()`
 - Subsequent candidates receive the next available ID from the generator
-- The generator is included in `EngineState` for checkpoint/resume (design-06 §2.1). On resume, `CandidateIdGenerator::resume(state.next_candidate_id)` ensures no ID collisions
+- The generator is included in `GEPAState` for checkpoint/resume (design-06 §2.1). On resume, `CandidateIdGenerator::resume(state.next_candidate_id)` ensures no ID collisions
 - No randomness involved — deterministic by construction (GUARD-9)
 - Even if two candidates have identical text parameters, they get different IDs (GOAL-5.4)
 
@@ -95,7 +95,7 @@ impl CandidateIdGenerator {
 ```rust
 pub type CandidateStore = HashMap<u64, Candidate>;
 
-/// Internal implementation — the public API `EngineState::lineage(candidate_id)` (design-06) delegates to this function.
+/// Internal implementation — the public API `GEPAState::lineage(candidate_id)` (design-06) delegates to this function.
 pub fn lineage(candidate_id: u64, store: &CandidateStore) -> Result<Vec<u64>, GEPAError>;
 
 pub fn lesson_chain(candidate_id: u64, store: &CandidateStore, max_depth: usize) -> Result<Vec<String>, GEPAError>;
@@ -181,7 +181,7 @@ assert_eq!(candidate, restored);
 - **Proposers (design-04):** Proposers create candidates via `Candidate::new()` and traverse lineage via `lesson_chain()`. MutationProposer reads `CandidateStore` for lesson chain construction.
 - **EvaluationCache (design-06 §2.2):** Scores are stored externally, keyed by `(candidate_id, example_id)`. Candidates never hold their own scores.
 - **ParetoFront (design-02):** The front holds `Vec<u64>` of candidate IDs, not `Candidate` objects. Front operations look up candidates from `CandidateStore` as needed.
-- **EngineState (design-06 §2.1):** `CandidateStore` and `CandidateIdGenerator` are serialized as part of the checkpoint.
+- **GEPAState (design-06 §2.1):** `CandidateStore` and `CandidateIdGenerator` are serialized as part of the checkpoint.
 - **Adapter (design-03):** Adapter methods receive `&Candidate` references. The adapter reads `params` for LLM prompt construction and may read metadata for context.
 
 **Guard compliance:**

@@ -74,7 +74,7 @@ pub struct ProposerState {
 
 **Convenience methods:**
 ```rust
-impl EngineState {
+impl GEPAState {
     /// Public lineage API — delegates to the freestanding `lineage()` function in design-05 §2.3.
     pub fn lineage(&self, candidate_id: u64) -> Result<Vec<u64>, GEPAError> {
         lineage(candidate_id, &self.candidates)
@@ -86,9 +86,13 @@ impl EngineState {
 - `schema_version: u32` starts at 1. On deserialization, if version != current, return `GEPAError::CheckpointCorrupt`. Forward compatibility strategy: future versions bump the version and add migration logic or reject incompatible checkpoints. V1 does not support cross-version resume (per GOAL-5.6 scope).
 - `CandidateStore` is `HashMap<u64, Candidate>` — all candidates ever created, never pruned (design-05 §2.3).
 - `ParetoFront` is serialized as its member ID list + any internal state (design-02).
-- `rng_state` captures the full `StdRng` state via `bincode` serialization. This ensures that resumed runs produce identical sequences (GUARD-9). `StdRng` from `rand` crate implements `Serialize/Deserialize` via the `serde1` feature.
+- `rng_state` captures the full `ChaCha8Rng` state via `bincode` serialization. This ensures that resumed runs produce identical sequences (GUARD-9). `ChaCha8Rng` from `rand_chacha` crate implements `Serialize/Deserialize` via the `serde1` feature.
 - `config_snapshot` stores the config used for this run. On resume, the engine can warn if the provided config differs from the snapshot (informational, not enforced in v1).
-- **Cross-design constraint:** All types embedded in `EngineState` — including `ParetoFront` (design-02), `GEPAConfig` (design-07), `CandidateStore`/`Candidate` (design-05), and `ProposerState` — MUST derive `Serialize, Deserialize`. This is required for `EngineState`'s derive to compile.
+- **Cross-design constraint:** All types embedded in `GEPAState` — including `ParetoFront` (design-02), `GEPAConfig` (design-07), `CandidateStore`/`Candidate` (design-05), and `ProposerState` — MUST derive `Serialize, Deserialize`. This is required for `GEPAState`'s derive to compile.
+- `minibatch_state` captures the `MinibatchIterator`'s cursor, epoch, and shuffled order for deterministic resume (design-08 §2.3).
+- `overfitting_deltas` stores per-candidate overfitting delta values computed during backfill (design-08 §2.5), used by selection (design-02 §2.3). Survives checkpoint/resume.
+- `merge_disabled` tracks whether merge auto-disabled on first failure (design-03 §2.1). Survives checkpoint/resume.
+- `elapsed_before_resume` accumulates wall-clock time from previous run segments. On resume, the engine calculates remaining time budget as `config.time_budget - elapsed_before_resume`. `Duration` is serializable via serde.
 - `stagnation_counter` and `consecutive_skips` are engine loop counters needed for correct resume of termination condition tracking.
 
 **Satisfies:** GOAL-6.1, GOAL-1.9, GUARD-9
@@ -116,6 +120,8 @@ impl EvaluationCache {
     pub fn insert(&mut self, candidate_id: u64, example_id: u64, score: f64);
     pub fn evict_lru(&mut self, max_size: usize, pinned_ids: &HashSet<u64>);
     pub fn scores_for_candidate(&self, candidate_id: u64) -> Vec<(u64, f64)>;
+    pub fn examples_for(&self, candidate_id: u64) -> Vec<u64>;
+    pub fn peek_scores_for_candidate(&self, candidate_id: u64) -> Vec<(u64, f64)>;
     pub fn peek(&self, candidate_id: u64, example_id: u64) -> Option<f64>;
     pub fn len(&self) -> usize;
     pub fn hit_rate(&self) -> f64;
@@ -123,7 +129,9 @@ impl EvaluationCache {
 ```
 
 **Key Details:**
-- **LRU tracking:** `access_counter` is a monotonic u64 (not wall-clock — deterministic per GUARD-9). Incremented on every `get()` hit and `insert()`. `peek()` does NOT update the counter — used for dominance comparisons.
+- **LRU tracking:** `access_counter` is a monotonic u64 (not wall-clock — deterministic per GUARD-9). Incremented on every `get()` hit and `insert()`. `peek()` and `peek_scores_for_candidate()` do NOT update the counter — used for dominance comparisons. This prevents dominance checks from artificially keeping rejected candidates' cache entries alive.
+- **`examples_for(candidate_id)`** returns a `Vec<u64>` of all example IDs that have cached scores for this candidate. Updates LRU timestamps (like `get`).
+- **`peek_scores_for_candidate(candidate_id)`** returns `Vec<(u64, f64)>` like `scores_for_candidate` but without updating LRU timestamps. Used by `ParetoFront::check_dominance()` (design-02 §2.2) so that dominance checks don't pollute LRU ordering.
 - **Eviction (GOAL-6.4):** When `config.eval_cache_max_size` is `Some(limit)` and `len() > limit`, `evict_lru()` sorts entries by `last_accessed` ascending, skips entries whose `candidate_id` is in `pinned_ids` (front members), and removes oldest until at capacity. If all entries are pinned, limit is soft-exceeded with a warning event.
 - **Score sanitization (GUARD-10):** `insert()` discards `NaN` (treated as unevaluated). `+Inf`/`-Inf` clamped to `f64::MAX`/`f64::MIN` with warning.
 - **Memory:** ~24 bytes/entry. At 100K entries ≈ 2.4MB (GUARD-7).
@@ -136,7 +144,7 @@ impl EvaluationCache {
 
 **Key Details:**
 
-The checkpoint is a single JSON file containing the serialized `EngineState`. Example structure:
+The checkpoint is a single JSON file containing the serialized `GEPAState`. Example structure:
 
 ```json
 {
@@ -163,7 +171,7 @@ The checkpoint is a single JSON file containing the serialized `EngineState`. Ex
 
 **Interface:**
 ```rust
-impl EngineState {
+impl GEPAState {
     pub fn save(&self, path: &Path) -> Result<(), GEPAError>;
     pub fn load(path: &Path) -> Result<Self, GEPAError>;
 }
@@ -218,7 +226,7 @@ impl GEPAStatistics {
 - `front_size_history` records `pareto_front.len()` at the end of each iteration.
 - `cache_hit_rate` is updated from `EvaluationCache::hit_rate()` at each iteration end.
 - All counters are `u64`, rates are `f64` (GOAL-6.5).
-- Statistics are serialized as part of `EngineState` and survive checkpoint/resume.
+- Statistics are serialized as part of `GEPAState` and survive checkpoint/resume.
 - `record_iteration` is called by the engine after the accept/reject step; `record_skip` on adapter failure.
 
 **Satisfies:** GOAL-6.5
@@ -231,11 +239,11 @@ impl GEPAStatistics {
 
 The resume flow is:
 
-1. `EngineState::load(path)` deserializes the checkpoint (§2.4)
+1. `GEPAState::load(path)` deserializes the checkpoint (§2.4)
 2. Schema version is validated
 3. Engine restores internal state:
    - `CandidateIdGenerator::resume(state.next_candidate_id)` — continue ID sequence
-   - `state.rng_state.restore()` → `StdRng` — exact RNG state restored (GUARD-9)
+   - `state.rng_state.restore()` → `ChaCha8Rng` — exact RNG state restored (GUARD-9)
    - `state.pareto_front` → engine's front (with all member IDs)
    - `state.candidates` → `CandidateStore`
    - `state.eval_cache` → `EvaluationCache` (including LRU timestamps)
@@ -252,15 +260,15 @@ The resume flow is:
 ## 3. Data Integrity
 
 - **Atomic writes (GUARD-4):** Checkpoint is written to a temp file then renamed. A crash at any point leaves either the old checkpoint intact or the new one fully written.
-- **Deterministic serialization (GUARD-9):** `HashMap` keys are sorted during serialization via `#[serde(serialize_with = "ordered_map")]` helper attribute that converts to `BTreeMap` before writing. `EvaluationCache` tuple keys use custom string-key serde helpers (`"candidate_id:example_id"` format). Two identical `EngineState` values produce bitwise-identical JSON.
-- **No partial state:** The entire `EngineState` is serialized as one unit. There are no partial writes or multi-file checkpoints in the base mechanism.
+- **Deterministic serialization (GUARD-9):** `HashMap` keys are sorted during serialization via `#[serde(serialize_with = "ordered_map")]` helper attribute that converts to `BTreeMap` before writing. `EvaluationCache` tuple keys use custom string-key serde helpers (`"candidate_id:example_id"` format). Two identical `GEPAState` values produce bitwise-identical JSON.
+- **No partial state:** The entire `GEPAState` is serialized as one unit. There are no partial writes or multi-file checkpoints in the base mechanism.
 - **Validation on load:** Schema version check, deserialization errors, and RNG restore errors all produce `GEPAError::CheckpointCorrupt` with a descriptive message.
 
 ## 4. Integration Points
 
-- **Core Engine (design-01):** The engine creates and mutates `EngineState` throughout the loop. Calls `state.save()` every N iterations. On resume, constructs engine from loaded state.
-- **Candidates (design-05):** `CandidateStore` and `CandidateIdGenerator` are owned by `EngineState`.
-- **Pareto Front (design-02):** `ParetoFront` is a field of `EngineState`, serialized and restored together.
+- **Core Engine (design-01):** The engine creates and mutates `GEPAState` throughout the loop. Calls `state.save()` every N iterations. On resume, constructs engine from loaded state.
+- **Candidates (design-05):** `CandidateStore` and `CandidateIdGenerator` are owned by `GEPAState`.
+- **Pareto Front (design-02):** `ParetoFront` is a field of `GEPAState`, serialized and restored together.
 - **Proposers (design-04):** `ProposerState` captures `MutationProposer`'s selection tracking for resume.
 - **Config (design-07):** `GEPAConfig` snapshot is stored for reproducibility.
 - **Events (design-09):** `CheckpointSaved { success: bool, path: PathBuf, error: Option<String> }` event emitted after each save attempt.

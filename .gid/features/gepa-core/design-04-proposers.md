@@ -176,7 +176,7 @@ pub async fn evaluate_seeds(
 - **During loop (normal iteration):** `MutationProposer::generate()` is called. This is the default for every iteration.
 - **During loop (merge iteration):** If merge is enabled (`config.merge_enabled == true`) and `iteration % config.merge_interval == 0`, the engine calls `MergeProposer::generate()` instead of `MutationProposer::generate()`. The merge iteration replaces the mutation iteration entirely — it does not run both.
 - **Proposer ownership:** The engine holds both `MutationProposer` and `Option<MergeProposer>`. The mutation proposer is always present. The merge proposer is constructed only when `config.merge_enabled == true`.
-- **Serialization:** `MutationProposer`'s `selection_counts` is included in checkpointed `EngineState` so that round-robin fairness survives resume (GOAL-1.9).
+- **Serialization:** `MutationProposer`'s `selection_counts` is included in checkpointed `GEPAState` so that round-robin fairness survives resume (GOAL-1.9).
 
 **Satisfies:** GOAL-1.10, GOAL-4.1, GOAL-4.4
 
@@ -213,7 +213,7 @@ The proposer produces a candidate; the engine then evaluates and decides accepta
 - **CandidateStore (design-05):** MutationProposer traverses `parent_id` links through the store to build lesson chains.
 - **GEPAAdapter (design-03):** All LLM calls go through the adapter. MutationProposer calls `execute`, `reflect`, `mutate`. MergeProposer calls `execute` (on both parents) and `merge` (with score context). Neither proposer calls `evaluate` — that's the engine's job after receiving the candidate.
 - **GEPAConfig (design-07):** `max_lesson_depth`, `merge_enabled`, `merge_interval`, `merge_selection_strategy` control proposer behavior.
-- **Checkpoint (design-06 §2.1):** `MutationProposer`'s state (`selection_counts`) is serialized into `EngineState` for resume.
+- **Checkpoint (design-06 §2.1):** `MutationProposer`'s state (`selection_counts`) is serialized into `GEPAState` for resume.
 
 **Guard compliance:**
 | Guard | How Addressed |
