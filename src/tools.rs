@@ -2195,53 +2195,32 @@ impl Tool for SpawnSpecialistTool {
         let model_override = input["model"].as_str();
         let workspace_override = input["workspace"].as_str();
 
-        // Auto-detect skill: scan skills/ directory for matching skill name in task text
+        // Resolve skill: explicit param → auto-detect via SkillRegistry
+        let skill_registry = &runner.workspace().skill_registry;
         let effective_skill: Option<String> = skill_name.map(String::from).or_else(|| {
             let task_lower = raw_task.to_lowercase();
-            let workspace = workspace_override
-                .unwrap_or_else(|| runner.config().workspace.as_deref().unwrap_or("."));
-            let skills_dir = std::path::Path::new(workspace).join("skills");
-            if let Ok(entries) = std::fs::read_dir(&skills_dir) {
-                for entry in entries.flatten() {
-                    if entry.path().join("SKILL.md").exists() {
-                        let skill_name = entry.file_name().to_string_lossy().to_string();
-                        // Match "review-requirements" as "review requirements" in task
-                        let skill_words = skill_name.replace('-', " ");
-                        if task_lower.contains(&skill_words) || task_lower.contains(&skill_name) {
-                            tracing::info!("Auto-detected skill '{}' from task content", skill_name);
-                            return Some(skill_name);
-                        }
-                    }
+            for skill in skill_registry.all() {
+                let name: &str = skill.name();
+                let name_spaced = name.replace('-', " ");
+                if task_lower.contains(&name_spaced) || task_lower.contains(name) {
+                    tracing::info!("Auto-detected skill '{}' from task content via SkillRegistry", name);
+                    return Some(name.to_string());
                 }
             }
             None
         });
 
-        // If skill is specified (or auto-detected), read SKILL.md and prepend to task
+        // If skill resolved, inject its prompt content into task
         let task: String = if let Some(ref skill) = effective_skill {
-            let workspace = workspace_override
-                .unwrap_or_else(|| runner.config().workspace.as_deref().unwrap_or("."));
-            let skill_path = std::path::Path::new(workspace)
-                .join("skills")
-                .join(skill)
-                .join("SKILL.md");
-            if skill_path.exists() {
-                let skill_content = std::fs::read_to_string(&skill_path)
-                    .unwrap_or_else(|e| {
-                        tracing::warn!("Failed to read skill {}: {}", skill, e);
-                        String::new()
-                    });
-                if !skill_content.is_empty() {
-                    tracing::info!("Injecting skill '{}' ({} chars) into sub-agent task", skill, skill_content.len());
-                    format!(
-                        "# Skill Instructions\n\n{}\n\n---\n\n# Your Task\n\n{}",
-                        skill_content, raw_task
-                    )
-                } else {
-                    raw_task.to_string()
-                }
+            if let Some(parsed) = skill_registry.get(skill) {
+                let content: &str = parsed.prompt_content();
+                tracing::info!("Injecting skill '{}' ({} chars) into sub-agent task", skill, content.len());
+                format!(
+                    "# Skill Instructions\n\n{}\n\n---\n\n# Your Task\n\n{}",
+                    content, raw_task
+                )
             } else {
-                tracing::warn!("Skill '{}' not found at {:?}", skill, skill_path);
+                tracing::warn!("Skill '{}' not found in SkillRegistry", skill);
                 raw_task.to_string()
             }
         } else {

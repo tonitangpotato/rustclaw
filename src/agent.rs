@@ -1491,6 +1491,10 @@ CRITICAL CONSTRAINTS:
     }
 
     /// Get the workspace root path.
+    pub fn workspace(&self) -> &Workspace {
+        &self.workspace
+    }
+
     pub fn workspace_root(&self) -> &std::path::Path {
         &self.workspace.root
     }
