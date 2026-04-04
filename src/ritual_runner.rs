@@ -303,6 +303,36 @@ impl RitualRunner {
                 RitualAction::Cleanup => {
                     self.cleanup().await;
                 }
+                RitualAction::ApplyReview { approved } => {
+                    // Fire-and-forget: spawn a sub-agent to apply approved review findings
+                    if let Some(ref runner) = self.agent_runner {
+                        let task = format!(
+                            "Apply the approved review findings to the documents in {}.\n\
+                             Approved findings: {}\n\
+                             Read the review file from .gid/reviews/, read the full target document, \
+                             and apply ONLY the approved changes using Edit tool.",
+                            self.project_root.display(), approved
+                        );
+                        let config = crate::config::AgentConfig {
+                            id: format!("apply_review_{}", chrono::Utc::now().format("%H%M%S")),
+                            name: Some("ApplyReview".to_string()),
+                            workspace: Some(self.project_root.to_string_lossy().to_string()),
+                            model: Some("claude-sonnet-4-5-20250929".to_string()),
+                            default: false,
+                        };
+                        match runner.spawn_agent_with_options(&config, 15) {
+                            Ok(subagent) => {
+                                match runner.process_with_subagent(&subagent, &task, None).await {
+                                    Ok(output) => tracing::info!("ApplyReview completed: {}", truncate(&output, 200)),
+                                    Err(e) => tracing::error!("ApplyReview failed: {}", e),
+                                }
+                            }
+                            Err(e) => tracing::error!("Failed to spawn ApplyReview sub-agent: {}", e),
+                        }
+                    } else {
+                        tracing::warn!("ApplyReview skipped — no AgentRunner available");
+                    }
+                }
                 _ => {} // Event-producing actions handled separately
             }
         }

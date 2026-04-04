@@ -784,6 +784,7 @@ Choose a model:", current),
                      `/ritual cancel [id]` — Cancel a ritual (latest or by ID)\n\
                      `/ritual retry` — Retry from escalated state\n\
                      `/ritual skip` — Skip current phase\n\
+                     `/ritual approve [findings]` — Approve review findings (e.g., `approve FINDING-1,3` or `approve all`)\n\
                      `/ritual clarify <response>` — Answer clarification question",
                     None,
                 ).await?;
@@ -818,6 +819,34 @@ Choose a model:", current),
                             }
                         });
                     }
+                }
+            }
+            arg if arg.starts_with("approve ") || arg == "approve" => {
+                let approved = arg.strip_prefix("approve ").unwrap_or("all").trim().to_string();
+                let runner = self.make_ritual_runner(chat_id);
+                let state = runner.load_state()?;
+                if state.phase != gid_core::ritual::V2Phase::WaitingApproval {
+                    self.send_message(
+                        chat_id,
+                        "⚠️ Approve is only available when ritual is waiting for review approval.",
+                        None,
+                    ).await?;
+                } else {
+                    self.send_message(chat_id, &format!("✅ Applying approved findings: {}", approved), None).await?;
+                    let bot = self.clone();
+                    tokio::spawn(async move {
+                        match runner.send_event(RitualEvent::UserApproval { approved }).await {
+                            Ok(state) => {
+                                if let Err(e) = runner.save_state(&state) {
+                                    tracing::error!("Failed to save ritual state: {}", e);
+                                }
+                                tracing::info!("Approval processed, now in {} phase", state.phase.display_name());
+                            }
+                            Err(e) => {
+                                let _ = bot.send_message(chat_id, &format!("❌ Approval failed: {}", e), None).await;
+                            }
+                        }
+                    });
                 }
             }
             task => {
