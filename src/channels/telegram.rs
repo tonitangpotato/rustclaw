@@ -842,7 +842,7 @@ Choose a model:", current),
                         ritual_llm,
                         notify_fn,
                         cancel_registry,
-                    );
+                    ).with_agent_runner(bot.runner.clone());
                     match runner.start(task_string).await {
                         Ok(state) => {
                             if let Err(e) = runner.save_state(&state) {
@@ -871,7 +871,7 @@ Choose a model:", current),
             self.runner.llm_client(),
             self.make_notify_fn(chat_id),
             self.ritual_cancel_registry.clone(),
-        )
+        ).with_agent_runner(self.runner.clone())
     }
 
     fn make_notify_fn(&self, chat_id: i64) -> crate::ritual_runner::NotifyFn {

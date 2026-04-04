@@ -34,6 +34,9 @@ pub struct RitualRunner {
     llm_client: Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>,
     notify: NotifyFn,
     cancel_registry: CancelRegistry,
+    /// Optional AgentRunner for running skill phases as isolated sub-agents.
+    /// When set, each phase gets its own session with auto-compact, persist, etc.
+    agent_runner: Option<Arc<crate::agent::AgentRunner>>,
 }
 
 impl RitualRunner {
@@ -60,7 +63,14 @@ impl RitualRunner {
             llm_client,
             notify,
             cancel_registry,
+            agent_runner: None,
         }
+    }
+
+    /// Set the AgentRunner for sub-agent-based phase execution.
+    pub fn with_agent_runner(mut self, runner: Arc<crate::agent::AgentRunner>) -> Self {
+        self.agent_runner = Some(runner);
+        self
     }
 
     /// Get state path for a specific ritual ID.
@@ -598,8 +608,14 @@ Guidelines:
         output.trim()
     }
 
-    /// Run a skill phase using the RitualLlmAdapter.
+    /// Run a skill phase using the RitualLlmAdapter, or as an isolated sub-agent if AgentRunner is available.
     async fn run_skill(&self, name: &str, context: &str) -> Result<(RitualEvent, u64)> {
+        // If AgentRunner is available, run as isolated sub-agent (full context management)
+        if let Some(ref runner) = self.agent_runner {
+            return self.run_skill_as_subagent(runner, name, context).await;
+        }
+
+        // Fallback: direct execution via RitualLlmAdapter (no session management)
         use crate::ritual_adapter::RitualLlmAdapter;
         use gid_core::ritual::llm::{LlmClient as GidLlmClient, ToolDefinition};
         use gid_core::ritual::scope::default_scope_for_phase;
@@ -825,6 +841,117 @@ Guidelines:
                 Be precise — edit only the files that need to change.".into(),
             _ => format!("Execute the '{}' skill using the provided tools. \
                 Read existing files, make targeted changes, run commands as needed.", skill_name),
+        }
+    }
+
+    /// Run a skill phase as an isolated sub-agent with full session management.
+    /// Each phase gets its own session, auto-compact, persist, reactive compact.
+    /// Context is completely isolated — phases communicate through files.
+    async fn run_skill_as_subagent(
+        &self,
+        runner: &Arc<crate::agent::AgentRunner>,
+        name: &str,
+        context: &str,
+    ) -> Result<(RitualEvent, u64)> {
+        use gid_core::ritual::scope::default_scope_for_phase;
+
+        let scope = default_scope_for_phase(name);
+        let model = match name {
+            "implement" => "opus",
+            _ => "sonnet",
+        };
+
+        // Build skill prompt
+        let base_prompt = self.load_skill_prompt(name);
+        let skill_prompt = if context.is_empty() {
+            base_prompt.clone()
+        } else {
+            format!("## USER TASK\n{}\n\n## INSTRUCTIONS\n{}", context, base_prompt)
+        };
+
+        // Build tool list description for the sub-agent
+        let tool_names: Vec<&str> = scope.allowed_tools.iter().map(|s| s.as_str()).collect();
+
+        // Create sub-agent config
+        let phase_id = format!("ritual_{}_{}", name, chrono::Utc::now().format("%H%M%S"));
+        let agent_config = crate::config::AgentConfig {
+            id: phase_id.clone(),
+            name: Some(format!("Ritual:{}", name)),
+            workspace: Some(self.project_root.to_string_lossy().to_string()),
+            model: Some(match model {
+                "opus" => "claude-opus-4-6".to_string(),
+                "sonnet" => "claude-sonnet-4-5-20250929".to_string(),
+                _ => model.to_string(),
+            }),
+            default: false,
+        };
+
+        let max_iterations = match name {
+            "implement" | "execute-tasks" => 40,
+            "draft-design" | "update-design" => 20,
+            "draft-requirements" => 20,
+            "verify" | "verify-quality" => 15,
+            _ => 20,
+        };
+
+        let subagent = runner.spawn_agent_with_options(&agent_config, max_iterations)?;
+
+        // Compose the task for the sub-agent
+        let task = format!(
+            "You are executing a ritual phase: **{}**\n\n\
+             Working directory: {}\n\
+             Allowed tools: {}\n\n\
+             {}\n\n\
+             Complete the task using the tools. Write all outputs to files in the working directory.\n\
+             When done, summarize what you did.",
+            name,
+            self.project_root.display(),
+            tool_names.join(", "),
+            skill_prompt,
+        );
+
+        tracing::info!(
+            "Running ritual phase '{}' as sub-agent '{}' (model={}, max_iterations={})",
+            name, phase_id, model, max_iterations
+        );
+
+        let start = std::time::Instant::now();
+        let result = runner.process_with_subagent(&subagent, &task, Some(&phase_id)).await;
+        let elapsed = start.elapsed();
+
+        match result {
+            Ok(output) => {
+                // Estimate tokens from sub-agent session
+                let session_key = format!("agent:{}:{}", phase_id, phase_id);
+                let tokens = runner.sessions().get_session(&session_key).await
+                    .map(|s| s.total_tokens)
+                    .unwrap_or(0);
+
+                tracing::info!(
+                    "Ritual phase '{}' completed via sub-agent ({:.1}s, ~{} tokens): {}...",
+                    name,
+                    elapsed.as_secs_f64(),
+                    tokens,
+                    truncate(&output, 100)
+                );
+
+                let total_tokens = tokens;
+
+                Ok((RitualEvent::SkillCompleted {
+                    phase: name.to_string(),
+                    artifacts: Vec::new(), // artifacts tracked via file system
+                }, total_tokens))
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Ritual phase '{}' failed via sub-agent ({:.1}s): {}",
+                    name, elapsed.as_secs_f64(), e
+                );
+                Ok((RitualEvent::SkillFailed {
+                    phase: name.to_string(),
+                    error: format!("Sub-agent phase '{}' failed: {}", name, e),
+                }, 0))
+            }
         }
     }
 
