@@ -744,13 +744,10 @@ Guidelines:
         }
     }
 
-    /// Run a shell command (for verify phase). Timeout: 5 minutes.
     /// Run multiple implementation tasks in parallel (multi-agent harness).
     /// Each task gets its own LLM session via run_skill("implement", task).
     /// Results are collected: all succeed → SkillCompleted, any fail → SkillFailed.
     async fn run_harness(&self, tasks: &[String]) -> Result<(RitualEvent, u64)> {
-        use tokio::task::JoinSet;
-
         tracing::info!(task_count = tasks.len(), "Running harness ({} parallel tasks)", tasks.len());
 
         if tasks.is_empty() {

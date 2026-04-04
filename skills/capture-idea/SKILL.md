@@ -63,6 +63,7 @@ Generate a structured analysis:
 ```
 - **Title**: One-line descriptive title
 - **Source**: URL or "voice message" or "text"
+- **Domain**: Primary domain (🔧tech / 💰trading / 📦product / 📈marketing / 🧠research / 💡business / 🎯career / 🏠life) [+ secondary]
 - **Summary**: 2-3 sentence summary of the core idea
 - **Key Points**: Bullet list of actionable insights
 - **Category**: tech/business/product/research/lifestyle/other

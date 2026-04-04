@@ -34,6 +34,42 @@ max_body_size: 8192
 
 **Rule**: External content itself never goes into IDEAS.md or engram. Only if it triggers a NEW IDEA or creates a VALUABLE CONNECTION does that idea/connection get recorded.
 
+## Personal Domain Classification
+
+Every intake item MUST be assigned a **domain** (primary) and optionally a secondary domain. This is separate from tags — domains represent potato's core interest areas.
+
+**Domains:**
+- 🔧 **tech** — 技术学习、工具、框架、语言、架构
+- 💰 **trading** — 交易策略、量化、市场分析、Alpha idea
+- 📦 **product** — 产品灵感、竞品分析、UX、产品设计
+- 📈 **marketing** — 增长、内容营销、个人品牌、SEO、分发
+- 🧠 **research** — 深度学习、论文、方法论、AI/ML 前沿
+- 💡 **business** — 商业模式、创业、融资、行业趋势
+- 🎯 **career** — 面试准备、职业发展、networking
+- 🏠 **life** — 生活、健康、理财、其他
+
+**Classification Rules:**
+- Pick the BEST FIT domain, don't overthink edge cases
+- If content spans two domains, use: `Domain: tech + trading`（主 + 副）
+- Trading 相关内容高优先级——直接关联财务自由目标
+- 同一个来源可能跨域：比如一篇 "用 LLM 做量化" 是 `tech + trading`
+
+**Domain-specific intake behavior:**
+- **trading**: 额外标注 `actionable: yes/no`（是否可以直接执行的交易思路）
+- **tech**: 额外标注 `learning_priority: high/medium/low`（对当前项目的实用性）
+- **product**: 额外标注 `competitive_relevance: direct/indirect/none`（和我们产品的竞争关系）
+
+**Directory structure follows domains:**
+```
+intake/
+├── twitter/      ← by platform (primary organization)
+├── youtube/
+├── hn/
+├── ...
+└── index.md      ← includes domain column for filtering
+```
+Domain is a metadata field in each file + index, NOT a separate directory tree. Platform-first organization stays, domain is for filtering/querying.
+
 ## Trigger Conditions
 
 This skill automatically activates for URLs from:
@@ -148,6 +184,9 @@ TITLE: [One-line descriptive title]
 
 PLATFORM: {platform} | AUTHOR: {author} | DATE: {date}
 
+DOMAIN: {primary_domain} [+ {secondary_domain}]
+  → domain-specific: {actionable/learning_priority/competitive_relevance as applicable}
+
 SUMMARY:
 [2-3 sentence summary of the core content]
 
@@ -214,6 +253,7 @@ cat > intake/{platform}/{slug}.md << 'EOF'
 - **Date**: {published_date}
 - **Fetched**: {timestamp}
 - **Category**: {category}
+- **Domain**: {domain} [+ {secondary_domain}]
 - **Tags**: {tags}
 - **URL Hash**: {url_hash}
 - **Extraction Method**: {extraction_method}
@@ -251,7 +291,7 @@ EOF
 engram_store(
     type="factual",
     importance=0.3,
-    content="Intake processed: url_hash:{url_hash} | {url} | {platform} | {title} | intake/{platform}/{slug}.md"
+    content="Intake processed: url_hash:{url_hash} | {url} | {platform} | {domain} | {title} | intake/{platform}/{slug}.md"
 )
 ```
 
@@ -261,11 +301,11 @@ engram_store(
 if [ ! -f intake/index.md ]; then
     echo '# Intake Index' > intake/index.md
     echo '' >> intake/index.md
-    echo '| Date | Platform | Title | Tags | Link |' >> intake/index.md
-    echo '|------|----------|-------|------|------|' >> intake/index.md
+    echo '| Date | Platform | Domain | Title | Tags | Link |' >> intake/index.md
+    echo '|------|----------|--------|-------|------|------|' >> intake/index.md
 fi
 # Append entry
-echo "| {date} | {platform} | {title} | {tags} | [link](intake/{platform}/{slug}.md) |" >> intake/index.md
+echo "| {date} | {platform} | {domain} | {title} | {tags} | [link](intake/{platform}/{slug}.md) |" >> intake/index.md
 ```
 
 #### Layer 2: Daily Log (ALWAYS)
@@ -349,6 +389,7 @@ fi
 📥 **Social Intake: {Title}**
 
 **Platform**: {platform} ({author})
+**Domain**: {domain_emoji} {domain} [+ {secondary}]
 **Summary**: {2-3 sentence summary}
 
 **Key Points**:
