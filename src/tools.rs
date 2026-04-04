@@ -2169,6 +2169,10 @@ impl Tool for SpawnSpecialistTool {
                 "wait": {
                     "type": "boolean",
                     "description": "Whether to wait for completion (default: true). If false, returns immediately with task ID."
+                },
+                "skill": {
+                    "type": "string",
+                    "description": "Skill name to inject (e.g., 'review-requirements', 'review-design'). The skill's SKILL.md content is prepended to the task prompt, giving the sub-agent full instructions."
                 }
             },
             "required": ["task"]
@@ -2182,13 +2186,45 @@ impl Tool for SpawnSpecialistTool {
             .ok_or_else(|| anyhow::anyhow!("Agent runner not initialized"))?;
 
         // Parse input parameters
-        let task = input["task"]
+        let raw_task = input["task"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'task' parameter"))?;
 
+        let skill_name = input["skill"].as_str();
         let role = input["role"].as_str();
         let model_override = input["model"].as_str();
         let workspace_override = input["workspace"].as_str();
+
+        // If skill is specified, read SKILL.md and prepend to task
+        let task: String = if let Some(skill) = skill_name {
+            let workspace = workspace_override
+                .unwrap_or_else(|| runner.config().workspace.as_deref().unwrap_or("."));
+            let skill_path = std::path::Path::new(workspace)
+                .join("skills")
+                .join(skill)
+                .join("SKILL.md");
+            if skill_path.exists() {
+                let skill_content = std::fs::read_to_string(&skill_path)
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("Failed to read skill {}: {}", skill, e);
+                        String::new()
+                    });
+                if !skill_content.is_empty() {
+                    tracing::info!("Injecting skill '{}' ({} chars) into sub-agent task", skill, skill_content.len());
+                    format!(
+                        "# Skill Instructions\n\n{}\n\n---\n\n# Your Task\n\n{}",
+                        skill_content, raw_task
+                    )
+                } else {
+                    raw_task.to_string()
+                }
+            } else {
+                tracing::warn!("Skill '{}' not found at {:?}", skill, skill_path);
+                raw_task.to_string()
+            }
+        } else {
+            raw_task.to_string()
+        };
         let max_iterations = input["max_iterations"].as_u64().unwrap_or(80) as u32;
         let wait = input["wait"].as_bool().unwrap_or(true);
 
@@ -2373,7 +2409,7 @@ impl Tool for SpawnSpecialistTool {
         // Wait mode: spawn and wait for result
         match runner.spawn_agent_with_options(&final_config, effective_max_iterations) {
             Ok(subagent) => {
-                match runner.process_with_subagent(&subagent, task, Some(&task_id)).await {
+                match runner.process_with_subagent(&subagent, &task, Some(&task_id)).await {
                     Ok(result) => {
                         tracing::info!("Sub-agent {} completed: {} chars", task_id, result.len());
                         // Truncate sub-agent output to prevent blowing up parent's context
