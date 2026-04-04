@@ -11,5 +11,12 @@ When answering questions about history/preferences:
 When learning something important:
 → Store: `engram --db ~/rustclaw/engram-memory.db add --type factual --importance 0.8 "..."`
 
+## Auto-Triage (每次 heartbeat)
+- [ ] Read `.gid/meta-graph.yml` — check for `status: new` action_item nodes
+- [ ] For P0 items: read intake source file + target project code → generate epic + task nodes in target project's `.gid/graph.yml` → update meta-graph status to `triaged`
+- [ ] For P1 items (if time permits): same as P0 but lower priority
+- [ ] P2 items: leave as-is until manually requested
+- [ ] Report any newly triaged items to potato via Telegram
+
 ## Disk Health (每天一次)
 - [ ] Check `df -h /` — if <15GB free, alert potato

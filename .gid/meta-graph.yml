@@ -1,0 +1,124 @@
+# Meta-Graph: Cross-project action items, epics, and references
+# This is the central hub for intake-generated action items that span multiple projects.
+#
+# Node types:
+#   action_item — Raw insight from intake (auto-generated, coarse-grained)
+#   epic        — Scoped work package with acceptance criteria (triage output)
+#   task_ref    — Reference to a task in a project-specific graph
+#
+# Priority: P0 (this week), P1 (this month), P2 (backlog)
+# Status: new → triaged → in_progress → done | dismissed
+#
+# Lifecycle:
+#   1. Intake generates action_item nodes (automatic)
+#   2. Triage refines P0 items into epics + task_refs (automatic or manual)
+#   3. task_refs point to real tasks in project graphs (e.g., gid-rs/.gid/graph.yml)
+#   4. Completion flows back: task done → epic done → action_item done
+
+project:
+  name: meta
+  description: Cross-project action items and intake-driven work tracking
+
+nodes:
+# === Meta-Harness Paper (2026-04-03) ===
+- id: ai-meta-harness-validation
+  title: "execution-log.jsonl 完整历史设计已验证正确"
+  status: done
+  type: action_item
+  metadata:
+    priority: P0
+    source: "intake/wechat/meta-harness-stanford-auto-agent-optimization.md"
+    source_date: "2026-04-03"
+    target_project: gid-rs
+    note: "论文证实完整历史(50%) >> 压缩摘要(34.9%)。gid-harness telemetry.rs 已是 append-only JSONL"
+
+- id: ai-meta-harness-auto-optimize
+  title: "给 gid-harness 加 Meta-Harness 式自动优化循环"
+  status: new
+  type: action_item
+  metadata:
+    priority: P1
+    source: "intake/wechat/meta-harness-stanford-auto-agent-optimization.md"
+    source_date: "2026-04-03"
+    target_project: gid-rs
+    note: "proposer agent 读 execution-log.jsonl 历史，自动提出 harness/ritual 改进建议"
+
+- id: ai-ritual-trace
+  title: "给 ritual pipeline 加 phase 级结构化 trace"
+  status: new
+  type: action_item
+  metadata:
+    priority: P1
+    source: "intake/wechat/meta-harness-stanford-auto-agent-optimization.md"
+    source_date: "2026-04-03"
+    target_project: rustclaw
+    note: "每次 ritual 的 phase 耗时、成功/失败、retry 次数、token 消耗 — 自动优化的前置条件"
+
+- id: ai-terminalbench-eval
+  title: "评估 TerminalBench-2 作为 coding agent benchmark"
+  status: new
+  type: action_item
+  metadata:
+    priority: P2
+    source: "intake/wechat/meta-harness-stanford-auto-agent-optimization.md"
+    source_date: "2026-04-03"
+    target_project: rustclaw
+    note: "公开排行榜，可直接跑"
+
+- id: ai-additive-principle
+  title: "文档化 '加法优于修改' 原则到 AGENTS.md"
+  status: new
+  type: action_item
+  metadata:
+    priority: P1
+    source: "intake/wechat/meta-harness-stanford-auto-agent-optimization.md"
+    source_date: "2026-04-03"
+    target_project: rustclaw
+    note: "Skill 叠加 > 修改核心代码，论文第 7 轮转折验证"
+
+# === ChromaFs (2026-04-03) ===
+- id: ai-chromafs-agentic-fs
+  title: "评估 agentic filesystem pattern 替代传统 RAG"
+  status: new
+  type: action_item
+  metadata:
+    priority: P2
+    source: "intake/twitter/densumesh-2039765361533637016.md"
+    source_date: "2026-04-03"
+    target_project: rustclaw
+    note: "ChromaFs: gzipped path tree + smart grep (Chroma coarse → Redis prefetch → in-memory fine)"
+
+# === Skill-JIT (2026-04-03) ===
+- id: ai-skill-jit-patterns
+  title: "借鉴 Skill-JIT 的 5 种 Pattern 分类到 SKM"
+  status: new
+  type: action_item
+  metadata:
+    priority: P1
+    source: "intake/other/skill-jit-analysis.md"
+    source_date: "2026-04-03"
+    target_project: rustclaw
+    note: "Tool Wrapper / Generator / Reviewer / Inversion / Pipeline 五种 pattern + 3 层加载"
+
+# === Knowledge Product (2026-04-03) ===
+- id: ai-knowledge-product
+  title: "知识管理产品化 + 内容飞轮"
+  status: new
+  type: action_item
+  metadata:
+    priority: P1
+    source: "IDEAS.md (IDEA-20260403-02)"
+    source_date: "2026-04-03"
+    target_project: rustclaw
+    note: "知识管理单独产品化 + RustClaw 获客入口，内容飞轮 Intake→生产→分发→回收"
+
+edges:
+# Meta-Harness auto-optimize depends on having trace data
+- from: ai-meta-harness-auto-optimize
+  to: ai-ritual-trace
+  relation: depends_on
+
+# Auto-optimize also builds on the validated log design
+- from: ai-meta-harness-auto-optimize
+  to: ai-meta-harness-validation
+  relation: depends_on

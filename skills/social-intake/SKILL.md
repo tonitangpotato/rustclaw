@@ -413,6 +413,52 @@ fi
 
 **Key principle**: IDEAS.md stores YOUR thoughts, not other people's content. The external content lives in intake/, and IDEAS.md just references it.
 
+#### Layer 4: Meta-Graph Action Items (ALWAYS when action items exist)
+
+**Every action item gets written as a node in the meta-graph:**
+
+The meta-graph lives at `.gid/meta-graph.yml` and tracks cross-project action items.
+
+```yaml
+# For each action item generated in the analysis:
+# Append to .gid/meta-graph.yml nodes list:
+
+- id: ai-{slug}-{n}  # e.g., ai-meta-harness-auto-optimize
+  title: "{action item text}"
+  status: new
+  type: action_item
+  metadata:
+    priority: P0|P1|P2
+    source: "intake/{platform}/{slug}.md"
+    source_date: "{YYYY-MM-DD}"
+    target_project: "{project name: rustclaw|gid-rs|xinfluencer|agentctl|etc}"
+    note: "{brief context for why this matters}"
+```
+
+**Rules for meta-graph nodes:**
+- ID format: `ai-{short-descriptive-slug}` (use hyphens, lowercase)
+- One node per action item (max 5 per intake)
+- `target_project` must reference a real project directory
+- Add `depends_on` edges between action items if there's a logical dependency
+- If action item is "already done" (validates existing implementation), set `status: done`
+
+**Adding edges (when action items have dependencies):**
+```yaml
+# Append to .gid/meta-graph.yml edges list:
+- from: ai-{dependent-item}
+  to: ai-{prerequisite-item}
+  relation: depends_on
+```
+
+**Auto-triage lifecycle:**
+- `new` → Intake just created it
+- `triaged` → Heartbeat auto-refined it into epic + tasks in target project graph
+- `in_progress` → Someone started working on the derived tasks
+- `done` → All derived tasks completed
+- `dismissed` → Reviewed and decided not to pursue
+
+P0 action items are auto-triaged during heartbeat: read intake source + target project code → generate epic + task nodes in target project's `.gid/graph.yml` → update meta-graph node status to `triaged`.
+
 ### Step 6: Reply to User
 
 **Format the response:**

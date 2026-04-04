@@ -602,6 +602,7 @@ Guidelines:
     async fn run_skill(&self, name: &str, context: &str) -> Result<(RitualEvent, u64)> {
         use crate::ritual_adapter::RitualLlmAdapter;
         use gid_core::ritual::llm::{LlmClient as GidLlmClient, ToolDefinition};
+        use gid_core::ritual::scope::default_scope_for_phase;
 
         let adapter = RitualLlmAdapter::new(self.llm_client.clone());
         let gid_client: Arc<dyn GidLlmClient> = adapter.into_arc();
@@ -614,9 +615,9 @@ Guidelines:
             format!("## USER TASK\n{}\n\n## INSTRUCTIONS\n{}", context, base_prompt)
         };
 
-        // Define standard tools for skill execution
-        let tools = vec![
-            ToolDefinition {
+        // All available tool definitions
+        let all_tools = vec![
+            ("Read", ToolDefinition {
                 name: "Read".into(),
                 description: "Read a file from disk".into(),
                 input_schema: serde_json::json!({
@@ -626,8 +627,8 @@ Guidelines:
                     },
                     "required": ["path"]
                 }),
-            },
-            ToolDefinition {
+            }),
+            ("Write", ToolDefinition {
                 name: "Write".into(),
                 description: "Write entire content to a file (creates or overwrites)".into(),
                 input_schema: serde_json::json!({
@@ -638,8 +639,8 @@ Guidelines:
                     },
                     "required": ["path", "content"]
                 }),
-            },
-            ToolDefinition {
+            }),
+            ("Edit", ToolDefinition {
                 name: "Edit".into(),
                 description: "Replace exact text in a file. oldText must match exactly (including whitespace). Use for precise, surgical edits instead of rewriting entire files.".into(),
                 input_schema: serde_json::json!({
@@ -651,8 +652,8 @@ Guidelines:
                     },
                     "required": ["path", "oldText", "newText"]
                 }),
-            },
-            ToolDefinition {
+            }),
+            ("Bash", ToolDefinition {
                 name: "Bash".into(),
                 description: "Run a bash command".into(),
                 input_schema: serde_json::json!({
@@ -662,8 +663,21 @@ Guidelines:
                     },
                     "required": ["command"]
                 }),
-            },
+            }),
         ];
+
+        // Filter tools by ToolScope for this phase (§5 of DESIGN-ritual-v2)
+        let scope = default_scope_for_phase(name);
+        let tools: Vec<ToolDefinition> = all_tools.into_iter()
+            .filter(|(tool_name, _)| scope.allowed_tools.contains(&tool_name.to_string()))
+            .map(|(_, def)| def)
+            .collect();
+
+        tracing::debug!(
+            skill = name,
+            tools = ?tools.iter().map(|t| &t.name).collect::<Vec<_>>(),
+            "ToolScope filtered tools for phase"
+        );
 
         // implement phase benefits from stronger model; others use sonnet
         let model = match name {

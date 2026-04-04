@@ -150,10 +150,21 @@ If connections were found in Step 3, go back and update the **existing** entries
 - See IDEAS.md IDEA-{id}
 ```
 
-4. **GID** (if actionable) — Create a task node if the idea is concrete enough:
+4. **Meta-Graph** (if action items exist) — Write action_item nodes to `.gid/meta-graph.yml`:
+```yaml
+# Append to .gid/meta-graph.yml nodes list for each action item:
+- id: ai-{slug}
+  title: "{action item text}"
+  status: new
+  type: action_item
+  metadata:
+    priority: P0|P1|P2
+    source: "IDEAS.md (IDEA-{id})"
+    source_date: "{YYYY-MM-DD}"
+    target_project: "{project name}"
+    note: "{brief context}"
 ```
-→ gid_add_task(id="idea-{slug}", title="{title}", tags=["idea", "{category}"])
-```
+P0 items are auto-triaged during heartbeat into epic + tasks in target project graph.
 
 ### Step 5: Report Back + Proactive Association
 
