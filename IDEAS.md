@@ -7,6 +7,34 @@
 
 <!-- New ideas are prepended below this line -->
 
+## REF-20260403-01: Skill-JIT — Agent Skill 的 JIT 生成框架
+- **Date**: 2026-04-03
+- **Source**: https://github.com/china-qijizhifeng/Skill-JIT
+- **Category**: tech
+- **Tags**: #skills #agent #prompt-engineering #claude-code
+
+### Summary
+Claude Code plugin，用纯 prompt engineering（3 个 markdown 文件，零代码）实现 agent skill 的 JIT 生成。核心是 3 个 agent 角色：入口（SKILL.md）解析意图 → Writer 分解任务选 pattern 写 skill → Researcher 深度调研验证。
+
+### Key Points
+- **纯 markdown 架构** — 整个项目就 3 个 .md 文件，没有任何代码，全靠 prompt 驱动
+- **5 种 Pattern** — Tool Wrapper / Generator / Reviewer / Inversion / Pipeline，可组合（如 Pipeline+Reviewer）
+- **Progressive Disclosure 3 层** — frontmatter (~100 words, 永远 in context) → body (triggered 时加载) → references/ (按需读取)
+- **Generalization Litmus Test** — "Would someone with a DIFFERENT task using the same tool find this skill useful?"
+- **每个 step 必须 What/How/Verify** — 不允许模糊指令
+- **Researcher 可递归** — spawn sub-researcher 处理子话题，最深 2-3 层
+- **只有 create/fix，没有优化闭环** — 不追踪 skill 使用效果
+
+### Potential Value
+Pattern taxonomy 和 Progressive Disclosure 可以直接借鉴到 RustClaw 的 SKM。3 层加载特别有价值 — 我们现在 skill body 全量注入 context，浪费 token。
+
+### Connections
+- 关联 IDEA-20260403-01（自动化 Skill 优化系统）— 他们做了生成，我们的闭环优化是差异化
+- 关联 src/skills.rs SkillGenerator — pattern taxonomy 可以指导我们的生成逻辑
+
+### Status: 📚 Reference
+---
+
 ## IDEA-20260403-01: 自动化 Skill 优化系统
 - **Date**: 2026-04-03
 - **Source**: Text (potato)

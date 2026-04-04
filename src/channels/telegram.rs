@@ -672,7 +672,7 @@ Choose a model:", current),
                                 let total: u64 = state.phase_tokens.values().sum();
                                 msg.push_str(&format!("\n\n🪙 **Tokens Used** (total: {})", format_token_count(total)));
                                 // Sort phases logically
-                                let phase_order = ["initializing", "design", "planning", "graph", "implement", "verify"];
+                                let phase_order = ["initializing", "triage", "design", "planning", "graph", "implement", "verify"];
                                 let mut entries: Vec<(&String, &u64)> = state.phase_tokens.iter().collect();
                                 entries.sort_by_key(|(k, _)| {
                                     phase_order.iter().position(|p| *p == k.as_str()).unwrap_or(99)
@@ -722,10 +722,12 @@ Choose a model:", current),
                     self.make_notify_fn(chat_id),
                 );
                 let state = runner.load_state()?;
-                if state.phase != gid_core::ritual::V2Phase::Escalated {
+                if state.phase != gid_core::ritual::V2Phase::Escalated
+                    && state.phase != gid_core::ritual::V2Phase::WaitingClarification
+                {
                     self.send_message(
                         chat_id,
-                        "⚠️ Retry is only available when ritual is in Escalated state.",
+                        "⚠️ Retry is only available when ritual is in Escalated or WaitingClarification state.",
                         None,
                     ).await?;
                 } else {
@@ -781,9 +783,46 @@ Choose a model:", current),
                      `/ritual status` — Show current ritual status\n\
                      `/ritual cancel` — Cancel the active ritual\n\
                      `/ritual retry` — Retry from escalated state\n\
-                     `/ritual skip` — Skip current phase",
+                     `/ritual skip` — Skip current phase\n\
+                     `/ritual clarify <response>` — Answer clarification question",
                     None,
                 ).await?;
+            }
+            arg if arg.starts_with("clarify ") => {
+                let clarification = arg.strip_prefix("clarify ").unwrap_or("").trim().to_string();
+                if clarification.is_empty() {
+                    self.send_message(chat_id, "⚠️ Usage: `/ritual clarify <your response>`", None).await?;
+                } else {
+                    let runner = crate::ritual_runner::RitualRunner::new(
+                        project_root,
+                        llm_client,
+                        self.make_notify_fn(chat_id),
+                    );
+                    let state = runner.load_state()?;
+                    if state.phase != gid_core::ritual::V2Phase::WaitingClarification {
+                        self.send_message(
+                            chat_id,
+                            "⚠️ Clarify is only available when ritual is waiting for clarification.",
+                            None,
+                        ).await?;
+                    } else {
+                        self.send_message(chat_id, "💬 Received clarification, re-triaging...", None).await?;
+                        let bot = self.clone();
+                        tokio::spawn(async move {
+                            match runner.send_event(RitualEvent::UserClarification { response: clarification }).await {
+                                Ok(state) => {
+                                    if let Err(e) = runner.save_state(&state) {
+                                        tracing::error!("Failed to save ritual state: {}", e);
+                                    }
+                                    tracing::info!("Clarification processed, now in {} phase", state.phase.display_name());
+                                }
+                                Err(e) => {
+                                    let _ = bot.send_message(chat_id, &format!("❌ Clarification failed: {}", e), None).await;
+                                }
+                            }
+                        });
+                    }
+                }
             }
             task => {
                 // Start new ritual with task description

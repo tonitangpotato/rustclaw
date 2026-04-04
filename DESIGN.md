@@ -109,9 +109,30 @@ RustClaw is a **Rust-native AI agent framework** that needs to provide a single-
 
 10. **Config hot-reload** — FSEvents file watcher + SIGHUP listener. Model, temperature, and other config changes apply without restart.
 
+## Skills
+
+RustClaw includes several built-in skills (Markdown-based LLM workflows):
+
+### capture-idea (Priority 50)
+- General-purpose idea intake for text, voice, and URLs
+- Triggers: "idea:", "想法:", "intake", "记录一下", voice messages, any URL
+- Stores to IDEAS.md + engram + daily log
+
+### social-intake (Priority 80)
+- **New**: Specialized social media content extraction and archival
+- Triggers: URLs from Twitter/X, YouTube, HN, Reddit, 小红书, WeChat, GitHub
+- Python engine (`skills/social-intake/intake.py`) handles platform-specific scraping
+- Three-layer storage: intake/ (external content archive), IDEAS.md (triggered ideas only), engram (connections)
+- Platform detection, deduplication, fallback chains (platform tool → Jina Reader → web_fetch)
+- Optional video transcription (yt-dlp + whisper) and subtitle extraction
+- See: `.gid/requirements-social-intake.md` and `.gid/design-social-intake.md`
+
+Skills are defined in `skills/{name}/SKILL.md` and automatically loaded by `src/skills.rs`.
+
 ## Remaining Roadmap
 
 - [ ] Reply-to-message context (quoted message parsing in Telegram/Discord)
 - [ ] Web dashboard enhancements (orchestrator view, agent names)
 - [ ] Hot-reload orchestrator config
 - [ ] WASM tool sandbox (currently stubbed)
+- [ ] Vision model integration for social-intake (direct image OCR)

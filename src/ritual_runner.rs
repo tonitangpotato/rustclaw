@@ -93,15 +93,17 @@ impl RitualRunner {
             let (new_state, actions) = transition(&state, event);
             state = new_state;
 
-            if state.phase.is_terminal() {
-                // Terminal: save state with final tokens, send notification
+            if state.phase.is_terminal() || state.phase.is_paused() {
+                // Terminal or paused: save state, send notification
                 self.execute_fire_and_forget_with_state(&actions, &state).await;
-                self.send_terminal_notification(&state).await;
+                if state.phase.is_terminal() {
+                    self.send_terminal_notification(&state).await;
+                }
                 break;
             }
 
             // Execute the single event-producing action FIRST (to get token count)
-            let (evt, tokens_used) = match self.execute_event_producing(&actions).await {
+            let (evt, tokens_used) = match self.execute_event_producing(&actions, &state).await {
                 Ok(pair) => pair,
                 Err(e) => (RitualEvent::SkillFailed {
                     phase: state.phase.display_name().to_string(),
@@ -227,7 +229,7 @@ impl RitualRunner {
 
     /// Find and execute the single event-producing action from the action list.
     /// Returns (event, tokens_used) — tokens_used is 0 for non-LLM actions.
-    async fn execute_event_producing(&self, actions: &[RitualAction]) -> Result<(RitualEvent, u64)> {
+    async fn execute_event_producing(&self, actions: &[RitualAction], state: &RitualState) -> Result<(RitualEvent, u64)> {
         for action in actions {
             match action {
                 RitualAction::DetectProject => {
@@ -238,6 +240,9 @@ impl RitualRunner {
                 }
                 RitualAction::RunShell { command } => {
                     return self.run_shell(command).await.map(|e| (e, 0));
+                }
+                RitualAction::RunTriage { task } => {
+                    return self.run_triage(task, state).await;
                 }
                 RitualAction::RunPlanning => {
                     return self.run_planning().await;
@@ -337,6 +342,119 @@ impl RitualRunner {
         );
 
         Ok(RitualEvent::ProjectDetected(project_state))
+    }
+
+    /// Run triage — lightweight haiku LLM call to assess task clarity/size.
+    async fn run_triage(&self, task: &str, ritual_state: &RitualState) -> Result<(RitualEvent, u64)> {
+        use gid_core::ritual::TriageResult;
+
+        // Build project context for triage prompt
+        let project_ctx = if let Some(ps) = ritual_state.project.as_ref() {
+            format!(
+                "Project: lang={}, has_design={}, has_graph={}, source_files={}, has_tests={}",
+                ps.language.as_deref().unwrap_or("unknown"),
+                ps.has_design, ps.has_graph,
+                ps.source_file_count, ps.has_tests
+            )
+        } else {
+            "Project: unknown state".into()
+        };
+
+        let prompt = format!(
+            r#"You are a triage agent. Assess this development task quickly.
+
+{project_ctx}
+
+Task: "{task}"
+
+Respond with ONLY a JSON object (no markdown, no explanation):
+{{
+  "clarity": "clear" or "ambiguous",
+  "clarify_questions": ["question1", ...] (only if ambiguous, otherwise empty array),
+  "size": "small", "medium", or "large",
+  "skip_design": true/false,
+  "skip_graph": true/false
+}}
+
+Guidelines:
+- "small": bug fix, add a simple command, change a config value, rename something
+- "medium": add a feature that touches 2-3 files, refactor a module
+- "large": new subsystem, architectural change, multi-file feature
+- skip_design=true if the task is small enough that a DESIGN.md update adds no value
+- skip_graph=true if the task doesn't add new architectural nodes/edges
+- "ambiguous" if the task description is vague, could mean multiple things, or lacks critical info
+- Short ≠ simple. "fix the bug" is ambiguous. "fix the auth retry loop in llm.rs" is clear and small."#
+        );
+
+        // Use haiku for triage (cheap, fast)
+        let model = "haiku";
+        tracing::info!(task = task, model = model, "Running triage");
+
+        let llm = self.llm_client.read().await;
+        let messages = vec![crate::llm::Message::text("user", &prompt)];
+        match llm.chat_with_model("You are a triage agent.", &messages, &[], model).await {
+            Ok(response) => {
+                let response_text = response.text.clone().unwrap_or_default();
+                let tokens_used = (response.usage.input_tokens + response.usage.output_tokens) as u64;
+                
+                // Try to parse JSON from response
+                let json_str = Self::extract_json_str(&response_text);
+                match serde_json::from_str::<TriageResult>(json_str) {
+                    Ok(result) => {
+                        tracing::info!(
+                            clarity = %result.clarity,
+                            size = %result.size,
+                            skip_design = result.skip_design,
+                            skip_graph = result.skip_graph,
+                            "Triage complete"
+                        );
+                        Ok((RitualEvent::TriageCompleted(result), tokens_used))
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to parse triage JSON: {}. Response: {}. Defaulting to full flow.", e, &response_text[..response_text.len().min(200)]);
+                        Ok((RitualEvent::TriageCompleted(TriageResult {
+                            clarity: "clear".into(),
+                            clarify_questions: vec![],
+                            size: "large".into(),
+                            skip_design: false,
+                            skip_graph: false,
+                        }), tokens_used))
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Triage LLM call failed: {}. Defaulting to full flow.", e);
+                Ok((RitualEvent::TriageCompleted(TriageResult {
+                    clarity: "clear".into(),
+                    clarify_questions: vec![],
+                    size: "large".into(),
+                    skip_design: false,
+                    skip_graph: false,
+                }), 0))
+            }
+        }
+    }
+
+    /// Extract JSON from LLM output (handles markdown code fences).
+    fn extract_json_str(output: &str) -> &str {
+        if let Some(start) = output.find("```json") {
+            let json_start = start + 7;
+            if let Some(end) = output[json_start..].find("```") {
+                return output[json_start..json_start + end].trim();
+            }
+        }
+        if let Some(start) = output.find("```") {
+            let json_start = start + 3;
+            if let Some(end) = output[json_start..].find("```") {
+                return output[json_start..json_start + end].trim();
+            }
+        }
+        if let Some(start) = output.find('{') {
+            if let Some(end) = output.rfind('}') {
+                return &output[start..=end];
+            }
+        }
+        output.trim()
     }
 
     /// Run a skill phase using the RitualLlmAdapter.

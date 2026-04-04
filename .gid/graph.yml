@@ -20220,6 +20220,45 @@ nodes:
   - implementation
   - roadmap
   type: task
+- id: task_social_intake_core_engine
+  title: Implement Social Media Intake Core Engine (Python)
+  status: done
+  description: Python script (intake.py) handling URL deduplication, platform detection, and content extraction for 7+ platforms
+  type: task
+  metadata:
+    priority: P0
+    file_path: skills/social-intake/intake.py
+    lines: 300+
+    completed_date: 2026-04-03
+  tags:
+    - social-intake
+    - python
+    - skill
+- id: task_social_intake_skill_orchestration
+  title: Implement Social Intake SKILL.md (LLM Orchestration Layer)
+  status: done
+  description: SKILL.md defining extraction pipeline, analysis logic, storage strategy, and error handling for social media intake
+  type: task
+  metadata:
+    priority: P0
+    file_path: skills/social-intake/SKILL.md
+    completed_date: 2026-04-03
+  tags:
+    - social-intake
+    - skill
+    - llm-orchestration
+- id: task_social_intake_dependencies
+  title: Define Python Dependencies (requirements.txt)
+  status: done
+  description: Python package requirements for web scraping (requests, beautifulsoup4)
+  type: task
+  metadata:
+    priority: P0
+    file_path: skills/social-intake/requirements.txt
+    completed_date: 2026-04-03
+  tags:
+    - social-intake
+    - dependencies
 edges:
 - from: code_orchestrator.rs_Orchestrator.execute_task
   to: code_tools.rs_GidExtractTool.description
@@ -73629,3 +73668,9 @@ edges:
 - from: mod-dashboard
   to: mod-orchestrator
   relation: related_to
+- from: task_social_intake_core_engine
+  to: task_social_intake_skill_orchestration
+  relation: implements
+- from: task_social_intake_dependencies
+  to: task_social_intake_core_engine
+  relation: depends_on

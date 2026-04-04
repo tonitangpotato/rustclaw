@@ -1,6 +1,6 @@
 {
-  "phase": "Escalated",
-  "task": "Add token usage tracking to /ritual status command output. Changes needed:\n\n1. **gid-core (state machine)**: Add `tokens_used: u64` field to `SkillCompleted` event variant. Add `phase_tokens: HashMap<String, u64>` to `RitualState`. Update transition function to record tokens when SkillCompleted fires.\n\n2. **rustclaw (v2_executor/ritual_runner)**: Pass actual token counts through SkillCompleted events when phases complete. Get token count from TokenTracker or sub-agent results.\n\n3. **rustclaw (telegram.rs)**: Update `/ritual status` output to display per-phase token usage (e.g. \"design: 12,450 tokens, implement: 45,200 tokens\").\n\nThe goal is that when a user runs `/ritual status`, they can see how many tokens each completed phase consumed.",
+  "phase": "Done",
+  "task": "实现 Social Media Intake 系统：Python 核心引擎 (skills/social-intake/intake.py) + SKILL.md 编排层。requirements 在 .gid/requirements-social-intake.md，design 在 .gid/design-social-intake.md。产出：1) skills/social-intake/intake.py (~300行 Python 脚本，处理 URL 去重、平台检测、内容抓取、文件存储) 2) skills/social-intake/SKILL.md (LLM 编排层，负责分析摘要和关联判断) 3) skills/social-intake/requirements.txt (Python 依赖)",
   "project": {
     "has_design": true,
     "has_graph": true,
@@ -10,39 +10,74 @@
     "source_file_count": 56,
     "verify_command": "cargo build 2>&1 && cargo test 2>&1"
   },
-  "strategy": null,
-  "verify_retries": 0,
-  "phase_retries": {
-    "designing": 1
+  "strategy": {
+    "MultiAgent": {
+      "tasks": [
+        "Core agent runtime (agent.rs, llm.rs, events.rs, session.rs)",
+        "Tool registry and built-in tools (tools.rs, workspace.rs, sandbox.rs)",
+        "Memory and cognitive systems (memory.rs, hooks.rs, engram_hooks.rs)",
+        "Channel adapters (telegram, discord, slack, signal, whatsapp, matrix)",
+        "Orchestration and safety (orchestrator.rs, safety.rs, auth_profiles.rs)",
+        "Skills and ritual integration (skills.rs, ritual_adapter.rs, cron.rs)",
+        "Configuration and utilities (config.rs, oauth.rs, reload.rs, dashboard.rs)",
+        "Voice features (stt.rs, tts.rs, voice_mode.rs)"
+      ]
+    }
   },
-  "failed_phase": "Designing",
-  "error_context": "Anthropic API error (400 Bad Request): max_tokens: 128000 > 64000, which is the maximum allowed number of output tokens for claude-sonnet-4-5-20250929",
+  "verify_retries": 0,
+  "phase_retries": {},
+  "failed_phase": null,
+  "error_context": null,
+  "phase_tokens": {
+    "design": 15821,
+    "implement": 6066,
+    "planning": 426,
+    "graph": 6668
+  },
   "transitions": [
     {
       "from": "Idle",
       "to": "Initializing",
       "event": "Idle → Initializing",
-      "timestamp": "2026-04-03T21:49:12.833732Z"
+      "timestamp": "2026-04-04T00:15:05.242387Z"
     },
     {
       "from": "Initializing",
       "to": "Designing",
       "event": "Initializing → Designing",
-      "timestamp": "2026-04-03T21:49:12.835326Z"
+      "timestamp": "2026-04-04T00:15:05.246685Z"
     },
     {
       "from": "Designing",
-      "to": "Designing",
-      "event": "Designing → Designing",
-      "timestamp": "2026-04-03T21:49:13.000998Z"
+      "to": "Planning",
+      "event": "Designing → Planning",
+      "timestamp": "2026-04-04T00:19:59.412473Z"
     },
     {
-      "from": "Designing",
-      "to": "Escalated",
-      "event": "Designing → Escalated",
-      "timestamp": "2026-04-03T21:49:13.122344Z"
+      "from": "Planning",
+      "to": "Graphing",
+      "event": "Planning → Graphing",
+      "timestamp": "2026-04-04T00:20:09.878617Z"
+    },
+    {
+      "from": "Graphing",
+      "to": "Implementing",
+      "event": "Graphing → Implementing",
+      "timestamp": "2026-04-04T00:22:43.397135Z"
+    },
+    {
+      "from": "Implementing",
+      "to": "Verifying",
+      "event": "Implementing → Verifying",
+      "timestamp": "2026-04-04T00:24:55.267542Z"
+    },
+    {
+      "from": "Verifying",
+      "to": "Done",
+      "event": "Verifying → Done",
+      "timestamp": "2026-04-04T00:25:15.615810Z"
     }
   ],
-  "started_at": "2026-04-03T21:49:12.833709Z",
-  "updated_at": "2026-04-03T21:49:13.122345Z"
+  "started_at": "2026-04-04T00:15:05.242356Z",
+  "updated_at": "2026-04-04T00:25:15.615812Z"
 }

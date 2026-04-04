@@ -81,6 +81,32 @@ Search for related existing ideas and projects:
 → Note any connections found
 ```
 
+### Step 3.5: Back-Reference (反向更新)
+
+If connections were found in Step 3, go back and update the **existing** entries:
+
+**If related to an existing IDEA:**
+```
+→ Find the existing IDEA entry in IDEAS.md
+→ Under its "### Connections" section, append a line:
+  "- Related: {new-entry-ID} ({new title}) — {brief reason for connection}"
+→ If no Connections section exists, create one
+```
+
+**If related to an existing project:**
+```
+→ Find the project's main doc (DESIGN.md, README.md, or requirements.md)
+→ If the doc has a "References" or "Related" section, append a reference line
+→ If no such section, add one at the bottom:
+  "## References\n- {new-entry-ID}: {title} — {brief relevance}"
+```
+
+**Rules:**
+- Only add back-references when the connection is meaningful (not every vague keyword match)
+- Keep back-reference lines brief — one line each, just enough to find the new entry
+- Do NOT modify the existing entry's content/analysis, only append to Connections/References
+- Do NOT create Hebbian links artificially — let natural recall handle that
+
 ### Step 4: Store
 
 1. **IDEAS.md** — Prepend structured entry:
@@ -125,16 +151,34 @@ Search for related existing ideas and projects:
 → gid_add_task(id="idea-{slug}", title="{title}", tags=["idea", "{category}"])
 ```
 
-### Step 5: Report Back
+### Step 5: Report Back + Proactive Association
 
-Reply to potato with a concise summary:
+Reply to potato with a concise summary, and **actively surface connections**:
 ```
 📥 **Idea Captured: {Title}**
 {1-2 sentence summary}
-🔗 Connections: {any related projects/ideas found}
 💰 Value: {potential value assessment}
 📝 Saved to IDEAS.md as IDEA-{id}
+
+🔗 **这个让我想到：**
+- {Related idea/project} — {WHY it's connected, not just "related"}
+- {Another connection} — {concrete link: shared tech, same problem space, builds on each other, etc.}
 ```
+
+**Association rules:**
+- Don't just list keyword matches — explain the actual relationship
+- Be specific: "这个的 Progressive Disclosure 可以解决我们 SKM 的 context 占用问题" > "Related to SKM"
+- If you found something genuinely interesting, say so — spark a conversation, don't just log
+- If no meaningful connections found, don't force it — just say "暂时没发现跟已有项目的明显关联"
+- This is a conversation starter, not a report. Potato may want to discuss the connections.
+
+**If back-references were added in Step 3.5, explicitly tell potato:**
+```
+🔗 **关联更新：**
+- 更新了 {IDEA-XXXXXXXX-NN} 的 Connections（{brief reason}）
+- 更新了 {project name} 的 References（{brief reason}）
+```
+This ensures potato is reminded of related past ideas/projects they may have forgotten about. The value of finding connections is zero if we don't surface them.
 
 ## ID Format
 
