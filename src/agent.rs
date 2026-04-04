@@ -1228,18 +1228,13 @@ CRITICAL CONSTRAINTS:
         let cancel_token = self.get_cancellation_token(&session_key).await;
 
         // Track parent→child relationship for cascade cancel
-        // Parent session is derived from sub-agent prefix (e.g., "agent:spawn_xxx:" → parent is main session)
         {
-            let parent_key = format!("telegram:{}", subagent.session_prefix.split(':').nth(1).unwrap_or("unknown"));
-            // Use a catch-all "main" parent for sub-agents spawned from any context
-            let parent = if parent_key.contains("spawn_") || parent_key.contains("ritual_") {
-                // Sub-agent spawned from main session — use the chat session key
-                "telegram:main".to_string()
-            } else {
-                parent_key
-            };
+            let parent_key = self.tools.current_session_key.lock()
+                .ok()
+                .and_then(|g| g.clone())
+                .unwrap_or_else(|| "unknown".to_string());
             let mut children = self.subagent_children.lock().await;
-            children.entry(parent).or_default().push(session_key.clone());
+            children.entry(parent_key).or_default().push(session_key.clone());
         }
 
         // Wall-clock timeout: sub-agents get 10 minutes max
@@ -1441,6 +1436,16 @@ CRITICAL CONSTRAINTS:
         {
             let mut tokens = self.cancellation_tokens.lock().await;
             tokens.remove(&session_key);
+        }
+
+        // Clean up parent→child tracking
+        {
+            let mut children = self.subagent_children.lock().await;
+            for child_list in children.values_mut() {
+                child_list.retain(|k| k != &session_key);
+            }
+            // Remove empty parent entries
+            children.retain(|_, v| !v.is_empty());
         }
 
         Ok(response_text)

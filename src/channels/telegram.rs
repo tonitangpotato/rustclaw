@@ -209,13 +209,10 @@ impl TelegramBot {
         if let Ok(mut guard) = self.runner.tools.ritual_notify.lock() {
             *guard = Some(self.make_notify_fn(chat_id));
         }
-        // Set current session key + chat_id so fire-and-forget sub-agents can inject completion back
+        // Set current session key so fire-and-forget sub-agents can inject completion back
         let session_key = format!("telegram:{}", chat_id);
         if let Ok(mut guard) = self.runner.tools.current_session_key.lock() {
             *guard = Some(session_key.clone());
-        }
-        if let Ok(mut guard) = self.runner.tools.current_chat_id.lock() {
-            *guard = Some(chat_id);
         }
         
         // Determine if this is a group chat

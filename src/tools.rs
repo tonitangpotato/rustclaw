@@ -69,10 +69,9 @@ pub struct ToolRegistry {
     /// Shared mutable slot for ritual notify — set per-request with chat context,
     /// read by StartRitualTool at execution time.
     pub ritual_notify: Arc<std::sync::Mutex<Option<crate::ritual_runner::NotifyFn>>>,
-    /// Current parent session key + chat_id — set per-request by telegram.rs,
+    /// Current parent session key — set per-request by telegram.rs,
     /// used by fire-and-forget sub-agents to inject completion back into parent.
     pub current_session_key: Arc<std::sync::Mutex<Option<String>>>,
-    pub current_chat_id: Arc<std::sync::Mutex<Option<i64>>>,
 }
 
 impl ToolRegistry {
@@ -83,7 +82,6 @@ impl ToolRegistry {
             workspace_root: None,
             ritual_notify: Arc::new(std::sync::Mutex::new(None)),
             current_session_key: Arc::new(std::sync::Mutex::new(None)),
-            current_chat_id: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
