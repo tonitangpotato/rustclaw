@@ -166,7 +166,8 @@ impl ToolRegistry {
     /// Register the spawn_specialist tool with access to the agent runner.
     /// The runner handle is initially empty and must be set after AgentRunner creation.
     pub fn with_spawn_specialist(mut self, runner: SharedAgentRunner, orchestrator: Option<SharedOrchestrator>) -> Self {
-        self.register(Box::new(SpawnSpecialistTool::new(runner, orchestrator)));
+        let notify_slot = self.ritual_notify.clone();
+        self.register(Box::new(SpawnSpecialistTool::new(runner, orchestrator, notify_slot)));
         self
     }
 
@@ -2107,14 +2108,28 @@ impl Tool for DelegateTaskTool {
 pub struct SpawnSpecialistTool {
     runner: SharedAgentRunner,
     orchestrator: Option<SharedOrchestrator>,
+    notify_slot: Arc<std::sync::Mutex<Option<crate::ritual_runner::NotifyFn>>>,
 }
 
 impl SpawnSpecialistTool {
-    pub fn new(runner: SharedAgentRunner, orchestrator: Option<SharedOrchestrator>) -> Self {
-        Self { runner, orchestrator }
+    pub fn new(
+        runner: SharedAgentRunner,
+        orchestrator: Option<SharedOrchestrator>,
+        notify_slot: Arc<std::sync::Mutex<Option<crate::ritual_runner::NotifyFn>>>,
+    ) -> Self {
+        Self { runner, orchestrator, notify_slot }
     }
 
-
+    /// Fire-and-forget notification via the shared notify slot (Telegram).
+    fn fire_notify(&self, message: String) {
+        let slot = self.notify_slot.lock().unwrap();
+        if let Some(notify) = slot.as_ref() {
+            let notify = notify.clone();
+            tokio::spawn(async move {
+                notify(message).await;
+            });
+        }
+    }
 }
 
 #[async_trait]
@@ -2241,24 +2256,99 @@ impl Tool for SpawnSpecialistTool {
 
         if !wait {
             // Fire-and-forget mode: spawn task in background, return immediately
+            // Completion/failure will be notified via Telegram
             let runner_clone = runner.clone();
             let task_owned = task.to_string();
             let final_config_clone = final_config.clone();
+            let notify_slot = self.notify_slot.clone();
+            let notify_slot_ping = self.notify_slot.clone();
+            let start_time = std::time::Instant::now();
+            let task_summary = if task.chars().count() > 80 {
+                format!("{}...", task.chars().take(80).collect::<String>())
+            } else {
+                task.to_string()
+            };
             
             tokio::spawn(async move {
+                // Helper to send notification
+                let send_notify = |msg: String| {
+                    let slot = notify_slot.lock().unwrap();
+                    if let Some(notify) = slot.as_ref() {
+                        let notify = notify.clone();
+                        tokio::spawn(async move { notify(msg).await; });
+                    }
+                };
+
                 match runner_clone.spawn_agent_with_options(&final_config_clone, effective_max_iterations) {
                     Ok(subagent) => {
-                        match runner_clone.process_with_subagent(&subagent, &task_owned, Some(&final_config_clone.id)).await {
+                        // Spawn a periodic progress ping (every 5 minutes)
+                        let ping_notify_slot = notify_slot_ping.clone();
+                        let ping_task_summary = task_summary.clone();
+                        let ping_agent_id = final_config_clone.id.clone();
+                        let ping_start = start_time;
+                        let ping_handle = tokio::spawn(async move {
+                            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+                            interval.tick().await; // skip first immediate tick
+                            loop {
+                                interval.tick().await;
+                                let elapsed = format_subagent_duration(ping_start.elapsed());
+                                let msg = format!(
+                                    "⏳ **Sub-agent still running** ({})\n📋 Task: {}\n🆔 ID: {}",
+                                    elapsed, ping_task_summary, ping_agent_id
+                                );
+                                let notify_opt = {
+                                    let slot = ping_notify_slot.lock().unwrap();
+                                    slot.as_ref().cloned()
+                                };
+                                if let Some(notify) = notify_opt {
+                                    notify(msg).await;
+                                }
+                            }
+                        });
+
+                        let result = runner_clone.process_with_subagent(&subagent, &task_owned, Some(&final_config_clone.id)).await;
+                        ping_handle.abort(); // Stop progress pings
+
+                        match result {
                             Ok(result) => {
+                                let elapsed = start_time.elapsed();
+                                let duration = format_subagent_duration(elapsed);
+                                let result_preview = if result.chars().count() > 200 {
+                                    format!("{}...", result.chars().take(200).collect::<String>())
+                                } else {
+                                    result.clone()
+                                };
                                 tracing::info!("Background sub-agent {} completed: {} chars", final_config_clone.id, result.len());
+                                send_notify(format!(
+                                    "✅ **Sub-agent completed** ({})\n\n\
+                                     📋 Task: {}\n\
+                                     🆔 ID: {}\n\
+                                     📝 Result:\n{}",
+                                    duration, task_summary, final_config_clone.id, result_preview
+                                ));
                             }
                             Err(e) => {
+                                let elapsed = start_time.elapsed();
+                                let duration = format_subagent_duration(elapsed);
                                 tracing::error!("Background sub-agent {} failed: {}", final_config_clone.id, e);
+                                send_notify(format!(
+                                    "❌ **Sub-agent failed** ({})\n\n\
+                                     📋 Task: {}\n\
+                                     🆔 ID: {}\n\
+                                     💥 Error: {}",
+                                    duration, task_summary, final_config_clone.id, e
+                                ));
                             }
                         }
                     }
                     Err(e) => {
                         tracing::error!("Failed to spawn background sub-agent {}: {}", final_config_clone.id, e);
+                        send_notify(format!(
+                            "❌ **Failed to spawn sub-agent**\n\n\
+                             📋 Task: {}\n\
+                             💥 Error: {}",
+                            task_summary, e
+                        ));
                     }
                 }
             });
@@ -2320,6 +2410,18 @@ type SharedGraph = Arc<tokio::sync::RwLock<Graph>>;
 type SharedPath = Arc<String>;
 
 /// Helper: save graph to disk after mutation.
+/// Format a sub-agent duration in human-readable form.
+fn format_subagent_duration(elapsed: std::time::Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m{}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 fn save_gid_graph(graph: &Graph, path: &str) -> anyhow::Result<()> {
     gid_save_graph(graph, std::path::Path::new(path))
 }
