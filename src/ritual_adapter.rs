@@ -128,7 +128,14 @@ impl GidLlmClient for RitualLlmAdapter {
 
                 let result = handler.handle(&tc.name, &tc.input).await;
                 let (content, is_error) = match result {
-                    Ok(output) => (output, false),
+                    Ok(output) => {
+                        // Truncate large tool outputs to prevent context bloat
+                        if output.len() > 12_000 {
+                            (format!("{}\n... (truncated from {} chars)", &output[..output.floor_char_boundary(12_000)], output.len()), false)
+                        } else {
+                            (output, false)
+                        }
+                    }
                     Err(e) => (format!("Error: {}", e), true),
                 };
                 tool_results.push(ContentBlock::ToolResult {
@@ -138,6 +145,24 @@ impl GidLlmClient for RitualLlmAdapter {
                 });
             }
             messages.push(Message { role: "user".to_string(), content: tool_results });
+
+            // Compact old tool results if messages getting large (keep last 3 assistant turns intact)
+            let total_chars: usize = messages.iter().map(|m| m.content_chars()).sum();
+            if total_chars > 60_000 {
+                tracing::info!("Ritual skill turn {}: compacting messages ({} chars)", turn, total_chars);
+                // Truncate tool results in older messages (keep last 6 messages = 3 turns)
+                let keep_from = messages.len().saturating_sub(6);
+                for (i, msg) in messages.iter_mut().enumerate() {
+                    if i >= keep_from { break; }
+                    for block in msg.content.iter_mut() {
+                        if let ContentBlock::ToolResult { content, .. } = block {
+                            if content.len() > 200 {
+                                *content = format!("{}... (compacted)", &content[..content.floor_char_boundary(200)]);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         Ok(SkillResult {
