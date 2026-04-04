@@ -842,22 +842,19 @@ Guidelines:
     }
 
         /// Load skill prompt from file or built-in fallback.
-    /// Priority: .gid/skills/{name}.md → ~/rustclaw/skills/{name}/SKILL.md → built-in
+    /// Priority: SkillRegistry → .gid/skills/{name}.md → built-in fallback
     fn load_skill_prompt(&self, skill_name: &str) -> String {
-        // Project-local skill
-        let gid_skill = self.project_root.join(".gid").join("skills").join(format!("{}.md", skill_name));
-        if gid_skill.exists() {
-            if let Ok(content) = std::fs::read_to_string(&gid_skill) {
-                return content;
+        // Use SkillRegistry if available (via AgentRunner)
+        if let Some(ref runner) = self.agent_runner {
+            if let Some(skill) = runner.workspace().skill_registry.get(skill_name) {
+                return skill.prompt_content().to_string();
             }
         }
 
-        // RustClaw skills directory
-        let home = std::env::var("HOME").unwrap_or_default();
-        let rustclaw_skill = PathBuf::from(&home)
-            .join("rustclaw").join("skills").join(skill_name).join("SKILL.md");
-        if rustclaw_skill.exists() {
-            if let Ok(content) = std::fs::read_to_string(&rustclaw_skill) {
+        // Project-local skill (fallback for projects with custom skills)
+        let gid_skill = self.project_root.join(".gid").join("skills").join(format!("{}.md", skill_name));
+        if gid_skill.exists() {
+            if let Ok(content) = std::fs::read_to_string(&gid_skill) {
                 return content;
             }
         }
