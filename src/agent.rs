@@ -1180,11 +1180,16 @@ CRITICAL CONSTRAINTS:
 
         for turn in 0..max_turns {
             // Token-based auto-compact check before each LLM call
+            // Sub-agents use a lower threshold (60%) than main agent (80%) because:
+            // 1. They accumulate tool results fast (read_file, design docs)
+            // 2. Their output goes back to parent as tool_result (double memory pressure)
+            // 3. "error sending request" means the HTTP body is already too large
             {
                 let model_limit = crate::llm::model_context_limit(
                     subagent.llm_client.model_name()
                 );
-                let threshold = (model_limit as f64 * self.config.context.compact_threshold_pct) as usize;
+                let subagent_compact_pct = self.config.context.compact_threshold_pct.min(0.60);
+                let threshold = (model_limit as f64 * subagent_compact_pct) as usize;
                 let estimated = session.estimate_tokens();
                 if estimated > threshold {
                     tracing::info!(
@@ -1205,10 +1210,24 @@ CRITICAL CONSTRAINTS:
                 }
             }
 
-            let response = subagent
+            let response = match subagent
                 .llm_client
                 .chat(&system_prompt, &session.messages, &tool_defs)
-                .await?;
+                .await
+            {
+                Ok(r) => r,
+                Err(e) if self.config.context.reactive_compact && crate::llm::is_prompt_too_long(&e) => {
+                    tracing::warn!("Sub-agent '{}' turn {}: send error — reactive compact", subagent.name, turn);
+                    match Self::compact_session_with_llm(subagent.llm_client.as_ref(), &mut session, &self.config.context).await {
+                        Ok(true) => {
+                            // Retry after compact
+                            subagent.llm_client.chat(&system_prompt, &session.messages, &tool_defs).await?
+                        }
+                        _ => return Err(e),
+                    }
+                }
+                Err(e) => return Err(e),
+            };
 
             session.total_tokens +=
                 (response.usage.input_tokens + response.usage.output_tokens) as u64;
@@ -1307,8 +1326,12 @@ CRITICAL CONSTRAINTS:
                 }
             }
 
-            // Persist large tool results to disk
-            persist_large_tool_results(&session_key, &mut tool_results, &tool_names_for_persist, &self.config.context);
+            // Persist large tool results to disk (sub-agents use lower threshold: 10K vs 30K)
+            {
+                let mut subagent_context_config = self.config.context.clone();
+                subagent_context_config.persist_threshold = subagent_context_config.persist_threshold.min(10_000);
+                persist_large_tool_results(&session_key, &mut tool_results, &tool_names_for_persist, &subagent_context_config);
+            }
 
             // Add tool results as user message
             session.messages.push(Message::tool_results(tool_results));
