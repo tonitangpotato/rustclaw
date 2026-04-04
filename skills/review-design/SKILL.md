@@ -101,6 +101,17 @@ Read the design document completely, then run ALL checks below. Do not stop afte
 27. **API compatibility** — Does the new design break existing callers? If yes, is the migration plan documented?
 28. **Feature flag / gradual rollout** — Can the new design be introduced behind a feature flag? Is there a rollback plan if the implementation doesn't work?
 
+### Phase 8: Task Breakdown (from `.gid/graph.yml`)
+
+If `.gid/graph.yml` exists and contains task nodes, also review:
+
+29. **Task clarity** — Each task clear enough to start coding immediately? Flag vague tasks like "set up infrastructure" or "implement the system".
+30. **Task scope** — Each task completable in 1-4 hours? Too big → split. Too small → merge.
+31. **Dependency correctness** — For each edge between tasks: is the dependency real? Can task B start without task A? Trace what each task reads/writes.
+32. **Missing dependencies** — Task B modifies a file task A creates → B depends on A. Is this edge in the graph?
+33. **Design coverage** — Every component in the design maps to at least one task? Any design section without a task → gap.
+34. **Task consistency** — Similar granularity across all tasks. Don't mix "implement complete auth" with "add import statement".
+
 ## Output Format
 
 ```markdown
@@ -147,7 +158,7 @@ After writing the review file, report a **brief summary** to the user:
 
 ## Rules
 
-- **Run ALL 20 checks.** Don't skip checks even if the first few find nothing.
+- **Run ALL 34 checks** (28 design + 6 task). Don't skip checks even if the first few find nothing.
 - **No "looks good" without evidence.** For each passed check, briefly note what you verified.
 - **Find the ROOT issue, not symptoms.** If check #5 and #12 both flag the same underlying problem, consolidate into one finding with the root cause.
 - **Suggest concrete fixes.** Not "this could be improved" — show the actual code/spec change.
