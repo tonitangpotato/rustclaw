@@ -31,13 +31,17 @@ Task breakdowns bridge design and implementation. Bad task decomposition → blo
 ## When to Use
 
 - After generating tasks from a design document
-- After updating task lists in `.gid/graph.yml` or task files
+- After updating the graph (`.gid/graph.yml`)
 - Before starting a sprint/implementation cycle
 - When tasks have been revised after design changes
 
+## Data Source
+
+**Tasks live in `.gid/graph.yml`**, not in separate task files. Read the graph YAML and extract all task nodes (nodes with `kind: task` or status fields like `todo`, `in_progress`, `done`). Dependencies are edges between nodes.
+
 ## Review Process
 
-Read ALL task definitions, the design document, and requirements (if they exist). Then run ALL checks below.
+Read the graph YAML (`.gid/graph.yml`), the design document, and requirements (if they exist). Then run ALL checks below.
 
 ### Phase 1: Individual Task Quality
 
