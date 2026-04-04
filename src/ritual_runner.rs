@@ -452,6 +452,16 @@ impl RitualRunner {
     async fn detect_project(&self) -> Result<RitualEvent> {
         let root = &self.project_root;
 
+        let has_requirements = root.join("REQUIREMENTS.md").exists()
+            || root.join(".gid").is_dir() && std::fs::read_dir(root.join(".gid"))
+                .map(|entries| entries
+                    .filter_map(|e| e.ok())
+                    .any(|e| {
+                        let name = e.file_name().to_string_lossy().to_string();
+                        name.starts_with("requirements-") && name.ends_with(".md")
+                    }))
+                .unwrap_or(false);
+
         let has_design = root.join("DESIGN.md").exists()
             || root.join(".gid/DESIGN.md").exists();
 
@@ -503,6 +513,7 @@ impl RitualRunner {
         });
 
         let project_state = ProjectState {
+            has_requirements,
             has_design,
             has_graph,
             has_source,
@@ -532,9 +543,9 @@ impl RitualRunner {
         // Build project context for triage prompt
         let project_ctx = if let Some(ps) = ritual_state.project.as_ref() {
             format!(
-                "Project: lang={}, has_design={}, has_graph={}, source_files={}, has_tests={}",
+                "Project: lang={}, has_req={}, has_design={}, has_graph={}, source_files={}, has_tests={}",
                 ps.language.as_deref().unwrap_or("unknown"),
-                ps.has_design, ps.has_graph,
+                ps.has_requirements, ps.has_design, ps.has_graph,
                 ps.source_file_count, ps.has_tests
             )
         } else {
