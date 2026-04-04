@@ -818,7 +818,22 @@ CRITICAL CONSTRAINTS:
         &self,
         session: &mut crate::session::Session,
     ) -> anyhow::Result<bool> {
-        let keep_recent = self.config.context.compact_keep_recent;
+        // Use summary LLM if available, otherwise main
+        if let Some(ref summary_llm) = self.summary_llm {
+            Self::compact_session_with_llm(summary_llm.as_ref(), session, &self.config.context).await
+        } else {
+            let llm = self.llm_client.read().await;
+            Self::compact_session_with_llm(llm.as_ref(), session, &self.config.context).await
+        }
+    }
+
+    /// Compact a session using any LLM client. Shared by main agent and sub-agents.
+    async fn compact_session_with_llm(
+        llm: &dyn crate::llm::LlmClient,
+        session: &mut crate::session::Session,
+        context_config: &crate::config::ContextConfig,
+    ) -> anyhow::Result<bool> {
+        let keep_recent = context_config.compact_keep_recent;
         let (to_summarize, count) = match session.prepare_for_summarization_by_tokens(keep_recent) {
             Some(data) => data,
             None => return Ok(false),
@@ -842,21 +857,11 @@ CRITICAL CONSTRAINTS:
 
         let pre_tokens = session.estimate_tokens();
 
-        // Use summary LLM if available, otherwise main
-        let response = if let Some(ref summary_llm) = self.summary_llm {
-            summary_llm.chat(
-                compact_system,
-                &[crate::llm::Message::text("user", &prompt)],
-                &[],
-            ).await?
-        } else {
-            let llm = self.llm_client.read().await;
-            llm.chat(
-                compact_system,
-                &[crate::llm::Message::text("user", &prompt)],
-                &[],
-            ).await?
-        };
+        let response = llm.chat(
+            compact_system,
+            &[crate::llm::Message::text("user", &prompt)],
+            &[],
+        ).await?;
 
         let summary = response.text.unwrap_or_else(|| "[Summary unavailable]".to_string());
         session.apply_summary(&summary, count);
@@ -1169,11 +1174,37 @@ CRITICAL CONSTRAINTS:
         // Get tool definitions from sub-agent's own registry
         let tool_defs = subagent.tools.definitions();
 
-        // Full agentic loop (same pattern as main agent)
+        // Full agentic loop (same pattern as main agent, with auto-compact)
         let max_turns = subagent.max_iterations as usize;
         let mut response_text = String::new();
 
         for turn in 0..max_turns {
+            // Token-based auto-compact check before each LLM call
+            {
+                let model_limit = crate::llm::model_context_limit(
+                    subagent.llm_client.model_name()
+                );
+                let threshold = (model_limit as f64 * self.config.context.compact_threshold_pct) as usize;
+                let estimated = session.estimate_tokens();
+                if estimated > threshold {
+                    tracing::info!(
+                        "Sub-agent '{}' turn {}: auto-compact triggered ({} tokens > {} threshold)",
+                        subagent.name, turn, estimated, threshold
+                    );
+                    match Self::compact_session_with_llm(subagent.llm_client.as_ref(), &mut session, &self.config.context).await {
+                        Ok(true) => {
+                            tracing::info!("Sub-agent '{}' auto-compact succeeded", subagent.name);
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            tracing::warn!("Sub-agent '{}' auto-compact failed: {} — trimming instead", subagent.name, e);
+                            session.trim_messages(self.config.max_session_messages);
+                        }
+                    }
+                    crate::session::microcompact_messages(&mut session.messages, &self.config.context);
+                }
+            }
+
             let response = subagent
                 .llm_client
                 .chat(&system_prompt, &session.messages, &tool_defs)
