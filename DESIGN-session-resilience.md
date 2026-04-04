@@ -45,12 +45,20 @@ Err(e) => {
     )));
     
     // Save session immediately (don't lose the resume context)
-    self.sessions.save(&session).await?;
+    // Use if-let — if save also fails, log but don't propagate (we're already in error recovery)
+    if let Err(save_err) = self.sessions.save(&session).await {
+        tracing::error!("Failed to save resume context: {} (original error: {})", save_err, e);
+    }
     
     // Notify user
+    // Truncate error message for user-facing notification
+    let error_summary = {
+        let s = e.to_string();
+        if s.len() > 100 { format!("{}...", &s[..s.floor_char_boundary(100)]) } else { s }
+    };
     let _ = tx.send(AgentEvent::Response(format!(
         "⚠️ API connection lost ({}). Your work is saved — send any message to resume.",
-        summarize_error(&e)
+        error_summary
     ))).await;
     sent_response = true;
     break;
@@ -179,9 +187,8 @@ fn log_tool_execution(
     });
 
     // Append to log file (fire-and-forget, never fail the tool)
-    let log_path = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".rustclaw/execution-log.jsonl");
+    let Some(home) = dirs::home_dir() else { return; };
+    let log_path = home.join(".rustclaw/execution-log.jsonl");
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true).append(true).open(&log_path)
     {
@@ -200,15 +207,32 @@ Execution log grows unbounded. Simple rotation:
 
 ```rust
 fn rotate_execution_log() {
-    let log_path = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".rustclaw/execution-log.jsonl");
+    let Some(home) = dirs::home_dir() else { return; };
+    let log_path = home.join(".rustclaw/execution-log.jsonl");
     if let Ok(meta) = std::fs::metadata(&log_path) {
         if meta.len() > 10_000_000 {
-            let date = chrono::Local::now().format("%Y%m%d");
-            let archive = log_path.with_file_name(format!("execution-log.{}.jsonl", date));
+            let now = chrono::Local::now();
+            let archive = log_path.with_file_name(
+                format!("execution-log.{}.jsonl", now.format("%Y%m%d-%H%M%S"))
+            );
             let _ = std::fs::rename(&log_path, &archive);
-            // Cleanup old archives (>7 days) — done lazily
+            // Cleanup archives older than 7 days
+            if let Ok(entries) = std::fs::read_dir(home.join(".rustclaw")) {
+                let cutoff = now - chrono::Duration::days(7);
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with("execution-log.") && name.ends_with(".jsonl") && name != "execution-log.jsonl" {
+                        // Parse date from filename, delete if old
+                        if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
+                            if let Ok(age) = modified.elapsed() {
+                                if age > std::time::Duration::from_secs(7 * 86400) {
+                                    let _ = std::fs::remove_file(entry.path());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -231,10 +255,12 @@ Both features apply to ALL three agent loops in RustClaw:
 | Loop | File | Breakpoint Resume | Execution Log |
 |---|---|---|---|
 | Main agent | `agent.rs` `run_agent_loop()` | ✅ | ✅ |
-| Sub-agent | `agent.rs` `process_with_subagent()` | ✅ (same pattern) | ✅ |
+| Sub-agent | `agent.rs` `process_with_subagent()` | ❌ Not needed | ✅ |
 | Ritual skill | `ritual_adapter.rs` `run_skill()` | ⚠️ Partial — ritual has own retry via state machine | ✅ |
 
 For ritual skills: the state machine already handles SkillFailed → retry. The execution log captures tool calls. No separate resume injection needed — the ritual state file IS the resume point.
+
+For sub-agents: breakpoint resume is not needed because each `spawn_specialist` creates a fresh session. The sub-agent's failure is reported back to the main agent (via tool result or notification), and the main agent's own session persists the context. The execution log still captures all tool calls for audit.
 
 ### Execution Log: Success Confirmation
 
