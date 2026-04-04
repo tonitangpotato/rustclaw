@@ -400,18 +400,7 @@ impl RitualRunner {
                     return self.run_planning().await;
                 }
                 RitualAction::RunHarness { tasks } => {
-                    tracing::warn!(
-                        "RunHarness not yet implemented ({} tasks), falling back to SingleLlm",
-                        tasks.len()
-                    );
-                    let context = format!(
-                        "Implement all of the following tasks:\n{}",
-                        tasks.iter().enumerate()
-                            .map(|(i, t)| format!("{}. {}", i + 1, t))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    );
-                    return self.run_skill("implement", &context).await;
+                    return self.run_harness(tasks).await;
                 }
                 _ => {} // Fire-and-forget handled above
             }
@@ -756,6 +745,123 @@ Guidelines:
     }
 
     /// Run a shell command (for verify phase). Timeout: 5 minutes.
+    /// Run multiple implementation tasks in parallel (multi-agent harness).
+    /// Each task gets its own LLM session via run_skill("implement", task).
+    /// Results are collected: all succeed → SkillCompleted, any fail → SkillFailed.
+    async fn run_harness(&self, tasks: &[String]) -> Result<(RitualEvent, u64)> {
+        use tokio::task::JoinSet;
+
+        tracing::info!(task_count = tasks.len(), "Running harness ({} parallel tasks)", tasks.len());
+
+        if tasks.is_empty() {
+            return Ok((RitualEvent::SkillCompleted {
+                phase: "implement".into(),
+                artifacts: vec![],
+            }, 0));
+        }
+
+        // For single task, just run directly
+        if tasks.len() == 1 {
+            return self.run_skill("implement", &tasks[0]).await;
+        }
+
+        // Run tasks concurrently using tokio::spawn
+        // Each gets its own RitualLlmAdapter (separate LLM session)
+        let mut handles = Vec::new();
+        for (i, task) in tasks.iter().enumerate() {
+            let task_ctx = format!(
+                "Task {}/{}: {}\n\nIMPORTANT: Only implement THIS specific task. \
+                 Other tasks are being handled in parallel by other agents.",
+                i + 1, tasks.len(), task
+            );
+            let llm = self.llm_client.clone();
+            let project_root = self.project_root.clone();
+
+            handles.push(tokio::spawn(async move {
+                let adapter = crate::ritual_adapter::RitualLlmAdapter::new(llm);
+                use gid_core::ritual::llm::{LlmClient as GidLlmClient, ToolDefinition};
+
+                // Build tools (Read, Write, Edit, Bash)
+                let tools = vec![
+                    ToolDefinition::new("Read", "Read a file", serde_json::json!({
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"]
+                    })),
+                    ToolDefinition::new("Write", "Write content to a file", serde_json::json!({
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                        "required": ["path", "content"]
+                    })),
+                    ToolDefinition::new("Edit", "Replace exact text in a file", serde_json::json!({
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}},
+                        "required": ["path", "old_text", "new_text"]
+                    })),
+                    ToolDefinition::new("Bash", "Run a shell command", serde_json::json!({
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"]
+                    })),
+                ];
+
+                match adapter.run_skill(&task_ctx, tools, "opus", &project_root).await {
+                    Ok(result) => Ok((i, result)),
+                    Err(e) => Err((i, e.to_string())),
+                }
+            }));
+        }
+
+        // Collect results
+        let mut total_tokens = 0u64;
+        let mut all_artifacts = Vec::new();
+        let mut failures = Vec::new();
+
+        for handle in handles {
+            match handle.await {
+                Ok(Ok((i, skill_result))) => {
+                    tracing::info!(task_idx = i, "Harness task {} completed", i + 1);
+                    total_tokens += skill_result.tokens_used;
+                    all_artifacts.extend(
+                        skill_result.artifacts_created.into_iter()
+                            .map(|p| p.to_string_lossy().to_string())
+                    );
+                }
+                Ok(Err((i, error))) => {
+                    tracing::warn!(task_idx = i, error = %error, "Harness task {} failed", i + 1);
+                    failures.push(format!("Task {}: {}", i + 1, error));
+                }
+                Err(join_err) => {
+                    tracing::error!("Harness task panicked: {}", join_err);
+                    failures.push(format!("Task panicked: {}", join_err));
+                }
+            }
+        }
+
+        if failures.is_empty() {
+            tracing::info!(
+                total_tokens = total_tokens,
+                artifacts = all_artifacts.len(),
+                "All {} harness tasks completed successfully", tasks.len()
+            );
+            Ok((RitualEvent::SkillCompleted {
+                phase: "implement".into(),
+                artifacts: all_artifacts,
+            }, total_tokens))
+        } else {
+            let error_msg = format!(
+                "{}/{} tasks failed:\n{}",
+                failures.len(), tasks.len(),
+                failures.join("\n")
+            );
+            tracing::warn!("{}", error_msg);
+            Ok((RitualEvent::SkillFailed {
+                phase: "implement".into(),
+                error: error_msg,
+            }, total_tokens))
+        }
+    }
+
     async fn run_shell(&self, command: &str) -> Result<RitualEvent> {
         tracing::info!("Running shell command: {}", command);
 
