@@ -423,9 +423,9 @@ impl Tool for ExecTool {
             result.push_str(&stderr);
         }
 
-        // Truncate if too long
-        if result.len() > 50_000 {
-            result.truncate(50_000);
+        // Truncate if too long (20K chars for bash output)
+        if result.len() > 20_000 {
+            result.truncate(20_000);
             result.push_str("\n... (truncated)");
         }
 
@@ -507,16 +507,16 @@ impl Tool for ReadFileTool {
         let lines: Vec<&str> = content.lines().collect();
 
         let offset = input["offset"].as_u64().unwrap_or(1).max(1) as usize - 1;
-        let limit = input["limit"].as_u64().unwrap_or(2000) as usize;
+        let limit = input["limit"].as_u64().unwrap_or(500) as usize;
 
         let selected: Vec<&str> = lines.iter().skip(offset).take(limit).copied().collect();
         let result = selected.join("\n");
 
-        // Truncate if too long
-        let result = if result.len() > 50_000 {
+        // Truncate if too long (15K chars ≈ 3750 tokens)
+        let result = if result.len() > 15_000 {
             format!(
-                "{}\n... (truncated, {} total lines)",
-                crate::text_utils::truncate_bytes(&result, 50_000),
+                "{}\n... (truncated, {} total lines. Use offset/limit to read more.)",
+                crate::text_utils::truncate_bytes(&result, 15_000),
                 lines.len()
             )
         } else if lines.len() > offset + limit {
@@ -701,7 +701,7 @@ impl Tool for WebFetchTool {
                 },
                 "max_chars": {
                     "type": "integer",
-                    "description": "Maximum characters to return (default: 50000)"
+                    "description": "Maximum characters to return (default: 15000)"
                 }
             },
             "required": ["url"]
@@ -712,7 +712,7 @@ impl Tool for WebFetchTool {
         let url = input["url"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'url' parameter"))?;
-        let max_chars = input["max_chars"].as_u64().unwrap_or(50_000) as usize;
+        let max_chars = input["max_chars"].as_u64().unwrap_or(15_000) as usize;
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
