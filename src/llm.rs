@@ -1823,6 +1823,8 @@ pub fn is_prompt_too_long(err: &anyhow::Error) -> bool {
         || (msg.contains("413") && msg.contains("token"))
         || msg.contains("context length exceeded")
         || msg.contains("maximum context length")
+        // "error sending request" after retries often means request body too large
+        || msg.contains("error sending request")
 }
 
 /// Get the context window size (in tokens) for a given model name.
