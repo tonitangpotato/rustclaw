@@ -160,6 +160,22 @@ pub struct ContextConfig {
     /// Persist-to-disk: chars to keep as in-context preview.
     #[serde(default = "default_persist_preview_chars")]
     pub persist_preview_chars: usize,
+
+    /// Auto-compact: trigger compaction at this fraction of model context limit (0.0-1.0).
+    #[serde(default = "default_compact_threshold_pct")]
+    pub compact_threshold_pct: f64,
+
+    /// Auto-compact: number of recent messages to keep in tail after compaction.
+    #[serde(default = "default_compact_keep_recent")]
+    pub compact_keep_recent: usize,
+
+    /// Auto-compact: enable reactive compaction on 413 errors.
+    #[serde(default = "default_reactive_compact")]
+    pub reactive_compact: bool,
+
+    /// Auto-compact: enable max_output_tokens escalation (8K → 64K → resume).
+    #[serde(default = "default_output_escalation")]
+    pub output_escalation: bool,
 }
 
 impl Default for ContextConfig {
@@ -170,6 +186,10 @@ impl Default for ContextConfig {
             microcompact_keep_turns: default_microcompact_keep_turns(),
             persist_threshold: default_persist_threshold(),
             persist_preview_chars: default_persist_preview_chars(),
+            compact_threshold_pct: default_compact_threshold_pct(),
+            compact_keep_recent: default_compact_keep_recent(),
+            reactive_compact: default_reactive_compact(),
+            output_escalation: default_output_escalation(),
         }
     }
 }
@@ -179,6 +199,10 @@ fn default_microcompact_preview_chars() -> usize { 200 }
 fn default_microcompact_keep_turns() -> usize { 3 }
 fn default_persist_threshold() -> usize { 30_000 }
 fn default_persist_preview_chars() -> usize { 2_000 }
+fn default_compact_threshold_pct() -> f64 { 0.80 }
+fn default_compact_keep_recent() -> usize { 6 }
+fn default_reactive_compact() -> bool { true }
+fn default_output_escalation() -> bool { true }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WebSearchConfig {

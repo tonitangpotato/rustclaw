@@ -112,6 +112,48 @@ impl Session {
         idx
     }
 
+    /// Estimate total tokens in current messages using chars/4 heuristic.
+    /// Close enough for compaction threshold decisions without requiring a tokenizer.
+    pub fn estimate_tokens(&self) -> usize {
+        self.messages.iter().map(|m| {
+            // Role overhead (~4 tokens) + content
+            4 + m.content_chars() / 4
+        }).sum()
+    }
+
+    /// Prepare messages for token-based summarization.
+    /// Keeps `keep_recent` messages as tail, summarizes the rest.
+    pub fn prepare_for_summarization_by_tokens(
+        &self,
+        keep_recent: usize,
+    ) -> Option<(Vec<Message>, usize)> {
+        if self.messages.len() <= keep_recent + 1 {
+            return None; // Not enough messages to compact
+        }
+
+        let mut summarize_count = self.messages.len().saturating_sub(keep_recent);
+
+        if summarize_count < 2 {
+            return None;
+        }
+
+        // Ensure we don't split in the middle of a tool_use/tool_result pair
+        let safe_idx = self.safe_split_index(summarize_count);
+        if safe_idx != summarize_count {
+            tracing::debug!(
+                "Token-compact: adjusted split {} -> {} to preserve tool pairing",
+                summarize_count, safe_idx
+            );
+            summarize_count = safe_idx;
+            if summarize_count < 2 {
+                return None;
+            }
+        }
+
+        let to_summarize: Vec<Message> = self.messages[..summarize_count].to_vec();
+        Some((to_summarize, summarize_count))
+    }
+
     /// Summarize old messages instead of just trimming.
     /// Returns the messages that were summarized (for LLM call).
     pub fn prepare_for_summarization(&self, max_messages: usize) -> Option<(Vec<Message>, usize)> {

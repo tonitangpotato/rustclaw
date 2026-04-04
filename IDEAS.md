@@ -3,6 +3,44 @@
 > All ideas captured by RustClaw's Idea Intake pipeline.
 > Format: newest first. Each idea has a unique ID for cross-referencing.
 
+## IDEA-20260403-03: Harness 自我优化系统（Meta-Harness）
+- **Date**: 2026-04-03
+- **Source**: potato voice + Meta-Harness 论文 intake
+- **Category**: tech/research
+- **Tags**: #harness #self-optimization #meta-learning #gid #ritual #execution-log
+- **Effort**: Medium
+
+### Summary
+让 gid-harness / ritual pipeline 能从自己的执行历史中学习并自我优化。execution-log.jsonl 记录了每次执行的完整过程（phase 耗时、token 消耗、成功/失败、重试次数），一个 proposer agent 定期分析这些历史，自动提出 harness/ritual 配置改进建议。
+
+### Key Points
+- **和 Skill 自我优化同构** — 都是 "从历史中学习 → 识别弱点 → 自动改进 → 验证" 的闭环
+  - Skill 优化：SKILL.md 的 trigger/instructions → 使用效果 → 改写
+  - Harness 优化：ritual phase 配置/策略 → execution 效果 → 调整
+- **数据源已有** — execution-log.jsonl 是 append-only JSONL，telemetry.rs 已实现完整记录
+- **斯坦福论文验证** — Meta-Harness 论文证实完整历史(50%) >> 压缩摘要(34.9%)，我们的 JSONL 设计正确
+- **优化维度**：
+  - Phase 耗时分析 → 哪个 phase 是瓶颈？
+  - Token 消耗分析 → 哪里在浪费 token？
+  - 失败模式分析 → 哪类 task 总是失败？原因是什么？
+  - 重试 pattern → 是否需要调整 replanner 策略？
+  - "加法优于修改" → 论文第 7 轮发现，和 Skill 系统理念一致
+- **可以统一框架** — Skill 优化和 Harness 优化可以共享 "自我改进引擎"（history analyzer → proposer → verifier）
+
+### Potential Value
+- **直接提升开发效率** — ritual 越跑越快、越跑越准
+- **研究价值** — self-improving agent infrastructure 是前沿方向
+- **和 Skill 优化合并** — 两者底层共享，实现一个等于实现两个
+
+### Connections
+- IDEA-20260403-01: 自动化 Skill 优化系统 — 同构思路，可共享底层引擎
+- Meta-Harness 论文: intake/wechat/meta-harness-stanford-auto-agent-optimization.md
+- gid-harness: /Users/potato/clawd/projects/gid-rs/crates/gid-core/src/harness/ (15 文件, 6,881 行)
+- meta-graph action items: ai-meta-harness-auto-optimize, ai-ritual-trace
+
+### Status: 💡 New
+---
+
 ## IDEA-20260403-02: 知识管理产品化 + 内容飞轮 Marketing Pipeline
 - **Date**: 2026-04-03
 - **Triggered by**: 小红书 LLM 知识库帖子 + Karpathy 背书 + potato 讨论

@@ -518,26 +518,46 @@ CRITICAL CONSTRAINTS:
         // 5. Add user message to session
         session.messages.push(Message::text("user", user_message));
 
-        // 6. Summarize or trim messages
-        if let Some(ref summary_llm) = self.summary_llm {
-            match summarize_old_messages(
-                &mut session,
-                self.config.max_session_messages,
-                summary_llm.as_ref(),
-            )
-            .await
-            {
-                Ok(true) => {
-                    tracing::info!("Summarized old messages in session {}", session_key);
+        // 6. Token-based auto-compact (replaces message-count summarization)
+        {
+            let model_limit = crate::llm::model_context_limit(&self.config.llm.model);
+            let threshold = (model_limit as f64 * self.config.context.compact_threshold_pct) as usize;
+            let estimated = session.estimate_tokens();
+
+            if estimated > threshold {
+                tracing::info!(
+                    "Pre-loop compact: {} tokens > {} threshold ({}% of {})",
+                    estimated, threshold,
+                    (self.config.context.compact_threshold_pct * 100.0) as u32,
+                    model_limit
+                );
+                match self.auto_compact(&mut session).await {
+                    Ok(true) => tracing::info!("Pre-loop auto-compact succeeded"),
+                    Ok(false) => tracing::debug!("Pre-loop auto-compact: nothing to compact"),
+                    Err(e) => {
+                        tracing::warn!("Pre-loop auto-compact failed: {}, falling back to trim", e);
+                        session.trim_messages(self.config.max_session_messages);
+                    }
                 }
-                Ok(false) => {}
-                Err(e) => {
-                    tracing::warn!("Summarization failed, falling back to trim: {}", e);
+            } else if session.messages.len() > self.config.max_session_messages {
+                // Fallback: message-count based summarization
+                if let Some(ref summary_llm) = self.summary_llm {
+                    match summarize_old_messages(
+                        &mut session,
+                        self.config.max_session_messages,
+                        summary_llm.as_ref(),
+                    ).await {
+                        Ok(true) => tracing::info!("Summarized old messages in session {}", session_key),
+                        Ok(false) => {}
+                        Err(e) => {
+                            tracing::warn!("Summarization failed, falling back to trim: {}", e);
+                            session.trim_messages(self.config.max_session_messages);
+                        }
+                    }
+                } else {
                     session.trim_messages(self.config.max_session_messages);
                 }
             }
-        } else {
-            session.trim_messages(self.config.max_session_messages);
         }
 
         // 7. Microcompact old tool results
@@ -550,6 +570,7 @@ CRITICAL CONSTRAINTS:
         let max_turns = 80;
         let mut response_text = String::new();
         let mut sent_response = false;
+        let mut max_tokens_recovery_count = 0u32;
         let cancel_token = self.get_cancellation_token(session_key).await;
 
         for turn in 0..max_turns {
@@ -560,13 +581,61 @@ CRITICAL CONSTRAINTS:
                 sent_response = true;
                 break;
             }
+
+            // Token-based auto-compact check before each LLM call
+            {
+                let model_limit = crate::llm::model_context_limit(&self.config.llm.model);
+                let threshold = (model_limit as f64 * self.config.context.compact_threshold_pct) as usize;
+                let estimated = session.estimate_tokens();
+                if estimated > threshold {
+                    tracing::info!(
+                        "Turn {}: auto-compact triggered ({} tokens > {} threshold)",
+                        turn, estimated, threshold
+                    );
+                    match self.auto_compact(&mut session).await {
+                        Ok(true) => {
+                            let _ = tx.send(AgentEvent::Text(
+                                "📦 Context compacted — continuing...".to_string()
+                            )).await;
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            tracing::warn!("Mid-loop auto-compact failed: {}", e);
+                            session.trim_messages(self.config.max_session_messages);
+                        }
+                    }
+                    // Re-microcompact after compaction
+                    crate::session::microcompact_messages(&mut session.messages, &self.config.context);
+                }
+            }
+
             // Race LLM call against cancellation token
             let llm_guard = self.llm_client.read().await;
             let llm_future = llm_guard.chat(&system_prompt, &session.messages, &tool_defs);
             let response = tokio::select! {
                 res = llm_future => {
                     drop(llm_guard);
-                    res?
+                    match res {
+                        Ok(r) => r,
+                        Err(e) if self.config.context.reactive_compact && crate::llm::is_prompt_too_long(&e) => {
+                            // 413 recovery: reactive compact
+                            tracing::warn!("Turn {}: 413 prompt too long — reactive compact", turn);
+                            match self.auto_compact(&mut session).await {
+                                Ok(true) => {
+                                    let _ = tx.send(AgentEvent::Text(
+                                        "📦 Context overflow — compacted and retrying...".to_string()
+                                    )).await;
+                                    // Retry the LLM call
+                                    let llm_guard = self.llm_client.read().await;
+                                    let retry = llm_guard.chat(&system_prompt, &session.messages, &tool_defs).await;
+                                    drop(llm_guard);
+                                    retry?
+                                }
+                                _ => return Err(e),
+                            }
+                        }
+                        Err(e) => return Err(e),
+                    }
                 },
                 _ = cancel_token.cancelled() => {
                     drop(llm_guard);
@@ -595,18 +664,43 @@ CRITICAL CONSTRAINTS:
                 response_text = text.clone();
             }
 
-            // Handle max_tokens truncation during tool calls
-            if response.stop_reason == "max_tokens" && !response.tool_calls.is_empty() {
-                tracing::warn!(
-                    "Turn {}: max_tokens hit during tool call — output truncated. Asking to retry.",
-                    turn
-                );
-                session.messages.push(Message::text(
-                    "user",
-                    "Your last response was truncated (hit output token limit). \
-                     Break the work into smaller steps — write shorter content per tool call.",
-                ));
-                continue;
+            // Handle max_tokens truncation with escalation
+            if response.stop_reason == "max_tokens" {
+                if self.config.context.output_escalation && max_tokens_recovery_count < 3 {
+                    max_tokens_recovery_count += 1;
+                    tracing::warn!(
+                        "Turn {}: max_tokens hit (recovery attempt {}/3)",
+                        turn, max_tokens_recovery_count
+                    );
+                    // Add assistant partial response + resume prompt
+                    if let Some(text) = &response.text {
+                        if !text.is_empty() {
+                            session.messages.push(Message::assistant_with_tools(
+                                Some(text), response.tool_calls.clone(),
+                            ));
+                        }
+                    }
+                    session.messages.push(Message::text(
+                        "user",
+                        "Output token limit hit. Resume directly — no apology, no recap of what you were doing. \
+                         Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.",
+                    ));
+                    continue;
+                } else if !response.tool_calls.is_empty() {
+                    tracing::warn!(
+                        "Turn {}: max_tokens hit during tool call — recovery exhausted or disabled",
+                        turn
+                    );
+                    session.messages.push(Message::text(
+                        "user",
+                        "Your last response was truncated (hit output token limit). \
+                         Break the work into smaller steps — write shorter content per tool call.",
+                    ));
+                    continue;
+                }
+            } else {
+                // Reset recovery counter on successful non-truncated response
+                max_tokens_recovery_count = 0;
             }
 
             if response.tool_calls.is_empty() {
@@ -716,6 +810,64 @@ CRITICAL CONSTRAINTS:
         self.sessions.update(session).await;
 
         Ok(())
+    }
+
+    /// Auto-compact: summarize old messages when token count exceeds threshold.
+    /// Uses the summary LLM (cheaper model) if available, otherwise falls back to main LLM.
+    async fn auto_compact(
+        &self,
+        session: &mut crate::session::Session,
+    ) -> anyhow::Result<bool> {
+        let keep_recent = self.config.context.compact_keep_recent;
+        let (to_summarize, count) = match session.prepare_for_summarization_by_tokens(keep_recent) {
+            Some(data) => data,
+            None => return Ok(false),
+        };
+
+        let conversation_text = crate::session::format_messages_for_summary(&to_summarize);
+
+        let compact_system = "You are a conversation summarizer. Create a structured summary that preserves:\n\
+            1. The original task/goal\n\
+            2. Key decisions made and their reasoning\n\
+            3. Current progress and state\n\
+            4. File paths, function names, and code identifiers mentioned\n\
+            5. Any errors encountered and their resolutions\n\
+            6. What was being worked on when compaction triggered\n\n\
+            Format as a structured summary with sections, not a paragraph. Be thorough — this summary replaces the full conversation history.";
+
+        let prompt = format!(
+            "Summarize this conversation:\n\n{}\n\nPreserve all technical details, file paths, and current state.",
+            conversation_text
+        );
+
+        let pre_tokens = session.estimate_tokens();
+
+        // Use summary LLM if available, otherwise main
+        let response = if let Some(ref summary_llm) = self.summary_llm {
+            summary_llm.chat(
+                compact_system,
+                &[crate::llm::Message::text("user", &prompt)],
+                &[],
+            ).await?
+        } else {
+            let llm = self.llm_client.read().await;
+            llm.chat(
+                compact_system,
+                &[crate::llm::Message::text("user", &prompt)],
+                &[],
+            ).await?
+        };
+
+        let summary = response.text.unwrap_or_else(|| "[Summary unavailable]".to_string());
+        session.apply_summary(&summary, count);
+
+        let post_tokens = session.estimate_tokens();
+        tracing::info!(
+            "Auto-compact: {} → {} estimated tokens ({} messages summarized)",
+            pre_tokens, post_tokens, count
+        );
+
+        Ok(true)
     }
 
     /// Execute a batch of tool calls, emitting events for each.

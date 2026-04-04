@@ -41,6 +41,19 @@ pub struct Message {
 }
 
 impl Message {
+    /// Estimate the character count of all content in this message.
+    pub fn content_chars(&self) -> usize {
+        self.content.iter().map(|block| match block {
+            ContentBlock::Text { text } => text.len(),
+            ContentBlock::ToolUse { id, name, input } => {
+                id.len() + name.len() + input.to_string().len()
+            }
+            ContentBlock::ToolResult { tool_use_id, content, .. } => {
+                tool_use_id.len() + content.len()
+            }
+        }).sum()
+    }
+
     /// Create a simple text message.
     pub fn text(role: &str, text: &str) -> Self {
         Self {
@@ -1798,6 +1811,34 @@ impl LlmClient for GoogleClient {
         });
 
         Ok(rx)
+    }
+}
+
+/// Check if an error indicates the prompt is too long (413 / overloaded context).
+pub fn is_prompt_too_long(err: &anyhow::Error) -> bool {
+    let msg = err.to_string().to_lowercase();
+    msg.contains("prompt is too long")
+        || msg.contains("prompt too long")
+        || msg.contains("request too large")
+        || (msg.contains("413") && msg.contains("token"))
+        || msg.contains("context length exceeded")
+        || msg.contains("maximum context length")
+}
+
+/// Get the context window size (in tokens) for a given model name.
+pub fn model_context_limit(model: &str) -> usize {
+    let m = model.to_lowercase();
+    if m.contains("opus") || m.contains("sonnet") || m.contains("claude-4") || m.contains("claude-3-5") {
+        200_000
+    } else if m.contains("haiku") {
+        200_000
+    } else if m.contains("gpt-4o") || m.contains("gpt-4-turbo") {
+        128_000
+    } else if m.contains("gemini") {
+        1_000_000
+    } else {
+        // Conservative default
+        128_000
     }
 }
 

@@ -131,6 +131,7 @@ Skills are defined in `skills/{name}/SKILL.md` and automatically loaded by `src/
 
 ## Remaining Roadmap
 
+- [x] **Auto-compact** — Token-based context compaction for continuous multi-hour coding (see `DESIGN-autocompact.md`)
 - [ ] Reply-to-message context (quoted message parsing in Telegram/Discord)
 - [ ] Web dashboard enhancements (orchestrator view, agent names)
 - [ ] Hot-reload orchestrator config

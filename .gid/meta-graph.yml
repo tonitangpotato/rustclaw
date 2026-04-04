@@ -55,15 +55,15 @@ nodes:
     note: "每次 ritual 的 phase 耗时、成功/失败、retry 次数、token 消耗 — 自动优化的前置条件"
 
 - id: ai-terminalbench-eval
-  title: "评估 TerminalBench-2 作为 coding agent benchmark"
+  title: "用 SWE-bench / TerminalBench-2 跑 gid-harness benchmark"
   status: new
   type: action_item
   metadata:
-    priority: P2
-    source: "intake/wechat/meta-harness-stanford-auto-agent-optimization.md"
+    priority: P1
+    source: "intake/wechat/meta-harness-stanford-auto-agent-optimization.md + potato voice 2026-04-03"
     source_date: "2026-04-03"
-    target_project: rustclaw
-    note: "公开排行榜，可直接跑"
+    target_project: gid-rs
+    note: "1) 量化 harness 水平作为 baseline 2) 为自我优化提供对比基准 3) marketing 素材。关联 IDEA-20260403-03 Meta-Harness 自我优化"
 
 - id: ai-additive-principle
   title: "文档化 '加法优于修改' 原则到 AGENTS.md"
