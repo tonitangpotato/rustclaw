@@ -160,6 +160,31 @@ The `/ritual` command drives the V2 state machine:
 
 **If `/ritual` fails** → Tell the user with the error, suggest `/ritual retry` or `/ritual skip`.
 
+### 📝 Review → Approve → Apply Workflow
+
+**When asked to review a document (design, requirements, etc.):**
+
+1. **Review phase** — Spawn a sub-agent (`spawn_specialist`, wait=false) to:
+   - Read the full document
+   - Run the appropriate review skill (review-design or review-requirements)
+   - Write findings to `.gid/reviews/<doc-name>-review.md`
+   - Each finding gets a unique ID: FINDING-1, FINDING-2, etc.
+   
+2. **Report to user** — Send a brief summary:
+   - "Found N issues (X critical, Y important, Z minor)"
+   - List finding IDs with one-line descriptions
+   - Ask: "Which findings should I apply?"
+
+3. **Apply phase** — After user approves, spawn another sub-agent to:
+   - Read the review file + full original document
+   - Apply ONLY the approved findings
+   - Use Edit tool for surgical changes
+   - Report what was changed
+
+**Why sub-agents?** Review reads entire documents + runs 27 checks → huge context. By using sub-agents, the review context is discarded after writing to file. The apply sub-agent starts fresh with just the document + approved changes.
+
+**NEVER review + apply in one shot.** Always write findings to file first, get human approval, then apply.
+
 ### Engram Recall
 ```bash
 engram --db /Users/potato/rustclaw/engram-memory.db recall "query" --limit 5

@@ -126,6 +126,20 @@ Read the entire requirements document, then run ALL checks below. Do not stop af
 - Estimated implementation clarity: [high/medium/low]
 ```
 
+## Output Destination
+
+**ALWAYS write the full review to a file**, not just respond in chat. This preserves the review for human approval and enables the apply phase.
+
+1. Write the review to `.gid/reviews/<document-name>-review.md` (e.g., `.gid/reviews/requirements-gepa-core-review.md`)
+2. Create `.gid/reviews/` directory if it doesn't exist
+3. Each finding must have a unique ID: `FINDING-1`, `FINDING-2`, etc.
+4. For each finding that suggests a change, include a `Suggested fix:` block with the concrete change
+
+After writing the review file, report a **brief summary** to the user:
+- Total findings count by severity
+- List of finding IDs with one-line descriptions
+- Ask: "Which findings should I apply? (e.g., 'apply FINDING-1,3,5' or 'apply all')"
+
 ## Rules
 
 - **Run ALL 27 checks.** Don't skip checks even if early ones find nothing.
