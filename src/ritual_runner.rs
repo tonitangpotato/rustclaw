@@ -17,6 +17,15 @@ pub type NotifyFn = Arc<dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Fut
 
 /// Executes the ritual state machine loop, bridging gid-core's pure transitions
 /// with RustClaw's IO capabilities (LLM, shell, filesystem, notifications).
+/// Shared registry of active ritual cancellation tokens.
+/// Key: ritual ID, Value: CancellationToken.
+pub type CancelRegistry = Arc<std::sync::Mutex<std::collections::HashMap<String, tokio_util::sync::CancellationToken>>>;
+
+/// Create a new empty cancel registry.
+pub fn new_cancel_registry() -> CancelRegistry {
+    Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 pub struct RitualRunner {
     project_root: PathBuf,
     rituals_dir: PathBuf,
@@ -24,6 +33,7 @@ pub struct RitualRunner {
     legacy_state_path: PathBuf,
     llm_client: Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>,
     notify: NotifyFn,
+    cancel_registry: CancelRegistry,
 }
 
 impl RitualRunner {
@@ -31,6 +41,15 @@ impl RitualRunner {
         project_root: PathBuf,
         llm_client: Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>,
         notify: NotifyFn,
+    ) -> Self {
+        Self::with_cancel_registry(project_root, llm_client, notify, new_cancel_registry())
+    }
+
+    pub fn with_cancel_registry(
+        project_root: PathBuf,
+        llm_client: Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>,
+        notify: NotifyFn,
+        cancel_registry: CancelRegistry,
     ) -> Self {
         let rituals_dir = project_root.join(".gid/rituals");
         let legacy_state_path = project_root.join(".gid/ritual-state.json");
@@ -40,6 +59,7 @@ impl RitualRunner {
             legacy_state_path,
             llm_client,
             notify,
+            cancel_registry,
         }
     }
 
@@ -130,20 +150,90 @@ impl RitualRunner {
     /// Multiple rituals can now run in parallel.
     pub async fn start(&self, task: String) -> Result<RitualState> {
         let state = RitualState::new();
-        tracing::info!(ritual_id = %state.id, task = %task, "Starting new ritual");
-        let event = RitualEvent::Start { task };
-        self.run_loop(state, event).await
+        let ritual_id = state.id.clone();
+        tracing::info!(ritual_id = %ritual_id, task = %task, "Starting new ritual");
+
+        // Register cancellation token
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        {
+            let mut reg = self.cancel_registry.lock().unwrap();
+            reg.insert(ritual_id.clone(), cancel_token.clone());
+        }
+
+        let result = self.run_loop(state, RitualEvent::Start { task }, cancel_token).await;
+
+        // Cleanup token from registry
+        {
+            let mut reg = self.cancel_registry.lock().unwrap();
+            reg.remove(&ritual_id);
+        }
+
+        result
+    }
+
+    /// Cancel a running ritual by ID (triggers cancellation token).
+    /// Returns true if a running ritual was found and cancelled.
+    pub fn cancel_running(&self, ritual_id: &str) -> bool {
+        let reg = self.cancel_registry.lock().unwrap();
+        if let Some(token) = reg.get(ritual_id) {
+            token.cancel();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Cancel all running rituals.
+    pub fn cancel_all_running(&self) -> usize {
+        let reg = self.cancel_registry.lock().unwrap();
+        let count = reg.len();
+        for token in reg.values() {
+            token.cancel();
+        }
+        count
     }
 
     /// Send a user event (Cancel, Retry, SkipPhase) to the current ritual.
     pub async fn send_event(&self, event: RitualEvent) -> Result<RitualState> {
         let state = self.load_state()?;
-        self.run_loop(state, event).await
+        let ritual_id = state.id.clone();
+
+        // For UserCancel, also trigger cancellation token of running ritual
+        if matches!(&event, RitualEvent::UserCancel) {
+            self.cancel_running(&ritual_id);
+        }
+
+        // Re-register token for the continued loop
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        {
+            let mut reg = self.cancel_registry.lock().unwrap();
+            reg.insert(ritual_id.clone(), cancel_token.clone());
+        }
+
+        let result = self.run_loop(state, event, cancel_token).await;
+
+        {
+            let mut reg = self.cancel_registry.lock().unwrap();
+            reg.remove(&ritual_id);
+        }
+
+        result
     }
 
     /// The core loop: transition → execute actions → get event → repeat until terminal.
-    async fn run_loop(&self, mut state: RitualState, mut event: RitualEvent) -> Result<RitualState> {
+    async fn run_loop(
+        &self,
+        mut state: RitualState,
+        mut event: RitualEvent,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> Result<RitualState> {
         loop {
+            // Check cancellation before each iteration
+            if cancel_token.is_cancelled() {
+                tracing::info!(ritual_id = %state.id, "Ritual cancelled via token");
+                event = RitualEvent::UserCancel;
+            }
+
             let (new_state, actions) = transition(&state, event);
             state = new_state;
 
@@ -156,13 +246,21 @@ impl RitualRunner {
                 break;
             }
 
-            // Execute the single event-producing action FIRST (to get token count)
-            let (evt, tokens_used) = match self.execute_event_producing(&actions, &state).await {
-                Ok(pair) => pair,
-                Err(e) => (RitualEvent::SkillFailed {
-                    phase: state.phase.display_name().to_string(),
-                    error: format!("Executor error: {}", e),
-                }, 0),
+            // Execute the single event-producing action with cancellation
+            let (evt, tokens_used) = tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    tracing::info!(ritual_id = %state.id, "Ritual interrupted during action execution");
+                    (RitualEvent::UserCancel, 0)
+                }
+                result = self.execute_event_producing(&actions, &state) => {
+                    match result {
+                        Ok(pair) => pair,
+                        Err(e) => (RitualEvent::SkillFailed {
+                            phase: state.phase.display_name().to_string(),
+                            error: format!("Executor error: {}", e),
+                        }, 0),
+                    }
+                }
             };
             // Record tokens BEFORE SaveState fires
             if tokens_used > 0 {

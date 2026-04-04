@@ -23,6 +23,8 @@ struct TelegramBot {
     bot_username: String,
     /// Sessions currently being processed (for queue routing)
     active_sessions: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Shared cancel registry for running rituals
+    ritual_cancel_registry: crate::ritual_runner::CancelRegistry,
 }
 
 impl TelegramBot {
@@ -41,6 +43,7 @@ impl TelegramBot {
             runner,
             bot_username,
             active_sessions: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+            ritual_cancel_registry: crate::ritual_runner::new_cancel_registry(),
         })
     }
     
@@ -642,16 +645,9 @@ Choose a model:", current),
             V2State as RitualState, V2Event as RitualEvent,
         };
 
-        let project_root = self.runner.workspace_root().to_path_buf();
-        let llm_client = self.runner.llm_client();
-
         match arg {
             "status" => {
-                let runner = crate::ritual_runner::RitualRunner::new(
-                    project_root,
-                    llm_client,
-                    self.make_notify_fn(chat_id),
-                );
+                let runner = self.make_ritual_runner(chat_id);
                 match runner.list_rituals() {
                     Ok(rituals) if rituals.is_empty() => {
                         self.send_message(chat_id, "No rituals found.", None).await?;
@@ -683,35 +679,40 @@ Choose a model:", current),
                 }
             }
             "cancel" => {
-                let runner = crate::ritual_runner::RitualRunner::new(
-                    project_root,
-                    llm_client,
-                    self.make_notify_fn(chat_id),
-                );
+                let runner = self.make_ritual_runner(chat_id);
                 let state = runner.load_state()?;
                 if state.phase.is_terminal() || state.phase == gid_core::ritual::V2Phase::Idle {
                     self.send_message(chat_id, "No active ritual to cancel.", None).await?;
                 } else {
-                    match runner.send_event(RitualEvent::UserCancel).await {
-                        Ok(state) => {
-                            self.send_message(
-                                chat_id,
-                                &format!("🛑 Ritual cancelled (was in {} phase).", state.phase.display_name()),
-                                None,
-                            ).await?;
-                        }
-                        Err(e) => {
-                            self.send_message(chat_id, &format!("❌ Cancel failed: {}", e), None).await?;
+                    // Immediately interrupt running ritual via cancellation token
+                    let interrupted = runner.cancel_running(&state.id);
+                    if interrupted {
+                        tracing::info!(ritual_id = %state.id, "Interrupted running ritual via cancel token");
+                        // The running loop will detect cancellation and transition to Cancelled
+                        self.send_message(
+                            chat_id,
+                            &format!("🛑 Interrupting ritual `{}` (was in {} phase)...", state.id, state.phase.display_name()),
+                            None,
+                        ).await?;
+                    } else {
+                        // Ritual not actively running (maybe paused/escalated) — send cancel event
+                        match runner.send_event(RitualEvent::UserCancel).await {
+                            Ok(state) => {
+                                self.send_message(
+                                    chat_id,
+                                    &format!("🛑 Ritual cancelled (was in {} phase).", state.phase.display_name()),
+                                    None,
+                                ).await?;
+                            }
+                            Err(e) => {
+                                self.send_message(chat_id, &format!("❌ Cancel failed: {}", e), None).await?;
+                            }
                         }
                     }
                 }
             }
             "retry" => {
-                let runner = crate::ritual_runner::RitualRunner::new(
-                    project_root,
-                    llm_client,
-                    self.make_notify_fn(chat_id),
-                );
+                let runner = self.make_ritual_runner(chat_id);
                 let state = runner.load_state()?;
                 if state.phase != gid_core::ritual::V2Phase::Escalated
                     && state.phase != gid_core::ritual::V2Phase::WaitingClarification
@@ -738,11 +739,7 @@ Choose a model:", current),
                 }
             }
             "skip" => {
-                let runner = crate::ritual_runner::RitualRunner::new(
-                    project_root,
-                    llm_client,
-                    self.make_notify_fn(chat_id),
-                );
+                let runner = self.make_ritual_runner(chat_id);
                 let state = runner.load_state()?;
                 if state.phase.is_terminal() || state.phase == gid_core::ritual::V2Phase::Idle {
                     self.send_message(chat_id, "No active ritual to skip phase.", None).await?;
@@ -784,11 +781,7 @@ Choose a model:", current),
                 if clarification.is_empty() {
                     self.send_message(chat_id, "⚠️ Usage: `/ritual clarify <your response>`", None).await?;
                 } else {
-                    let runner = crate::ritual_runner::RitualRunner::new(
-                        project_root,
-                        llm_client,
-                        self.make_notify_fn(chat_id),
-                    );
+                    let runner = self.make_ritual_runner(chat_id);
                     let state = runner.load_state()?;
                     if state.phase != gid_core::ritual::V2Phase::WaitingClarification {
                         self.send_message(
@@ -821,11 +814,7 @@ Choose a model:", current),
                 let bot = self.clone();
                 let task_string = task.to_string();
                 tokio::spawn(async move {
-                    let runner = crate::ritual_runner::RitualRunner::new(
-                        project_root,
-                        llm_client,
-                        bot.make_notify_fn(chat_id),
-                    );
+                    let runner = bot.make_ritual_runner(chat_id);
                     match runner.start(task_string).await {
                         Ok(state) => {
                             // Save final state
@@ -853,6 +842,15 @@ Choose a model:", current),
     }
 
     /// Create a notify callback that sends Telegram messages to the given chat.
+    fn make_ritual_runner(&self, chat_id: i64) -> crate::ritual_runner::RitualRunner {
+        crate::ritual_runner::RitualRunner::with_cancel_registry(
+            self.runner.workspace_root().to_path_buf(),
+            self.runner.llm_client(),
+            self.make_notify_fn(chat_id),
+            self.ritual_cancel_registry.clone(),
+        )
+    }
+
     fn make_notify_fn(&self, chat_id: i64) -> crate::ritual_runner::NotifyFn {
         let bot = self.clone();
         Arc::new(move |msg: String| {

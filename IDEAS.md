@@ -12,15 +12,17 @@
 
 ### The Idea
 
-两部分：
+**两个独立但互相增强的东西：**
 
-**A. 知识管理产品化（方案 B/C）**
-- 把 RustClaw 的知识管理能力单独拆出来做产品（浏览器插件 + agent 后端 + 知识图谱）
-- 或作为 RustClaw 的获客入口：免费知识管理引流 → 付费 agent 自动化
+**Product 1: Knowledge Compiler（知识管理产品）**
+- 面向用户的知识管理产品：Intake → 组织 → 关联 → 呈现
+- 把 RustClaw 的知识管理能力拆出来，独立产品化
+- 也可以做 RustClaw 获客入口：免费知识管理引流 → 付费 agent 自动化
 - Karpathy 背书给了市场验证叙事
-- 与 Obsidian 方案的差异化：agent-native、认知记忆（ACT-R/Hebbian）、多平台自动抓取
+- 差异化：agent-native、认知记忆（ACT-R/Hebbian）、多平台自动抓取（vs Obsidian + grep）
 
-**B. 内容飞轮 → Marketing Automation Pipeline 完整链路**
+**Tool 2: Content Automation Flow（自用营销自动化）**
+- potato 自己的完整营销/个人品牌自动化流水线
 ```
 [Intake] Social Intake 抓内容 → Engram 存储 → 找关联
     ↓ 触发灵感
@@ -30,9 +32,13 @@
     ↓ 数据回收
 [回收] 互动数据 → 分析效果 → 反馈到 Backlog
 ```
+- 用途：个人品牌建设、产品推广（包括推广 Knowledge Compiler）、开个人账号
 - 每条内容 = GID task node，状态 = backlog/wip/scheduled/posted
-- 可以开个人账号做内容营销
-- 现在缺的是中间段：素材 → 成品的内容生产环节
+
+**两者关系：**
+- Knowledge Compiler 是产品，Content Automation Flow 是自用工具
+- Content Automation Flow dogfoods Knowledge Compiler 的核心能力
+- Content Automation Flow 产出的内容可以反过来营销 Knowledge Compiler
 
 ### Why This Matters
 - Marketing 自动化是 potato 财务自由路径的关键环节
