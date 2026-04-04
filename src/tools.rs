@@ -425,7 +425,12 @@ impl Tool for ExecTool {
 
         // Truncate if too long (20K chars for bash output)
         if result.len() > 20_000 {
-            result.truncate(20_000);
+            // Find a valid UTF-8 char boundary at or before 20_000
+            let mut end = 20_000;
+            while !result.is_char_boundary(end) && end > 0 {
+                end -= 1;
+            }
+            result.truncate(end);
             result.push_str("\n... (truncated)");
         }
 

@@ -35,11 +35,50 @@ Requirements documents define **WHAT** the system must do (not HOW). Every crite
 - When potato says "write requirements for X"
 - Before writing a DESIGN.md (requirements come first), OR after design exists (extract from it)
 
+## Document Size Rule: Feature-Level Splitting
+
+**A single requirements document MUST NOT exceed ~15 GOALs.** If it does, split into feature-level documents.
+
+**Why:** Review agents run 27+ checks across all GOALs. At 30+ GOALs, review quality degrades (context pressure, missed cross-references). Splitting at the source is the root fix — no need for complex multi-agent review architectures.
+
+**Structure for large projects:**
+
+```
+.gid/
+├── requirements.md              ← Master: overview + feature index + GUARDs only
+└── features/
+    ├── auth/requirements.md     ← 10-15 GOALs for auth
+    ├── pipeline/requirements.md ← 10-15 GOALs for pipeline
+    └── cli/requirements.md      ← 10-15 GOALs for CLI
+```
+
+**Master requirements.md contains:**
+- Project overview
+- Feature index with brief descriptions and references to feature docs
+- **GUARDs only** (cross-cutting constraints apply to all features)
+- Out of Scope section
+- NO GOALs — all GOALs live in feature-level docs
+
+**Each feature requirements.md contains:**
+- Feature overview (1 paragraph)
+- GOALs for that feature only (10-15 max)
+- Feature-specific dependencies
+- Reference back to master for GUARDs
+
+**When to split:**
+- Writing a new project with >15 GOALs → split upfront
+- Existing document growing past 15 GOALs → refactor into features
+- If a single feature has 15+ GOALs → that feature should be split further
+
+**GOAL numbering across features:**
+- Each feature has its own namespace: `GOAL-auth.1`, `GOAL-pipe.1`, etc.
+- OR use module-number format: `GOAL-1.1` (module 1), `GOAL-2.1` (module 2) — each feature doc owns a module number range
+
 ## Output Location
 
 Depends on project structure:
-- **Simple project (single feature):** `.gid/requirements.md`
-- **Multi-feature project:** `.gid/features/{feature-name}/requirements.md`
+- **Simple project (single feature, ≤15 GOALs):** `.gid/requirements.md`
+- **Multi-feature project (>15 GOALs total):** Master at `.gid/requirements.md` + features at `.gid/features/{feature-name}/requirements.md`
 
 The `.gid/` location is canonical — `assemble_task_context()` resolves requirements from there via the feature node's `design_doc` metadata. Task nodes' `satisfies` references (e.g., `GOAL-1.1`) are resolved against their parent feature's requirements.md.
 
@@ -285,9 +324,10 @@ Be explicit. Sub-agents will read this. If something is ambiguous, an agent migh
 - `engram recall "{project topic} requirements decisions"` for past context
 
 ### Step 2: Draft Requirements
-- Write the full document following the template above
-- Typical size: 15-30 GOALs for small projects, 50-120 for large systems
-- Aim for 3-10 GUARDs (cross-cutting only)
+- **Count GOALs first.** If total exceeds 15 → split into feature-level docs immediately
+- Small project: single doc, ≤15 GOALs
+- Large project: master doc (GUARDs + feature index) + feature docs (10-15 GOALs each)
+- Aim for 3-10 GUARDs (cross-cutting only, always in master doc)
 - At least 3 out-of-scope items
 
 ### Step 3: Self-Review
@@ -308,8 +348,34 @@ Be explicit. Sub-agents will read this. If something is ambiguous, an agent migh
 
 After this document is written, the next phases reference it:
 - **DESIGN.md** addresses how to satisfy each GOAL
-- **GID graph** tasks have `satisfies: ["GOAL-1.1", "GOAL-1.2"]` metadata
+- **GID graph** feature nodes link to their requirements/design docs via metadata
+- **GID graph** task nodes have `satisfies: ["GOAL-1.1", "GOAL-1.2"]` metadata
 - **Verification** checks goals after task completion
 - **Guards** become cross-cutting test cases or checkpoint constraints
+
+### Feature Node ↔ Document Mapping
+
+When the Graph phase generates feature nodes, each feature node MUST include metadata linking to its documents:
+
+```yaml
+- id: feat-auth
+  title: Authentication
+  type: feature
+  metadata:
+    requirements_doc: ".gid/features/auth/requirements.md"
+    design_doc: ".gid/features/auth/design.md"
+    goal_prefix: "GOAL-1"  # namespace for this feature's GOALs
+```
+
+Task nodes under a feature MUST reference their parent and the GOALs they satisfy:
+
+```yaml
+- id: task-auth-profile-list
+  title: "Implement auth profile listing"
+  type: task
+  metadata:
+    parent_feature: "feat-auth"
+    satisfies: ["GOAL-1.1", "GOAL-1.2"]
+```
 
 This chain ensures nothing is implemented without a reason, and nothing is required without being implemented.

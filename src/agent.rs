@@ -1178,7 +1178,16 @@ CRITICAL CONSTRAINTS:
         let max_turns = subagent.max_iterations as usize;
         let mut response_text = String::new();
 
+        // Register cancellation token for sub-agent so it can be cancelled externally
+        let cancel_token = self.get_cancellation_token(&session_key).await;
+
         for turn in 0..max_turns {
+            // Check if cancelled
+            if cancel_token.is_cancelled() {
+                tracing::info!("Sub-agent '{}' cancelled at turn {}", subagent.name, turn);
+                response_text = format!("(Sub-agent cancelled at turn {})", turn);
+                break;
+            }
             // Token-based auto-compact check before each LLM call
             // Sub-agents use a lower threshold (60%) than main agent (80%) because:
             // 1. They accumulate tool results fast (read_file, design docs)
@@ -1353,6 +1362,12 @@ CRITICAL CONSTRAINTS:
 
         // Update session
         self.sessions.update(session).await;
+
+        // Clean up cancellation token
+        {
+            let mut tokens = self.cancellation_tokens.lock().await;
+            tokens.remove(&session_key);
+        }
 
         Ok(response_text)
     }

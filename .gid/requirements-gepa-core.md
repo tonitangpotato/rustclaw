@@ -40,7 +40,13 @@ The main GEPA optimization loop. Orchestrates the Select → Execute → Reflect
 
 - **GOAL-1.1** [P0]: `GEPAEngine::run()` executes the full optimization loop: select a candidate from the Pareto front, execute it on a minibatch, reflect on traces, mutate to produce a new candidate, and accept/reject based on score comparison. Each iteration performs all 5 steps in order.
 
-- **GOAL-1.2** [P0]: The engine terminates when any configured stopping criterion is met: maximum number of iterations reached, wall-clock time budget exhausted, no improvement observed for N consecutive iterations (stagnation), too many consecutive adapter failures (GOAL-7.5), or cancellation via callback (GOAL-3.7). Stagnation is defined as: no new candidate accepted to the Pareto front for N consecutive iterations where a mutation was actually attempted and rejected as dominated. Skipped iterations (due to adapter errors) do NOT count toward the stagnation counter — see GOAL-7.5 for skip/stagnation interaction. The specific criterion that triggered termination is reported in the result as one of: `MaxIterations`, `TimeBudget`, `Stagnation`, `TooManySkips`, `Cancelled`.
+- **GOAL-1.2a** [P0]: The engine terminates when maximum iterations reached or wall-clock time budget exhausted.
+
+- **GOAL-1.2b** [P0]: The engine terminates on stagnation: no new candidate accepted to the Pareto front for N consecutive iterations where a mutation was actually attempted and rejected as dominated. Skipped iterations (due to adapter errors) do NOT count toward the stagnation counter — see GOAL-7.5 for skip/stagnation interaction.
+
+- **GOAL-1.2c** [P0]: The engine terminates on too many consecutive skips (GOAL-7.5) or cancellation (GOAL-3.7).
+
+- **GOAL-1.2d** [P0]: Termination reason is reported in the result as one of: `MaxIterations`, `TimeBudget`, `Stagnation`, `TooManySkips`, `Cancelled`.
 
 - **GOAL-1.3** [P0]: At the start of each iteration, the engine selects a parent candidate from the current Pareto front. Selection must consider candidates' performance across different task subsets (Pareto-aware selection), not just global average score.
 
@@ -50,7 +56,15 @@ The main GEPA optimization loop. Orchestrates the Select → Execute → Reflect
 
 - **GOAL-1.6** [P0]: After reflection, the engine passes the parent candidate, reflection text, and accumulated ancestor lessons to the adapter for mutation. The adapter returns a new candidate with modified text parameters.
 
-- **GOAL-1.7** [P0]: After mutation, the engine calls the adapter's `evaluate` method (GOAL-3.5) on the new candidate with the current iteration's minibatch (the same minibatch sampled in step 2, on which the parent was executed in GOAL-1.4). `evaluate` is used instead of `execute` because the Accept step only needs numeric scores for dominance comparison, not full execution traces. The resulting per-example scores are stored in the evaluation cache (GOAL-6.3). **Score alignment for dominance:** dominance comparison between any two candidates is performed only on the intersection of examples that both candidates have been evaluated on. The engine also evaluates all current front members on the current minibatch (using cached scores from GOAL-6.3 where available, only calling `evaluate` for uncached `(candidate_id, example_id)` pairs). This ensures that after each Accept step, the new candidate and all front members share at least the current minibatch as common ground. **Minimum shared examples:** dominance can only be established when two candidates share at least `min_shared_examples` evaluated examples (configurable, default: `minibatch_size` — see GOAL-7.1). If the intersection is smaller, the candidates are considered mutually non-dominating (neither can dominate the other). This is conservative by design: early iterations will grow the front as candidates lack sufficient shared evaluations, but the front naturally converges as the score matrix fills via re-evaluation backfill (GOAL-8.5). **Acceptance rule:** the new candidate is accepted if it is non-dominated by any existing front member on their shared examples — i.e., no front member scores ≥ on every shared example and strictly > on at least one. After acceptance, any existing front members now dominated by the new candidate (on their shared examples, with sufficient intersection) are removed. **Edge case: mutual non-dominance** — if the new candidate and an existing front member each score higher on different examples (neither dominates the other), both remain on the front. This is the expected behavior and enables diversity. Front size is bounded by GOAL-2.4. **Re-evaluation cost budget:** front re-evaluation is capped at `max_re_eval_per_iteration` adapter `evaluate` calls per iteration (configurable, default: `pareto_max_size × minibatch_size / 2`). If the cap would be exceeded, only the front members with the stalest (oldest) scores on the current minibatch are re-evaluated, up to the cap. Remaining front members retain cached scores. See GOAL-1.7a through GOAL-1.7d for sub-requirements.
+- **GOAL-1.7** [P0]: After mutation, the engine calls the adapter's `evaluate` method (GOAL-3.5) on the new candidate with the current iteration's minibatch (the same minibatch sampled in step 2, on which the parent was executed in GOAL-1.4). `evaluate` is used instead of `execute` because the Accept step only needs numeric scores for dominance comparison, not full execution traces. The resulting per-example scores are stored in the evaluation cache (GOAL-6.3).
+
+- **GOAL-1.7a** [P0]: **Score alignment** — dominance comparison between any two candidates is performed only on the intersection of examples that both candidates have been evaluated on. The engine also evaluates all current front members on the current minibatch (using cached scores from GOAL-6.3 where available, only calling `evaluate` for uncached `(candidate_id, example_id)` pairs). This ensures that after each Accept step, the new candidate and all front members share at least the current minibatch as common ground.
+
+- **GOAL-1.7b** [P0]: **Minimum shared examples** — dominance can only be established when two candidates share at least `min_shared_examples` evaluated examples (configurable, default: `minibatch_size` — see GOAL-7.1). If the intersection is smaller, the candidates are considered mutually non-dominating (neither can dominate the other). This is conservative by design: early iterations will grow the front as candidates lack sufficient shared evaluations, but the front naturally converges as the score matrix fills via re-evaluation backfill (GOAL-8.5).
+
+- **GOAL-1.7c** [P0]: **Front re-evaluation** — the engine evaluates front members on the current minibatch (cache-aware) after each Accept step. **Re-evaluation cost budget:** front re-evaluation is capped at `max_re_eval_per_iteration` adapter `evaluate` calls per iteration (configurable, default: `pareto_max_size × minibatch_size / 2`). If the cap would be exceeded, only the front members with the stalest (oldest) scores on the current minibatch are re-evaluated, up to the cap. Remaining front members retain cached scores.
+
+- **GOAL-1.7d** [P0]: **Acceptance rule** — the new candidate is accepted if it is non-dominated by any existing front member on their shared examples — i.e., no front member scores ≥ on every shared example and strictly > on at least one. After acceptance, any existing front members now dominated by the new candidate (on their shared examples, with sufficient intersection) are removed. **Edge case: mutual non-dominance** — if the new candidate and an existing front member each score higher on different examples (neither dominates the other), both remain on the front. This is the expected behavior and enables diversity. Front size is bounded by GOAL-2.4.
 
 - **GOAL-1.8** [P0]: `GEPAEngine::run()` returns a `GEPAResult` containing: the final Pareto front (all non-dominated candidates), the single best candidate by average score, total iterations run, total wall-clock time, and the termination reason.
 
@@ -96,9 +110,11 @@ The `GEPAAdapter` trait is the integration boundary. Users implement this trait 
   - `EmptyDataError(String)` — DataLoader returned no training or validation examples (GOAL-8.7).
   - `CheckpointError { source: String }` — Failed to write or read checkpoint file.
   - `SerializationError { source: String }` — Failed to serialize/deserialize state or candidates.
-  - `Cancelled` — Optimization cancelled via the cancellation callback. The engine accepts an optional `cancel_fn: Option<Box<dyn Fn() -> bool + Send + Sync>>` in `GEPAEngine::new()`. At the start of each iteration, if `cancel_fn` returns `true`, the engine stops with termination reason `Cancelled`. If no `cancel_fn` is provided, cancellation is not checked (zero overhead). This enables external integration (e.g., Ctrl-C handler, UI cancel button) without requiring async channels.
+  - `Cancelled` — Optimization cancelled via external cancellation. The engine supports external cancellation: consumers can signal cancellation from outside the optimization loop. The engine checks for cancellation at the start of each iteration and terminates with reason `Cancelled`. When no cancellation mechanism is configured, there is zero overhead. This enables external integration (e.g., Ctrl-C handler, UI cancel button) without requiring async channels. The specific mechanism (callback, atomic flag, etc.) is a design decision.
 
   `GEPAError` implements `std::error::Error`, `Display`, and `Debug` (per GUARD-8). `AdapterError` is the only variant the adapter should return; all other variants are engine-internal.
+
+- **GOAL-3.8** [P2]: An adapter implementer can create a minimal working adapter by implementing only the 4 required methods (`execute`, `reflect`, `mutate`, `evaluate`) with < 50 lines of boilerplate. Optional methods (`merge`) have sensible defaults. The trait documentation includes a complete example adapter implementation.
 
 ### 4. Proposers
 
@@ -150,7 +166,7 @@ Candidates are the evolving text artifacts. Each candidate is a dictionary of na
 
 `GEPAConfig` controls all tunable parameters of the engine, proposers, and evaluation. Sensible defaults for all parameters. Invalid configurations are rejected at construction time with descriptive errors.
 
-- **GOAL-7.1** [P0]: `GEPAConfig` includes at minimum: maximum iterations, minibatch size (number of examples per evaluation), stagnation limit (iterations without improvement before termination), checkpoint interval, Pareto front maximum size, optional RNG seed (`Option<u64>`, default: random — if provided, enables deterministic runs per GUARD-9), max consecutive skips (`max_consecutive_skips`, default: 5, see GOAL-7.5), error policy (skip vs halt, default: skip, see GOAL-7.5), retry max (`retry_max`, default: 3), backoff strategy (fixed/exponential, default: exponential), base retry delay (default: 1s), re-evaluation interval (`re_eval_interval`, default: 5, in iterations — see GOAL-8.5), re-evaluation sample size (`re_eval_sample_size`, default: equal to `minibatch_size` — see GOAL-8.5), and minimum shared examples for dominance (`min_shared_examples`, default: equal to `minibatch_size` — see GOAL-2.1). The full parameter list is specified across GOAL-7.1 through GOAL-7.7; this goal defines the core set that every GEPAConfig must include.
+- **GOAL-7.1** [P0]: `GEPAConfig` includes at minimum: maximum iterations, minibatch size (number of examples per evaluation), stagnation limit (iterations without improvement before termination), checkpoint interval, Pareto front maximum size, optional RNG seed (`Option<u64>`, default: random — if provided, enables deterministic runs per GUARD-9), max consecutive skips (`max_consecutive_skips`, default: 5, see GOAL-7.5), error policy (skip vs halt, default: skip, see GOAL-7.5), retry max (`retry_max`, default: 3), backoff strategy (fixed/exponential, default: exponential), base retry delay (default: 1s), re-evaluation interval (`re_eval_interval`, default: 5, in iterations — see GOAL-8.5), re-evaluation sample size (`re_eval_sample_size`, default: equal to `minibatch_size` — see GOAL-8.5), minimum shared examples for dominance (`min_shared_examples`, default: equal to `minibatch_size` — see GOAL-2.1), and maximum re-evaluation calls per iteration (`max_re_eval_per_iteration`, default: `pareto_max_size × minibatch_size / 2` — see GOAL-1.7c). The full parameter list is specified across GOAL-7.1 through GOAL-7.7; this goal defines the core set that every GEPAConfig must include.
 
 - **GOAL-7.2** [P0]: All config parameters have sensible defaults. A user can construct `GEPAConfig::default()` and run the engine without setting any parameter. Defaults: max_iterations=100, minibatch_size=16, stagnation_limit=20, checkpoint_interval=1, pareto_max_size=50.
 
@@ -158,9 +174,9 @@ Candidates are the evolving text artifacts. Each candidate is a dictionary of na
 
 - **GOAL-7.4** [P1]: `GEPAConfig` is serializable (serde) so it can be saved alongside checkpoints for full reproducibility of a run.
 
-- **GOAL-7.5** [P1]: Config includes retry policy for adapter errors: max retries per call (default: 3), backoff strategy (fixed or exponential, default: exponential), and base delay (default: 1 second). After exhausting retries, the engine either skips the iteration or halts, based on a configurable error policy (skip vs halt, default: skip). **Interaction with stagnation (GOAL-1.2):** a skipped iteration does NOT count toward the stagnation counter — stagnation only increments when a mutation was attempted and the resulting candidate was rejected as dominated. Skipped iterations are tracked separately in run statistics (GOAL-6.5) as `skipped_iterations`. If consecutive skipped iterations exceed `max_consecutive_skips` (configurable, default: 5), the engine halts with termination reason `TooManySkips` regardless of the error policy, to prevent infinite loops on persistently failing adapters.
+- **GOAL-7.5** [P1]: Config includes retry policy for adapter errors: max retries per call (default: 3), backoff strategy (fixed or exponential, default: exponential), and base delay (default: 1 second). After exhausting retries, the engine either skips the iteration or halts, based on a configurable error policy (skip vs halt, default: skip). **Interaction with stagnation (GOAL-1.2b):** a skipped iteration does NOT count toward the stagnation counter — stagnation only increments when a mutation was attempted and the resulting candidate was rejected as dominated. Skipped iterations are tracked separately in run statistics (GOAL-6.5) as `skipped_iterations`. If consecutive skipped iterations exceed `max_consecutive_skips` (configurable, default: 5), the engine halts with termination reason `TooManySkips` regardless of the error policy, to prevent infinite loops on persistently failing adapters.
 
-- **GOAL-7.6** [P2]: Config includes optional wall-clock time budget (Duration). The engine checks elapsed time at the start of each iteration and terminates gracefully if the budget is exceeded. This is the configuration surface for the stopping criterion described in GOAL-1.2.
+- **GOAL-7.6** [P2]: Config includes optional wall-clock time budget (Duration). The engine checks elapsed time at the start of each iteration and terminates gracefully if the budget is exceeded. This is the configuration surface for the stopping criterion described in GOAL-1.2a.
 
 - **GOAL-7.7** [P2]: Config includes merge proposer settings: enabled (bool, default: false), merge interval (every N iterations, default: 10), and merge selection strategy (complementary vs random).
 
@@ -194,7 +210,7 @@ Observable event system for monitoring, logging, visualization, and integration 
 
 - **GOAL-9.4** [P1]: Callbacks receive an immutable reference to the event data. Callbacks must not block the optimization loop — they execute synchronously but are expected to be fast (logging, metric recording). Long-running callbacks should spawn their own tasks.
 
-- **GOAL-9.5** [P2]: Built-in `TracingCallback` that logs all events via the `tracing` crate at appropriate log levels: `info` for iteration summaries, `debug` for individual step completions, `trace` for full event payloads.
+- **GOAL-9.5** [P1]: The engine emits structured log records via the `tracing` crate at appropriate levels: INFO for iteration start/end and candidate acceptance, DEBUG for selection details and cache hits/misses, WARN for adapter retries and stagnation warnings, ERROR for unrecoverable failures. Log records include span context (iteration number, candidate ID) for filtering. A built-in `TracingCallback` is provided that logs all events via `tracing` at these levels, including `trace` level for full event payloads.
 
 ## Guards
 
@@ -215,6 +231,14 @@ Observable event system for monitoring, logging, visualization, and integration 
 - **GUARD-8** [soft]: All public types in the crate implement `Debug`. All error types implement `std::error::Error` and `Display` with descriptive messages. No `.unwrap()` or `.expect()` on fallible operations in library code (only in tests).
 
 - **GUARD-9** [hard]: The engine must be deterministic given the same RNG seed, config, adapter responses, and data ordering. Two runs with identical inputs (including a user-provided RNG seed) produce identical candidate histories, Pareto fronts, and final results. All engine-internal randomness (minibatch sampling, Pareto front selection, tie-breaking, etc.) draws from a single seeded RNG instance in a deterministic call order — the RNG is never accessed from multiple threads concurrently, and the sequence of draw operations is fixed by the algorithm structure. Non-determinism may only come from the adapter (LLM responses).
+
+## Risks
+
+High-risk GOALs requiring prototype/spike before full implementation:
+
+- **Score alignment with sparse matrices (GOAL-1.7a)** — Dominance comparison on sparse, incrementally-filled score matrices is algorithmically subtle. Correctness of intersection-based comparison and minimum shared examples threshold needs validation with synthetic data before production implementation.
+- **Crowding distance at high M (GOAL-2.4)** — Crowding distance computation with many objectives (high M) may produce unintuitive pruning decisions. Needs prototyping to validate that the right candidates are preserved.
+- **Epoch boundary sampling correctness (GOAL-8.3)** — Epoch-based sampling with boundary concatenation and seeded RNG must guarantee every example is used exactly once per epoch. Off-by-one errors here would silently bias the optimization. Requires thorough property-based testing.
 
 ## Out of Scope
 
@@ -238,4 +262,4 @@ No other dependencies without explicit justification. In particular: no HTTP cli
 
 ---
 
-**Summary: 59 GOALs** (35 P0 / 18 P1 / 6 P2) **+ 9 GUARDs** (6 hard / 3 soft) **across 9 modules**
+**Summary: 68 GOALs** (42 P0 / 20 P1 / 6 P2) **+ 9 GUARDs** (6 hard / 3 soft) **across 9 modules**

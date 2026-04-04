@@ -38,6 +38,10 @@ Design docs reviewed by LLMs tend to need 5-6 iterative rounds because each pass
 
 Read the design document completely, then run ALL checks below. Do not stop after finding the first issue.
 
+### Phase 0: Document Size Check
+
+0. **Document size** — Count total components (§3.x sections). If >8 components in a single document → **Critical finding**: document must be split into feature-level design docs (see draft-design skill for structure). A single design doc should have ≤8 components. Cross-cutting concerns stay in the master doc; per-feature components are split by feature.
+
 ### Phase 1: Structural Completeness
 
 1. **Every type fully defined?** — All structs, enums, traits mentioned in prose must have complete field/variant definitions somewhere in the doc. No "TBD" or implied fields.

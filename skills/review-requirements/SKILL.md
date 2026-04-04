@@ -39,6 +39,10 @@ Requirements docs are the contract between design and implementation. Vague requ
 
 Read the entire requirements document, then run ALL checks below. Do not stop after finding the first issue.
 
+### Phase 0: Document Size Check
+
+0. **Document size** — Count total GOALs. If >15 GOALs in a single document → **Critical finding**: document must be split into feature-level requirements (see draft-requirements skill for structure). A single requirements doc should have ≤15 GOALs. GUARDs stay in the master doc; GOALs are split by feature. This is the root fix for review quality — no complex multi-agent architecture needed, just smaller documents.
+
 ### Phase 1: Individual Requirement Quality
 
 1. **Specificity** — Each GOAL/requirement must be specific enough that two engineers would implement it the same way. Flag any that use vague language: "should be fast", "user-friendly", "robust", "scalable", "appropriate", "as needed".

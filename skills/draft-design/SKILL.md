@@ -37,14 +37,54 @@ Design documents define **HOW** the system is built. Every section is numbered s
 
 ## Prerequisites
 
-- `requirements.md` must exist (or equivalent requirements context)
-- Read requirements first — every design decision should trace back to a GOAL
+- Requirements must exist in one of these locations:
+  - Single doc: `.gid/requirements.md` or `REQUIREMENTS.md`
+  - Multi-doc: `.gid/requirements.md` (master with GUARDs) + `.gid/features/{feature}/requirements.md` (per-feature GOALs)
+- **Read ALL requirements first** — check both master and feature-level docs if `.gid/features/` exists
+- Every design decision should trace back to a GOAL
+
+## Document Size Rule: Feature-Level Splitting
+
+**A single design document MUST NOT exceed ~8 components (sections 3.1-3.N).** If it does, split into feature-level documents.
+
+**Why:** Design docs with 10+ components exceed context limits during implementation. Sub-agents implementing a task need to read the relevant design section — a 15-component monolith forces them to read everything. Smaller, focused docs = better implementation quality.
+
+**Structure for large projects:**
+
+```
+.gid/
+├── design.md                    ← Master: architecture overview, cross-cutting concerns, component index
+└── features/
+    ├── auth/design.md           ← 4-6 components for auth
+    ├── pipeline/design.md       ← 4-6 components for pipeline
+    └── cli/design.md            ← 4-6 components for CLI
+```
+
+**Master design.md contains:**
+- §1 Overview (architecture summary, key trade-offs)
+- §2 Architecture (high-level diagram showing feature boundaries)
+- §3 Cross-cutting concerns (shared types, error handling, config)
+- §4 Feature index with references to feature docs
+- §5 Data flow between features
+- NO per-feature component details — those live in feature docs
+
+**Each feature design.md contains:**
+- §1 Feature overview + requirements coverage (which GOALs this addresses)
+- §2 Components (3.1-3.N style, 4-8 components max)
+- §3 Internal data flow
+- §4 Integration points (references to other features or master doc)
+- §5 Guard checks specific to this feature
+
+**When to split:**
+- Total components > 8 → split upfront
+- If requirements are already split into features → design follows the same structure
+- Single feature with 8+ components → that feature should be split further
 
 ## Output Location
 
 Depends on project structure:
-- **Simple project (single feature):** `.gid/design.md`
-- **Multi-feature project:** `.gid/features/{feature-name}/design.md`
+- **Simple project (≤8 components):** `.gid/design.md`
+- **Multi-feature project:** Master at `.gid/design.md` + features at `.gid/features/{feature-name}/design.md`
 - **Internal/draft designs:** `docs/DESIGN-{name}.md` (gitignored, use `git add -f`)
 
 The `.gid/` location is canonical — `assemble_task_context()` resolves design docs from there via the feature node's `design_doc` metadata.
@@ -333,8 +373,11 @@ See 3.1 for the struct definitions.
 ## Process
 
 ### Step 1: Read Requirements
-- Load `requirements.md`
-- Map every GOAL and GUARD — each must be addressed
+- Check for multi-doc structure: `ls .gid/features/` — if feature dirs exist, read ALL feature requirements
+- Single doc: load `.gid/requirements.md` or `REQUIREMENTS.md`
+- Multi-doc: load master `.gid/requirements.md` (GUARDs + feature index) + each `.gid/features/{feature}/requirements.md` (GOALs)
+- Map every GOAL and GUARD — each must be addressed in the design
+- For multi-feature projects: each feature's design doc should address that feature's GOALs
 - `engram recall "{project} architecture decisions"` for past context
 
 ### Step 2: Decompose into Components
@@ -350,8 +393,8 @@ See 3.1 for the struct definitions.
 
 ### Step 4: Self-Review Checklist
 Before presenting, verify:
-- [ ] **Coverage**: Every GOAL is addressed by at least one component (`Satisfies:` line)
-- [ ] **Guards**: Every GUARD is accounted for (error handling, component constraints, or §7 guard checks)
+- [ ] **Coverage**: Every GOAL (across all feature docs) is addressed by at least one component (`Satisfies:` line)
+- [ ] **Guards**: Every GUARD (from master doc) is accounted for (error handling, component constraints, or §7 guard checks)
 - [ ] **Signatures complete**: No `...`, no `TODO`, no pseudocode
 - [ ] **Numbering**: Sequential, no gaps (1-8 top-level, 3.1-3.N components)
 - [ ] **Self-contained**: Each 3.x section is understandable without reading other sections

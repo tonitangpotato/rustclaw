@@ -453,6 +453,7 @@ impl RitualRunner {
         let root = &self.project_root;
 
         let has_requirements = root.join("REQUIREMENTS.md").exists()
+            || root.join(".gid/requirements.md").exists()
             || root.join(".gid").is_dir() && std::fs::read_dir(root.join(".gid"))
                 .map(|entries| entries
                     .filter_map(|e| e.ok())
@@ -460,10 +461,27 @@ impl RitualRunner {
                         let name = e.file_name().to_string_lossy().to_string();
                         name.starts_with("requirements-") && name.ends_with(".md")
                     }))
+                .unwrap_or(false)
+            // Multi-doc: feature-level requirements under .gid/features/
+            || root.join(".gid/features").is_dir() && std::fs::read_dir(root.join(".gid/features"))
+                .map(|entries| entries
+                    .filter_map(|e| e.ok())
+                    .any(|e| {
+                        e.path().join("requirements.md").exists()
+                    }))
                 .unwrap_or(false);
 
         let has_design = root.join("DESIGN.md").exists()
-            || root.join(".gid/DESIGN.md").exists();
+            || root.join(".gid/DESIGN.md").exists()
+            || root.join(".gid/design.md").exists()
+            // Multi-doc: feature-level design docs
+            || root.join(".gid/features").is_dir() && std::fs::read_dir(root.join(".gid/features"))
+                .map(|entries| entries
+                    .filter_map(|e| e.ok())
+                    .any(|e| {
+                        e.path().join("design.md").exists()
+                    }))
+                .unwrap_or(false);
 
         let has_graph = root.join(".gid/graph.yml").exists()
             || root.join("graph.yml").exists();
@@ -603,7 +621,7 @@ Guidelines:
                         Ok((RitualEvent::TriageCompleted(result), tokens_used))
                     }
                     Err(e) => {
-                        tracing::warn!("Failed to parse triage JSON: {}. Response: {}. Defaulting to full flow.", e, &response_text[..response_text.len().min(200)]);
+                        tracing::warn!("Failed to parse triage JSON: {}. Response: {}. Defaulting to full flow.", e, &response_text[..response_text.floor_char_boundary(200)]);
                         Ok((RitualEvent::TriageCompleted(TriageResult {
                             clarity: "clear".into(),
                             clarify_questions: vec![],
