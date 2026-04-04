@@ -34,17 +34,17 @@ Throughout this document, "task subset" refers to a subset of training examples.
 
 | # | Feature | File | GOALs | Priority Mix |
 |---|---------|------|-------|-------------|
-| 1 | Core Engine | `requirements-01-core-engine.md` | 14 | 11 P0, 2 P1, 1 P2 |
+| 1 | Core Engine | `requirements-01-core-engine.md` | 18 | 15 P0, 2 P1, 1 P2 |
 | 2 | Pareto Front | `requirements-02-pareto-front.md` | 6 | 3 P0, 3 P1 |
-| 3 | Adapter Interface | `requirements-03-adapter.md` | 7 | 5 P0, 2 P1 |
+| 3 | Adapter Interface | `requirements-03-adapter.md` | 8 | 5 P0, 2 P1, 1 P2 |
 | 4 | Proposers | `requirements-04-proposers.md` | 5 | 2 P0, 1 P1, 2 P2 |
 | 5 | Candidate Management | `requirements-05-candidates.md` | 6 | 4 P0, 2 P1 |
 | 6 | State Management | `requirements-06-state.md` | 6 | 3 P0, 2 P1, 1 P2 |
 | 7 | Configuration | `requirements-07-config.md` | 7 | 3 P0, 2 P1, 2 P2 |
-| 8 | Data Loading | `requirements-08-data-loading.md` | 7 | 4 P0, 2 P1, 1 P2 |
-| 9 | Callback / Events | `requirements-09-events.md` | 10 | 2 P0, 5 P1, 3 P2 |
+| 8 | Data Loading | `requirements-08-data-loading.md` | 7 | 5 P0, 2 P1 |
+| 9 | Callback / Events | `requirements-09-events.md` | 5 | 2 P0, 3 P1 |
 
-**Total: 68 GOALs** (42 P0 / 20 P1 / 6 P2) + **9 GUARDs** (6 hard / 3 soft)
+**Total: 68 GOALs** (42 P0 / 19 P1 / 7 P2) + **9 GUARDs** (6 hard / 3 soft)
 
 ## Guards
 

@@ -1333,13 +1333,13 @@ Choose a model:", current),
             .bytes()
             .await?;
 
-        // Save to temp file
-        let ogg_path = "/tmp/rustclaw_voice_in.ogg";
-        tokio::fs::write(ogg_path, &file_bytes).await?;
+        // Save to temp file with unique name to avoid race conditions
+        let ogg_path = format!("/tmp/rustclaw_voice_{}.ogg", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("tmp"));
+        tokio::fs::write(&ogg_path, &file_bytes).await?;
         tracing::debug!("Downloaded voice to {}", ogg_path);
 
         // Step 3: Transcribe using STT
-        let transcription = stt::transcribe(ogg_path).await?;
+        let transcription = stt::transcribe(&ogg_path).await?;
         tracing::info!("Transcribed: {}", { let _end = transcription.len().min(50); let _end = transcription.floor_char_boundary(_end); &transcription[.._end] });
 
         // Clean up the input file

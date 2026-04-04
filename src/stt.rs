@@ -24,8 +24,13 @@ pub async fn transcribe(ogg_path: &str) -> anyhow::Result<String> {
         anyhow::bail!("Audio file not found: {}", ogg_path.display());
     }
 
-    let wav_path = "/tmp/rustclaw_stt.wav";
-    let out_base = "/tmp/rustclaw_stt_out";
+    // Use unique temp files to allow parallel STT
+    let uid = std::process::id() ^ (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos());
+    let wav_path = format!("/tmp/rustclaw_stt_{}.wav", uid);
+    let out_base = format!("/tmp/rustclaw_stt_out_{}", uid);
 
     // Step 1: Convert OGG to WAV using ffmpeg
     let ffmpeg_result = Command::new("ffmpeg")
@@ -34,7 +39,7 @@ pub async fn transcribe(ogg_path: &str) -> anyhow::Result<String> {
             "-i", ogg_path.to_str().unwrap_or(""),
             "-ar", "16000", // 16kHz sample rate
             "-ac", "1",     // Mono
-            wav_path,
+            &wav_path,
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -58,9 +63,9 @@ pub async fn transcribe(ogg_path: &str) -> anyhow::Result<String> {
     // Step 2: Try whisper-cli (whisper.cpp) first, then fall back to Python whisper
     let model_path = DEFAULT_MODEL;
     if Path::new(model_path).exists() {
-        match run_whisper_cpp(wav_path, model_path, out_base).await {
+        match run_whisper_cpp(&wav_path, model_path, &out_base).await {
             Ok(text) => {
-                let _ = tokio::fs::remove_file(wav_path).await;
+                let _ = tokio::fs::remove_file(&wav_path).await;
                 return Ok(text);
             }
             Err(e) => {
@@ -72,27 +77,27 @@ pub async fn transcribe(ogg_path: &str) -> anyhow::Result<String> {
     }
 
     // Fallback: Python whisper
-    match run_whisper_python(wav_path, "/tmp").await {
+    match run_whisper_python(&wav_path, "/tmp").await {
         Ok(()) => {}
         Err(e) => {
             tracing::warn!("Python whisper also failed: {}", e);
-            let _ = tokio::fs::remove_file(wav_path).await;
+            let _ = tokio::fs::remove_file(&wav_path).await;
             return Ok("[Voice message received - STT not configured]".to_string());
         }
     }
 
-    let python_txt = "/tmp/rustclaw_stt.txt";
-    let transcription = match tokio::fs::read_to_string(python_txt).await {
+    let python_txt = format!("/tmp/rustclaw_stt_{}.txt", uid);
+    let transcription = match tokio::fs::read_to_string(&python_txt).await {
         Ok(text) => text.trim().to_string(),
         Err(e) => {
             tracing::warn!("Failed to read transcription: {}", e);
-            let _ = tokio::fs::remove_file(wav_path).await;
+            let _ = tokio::fs::remove_file(&wav_path).await;
             return Ok("[Voice message received - transcription failed]".to_string());
         }
     };
 
-    let _ = tokio::fs::remove_file(wav_path).await;
-    let _ = tokio::fs::remove_file(python_txt).await;
+    let _ = tokio::fs::remove_file(&wav_path).await;
+    let _ = tokio::fs::remove_file(&python_txt).await;
 
     if transcription.is_empty() {
         Ok("[Voice message received - no speech detected]".to_string())
