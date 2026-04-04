@@ -423,8 +423,11 @@ pub trait LlmClient: Send + Sync {
 
 /// Anthropic Claude client (supports both API key and OAuth token).
 /// OAuth header constants for Claude Max / Claude Code compatibility.
-const OAUTH_BETA_HEADER: &str = "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14,prompt-caching-2024-07-31,prompt-caching-scope-2026-01-05";
-const OAUTH_USER_AGENT: &str = "claude-cli/2.1.62";
+// Match CC CLI 2.1.92 exactly — 8 beta flags, no extras
+const OAUTH_BETA_HEADER: &str = "claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24";
+const OAUTH_USER_AGENT: &str = "claude-cli/2.1.92 (external, cli)";
+const CC_BILLING_SALT: &str = "59cf53e54c78";
+const CC_VERSION: &str = "2.1.92";
 
 /// Claude Code identity string — REQUIRED for OAuth tokens to access non-haiku models.
 /// Without this in the system prompt, Anthropic's API restricts OAuth to haiku-only.

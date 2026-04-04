@@ -952,18 +952,75 @@ Guidelines:
 
         let subagent = runner.spawn_agent_with_options(&agent_config, max_iterations)?;
 
+        // For review phases, enumerate feature docs so the sub-agent reviews sequentially
+        let mut extra_context = String::new();
+        if name.starts_with("review-") {
+            let features_dir = self.project_root.join(".gid/features");
+            if features_dir.is_dir() {
+                let doc_suffix = match name {
+                    "review-requirements" => "requirements",
+                    "review-design" => "design",
+                    _ => "",
+                };
+                if !doc_suffix.is_empty() {
+                    let mut docs: Vec<String> = Vec::new();
+                    if let Ok(entries) = std::fs::read_dir(&features_dir) {
+                        for entry in entries.filter_map(|e| e.ok()) {
+                            let feature_dir = entry.path();
+                            if feature_dir.is_dir() {
+                                if let Ok(files) = std::fs::read_dir(&feature_dir) {
+                                    for file in files.filter_map(|f| f.ok()) {
+                                        let fname = file.file_name().to_string_lossy().to_string();
+                                        if fname.contains(doc_suffix) && fname.ends_with(".md") {
+                                            let full = feature_dir.join(&fname);
+                                            let rel = full.strip_prefix(&self.project_root)
+                                                .unwrap_or(&full);
+                                            docs.push(rel.display().to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Also check top-level .gid/ docs
+                    let gid_dir = self.project_root.join(".gid");
+                    if let Ok(entries) = std::fs::read_dir(&gid_dir) {
+                        for entry in entries.filter_map(|e| e.ok()) {
+                            let fname = entry.file_name().to_string_lossy().to_string();
+                            if fname.contains(doc_suffix) && fname.ends_with(".md") && entry.path().is_file() {
+                                docs.push(format!(".gid/{}", fname));
+                            }
+                        }
+                    }
+                    if !docs.is_empty() {
+                        docs.sort();
+                        extra_context = format!(
+                            "\n\n## DOCUMENTS TO REVIEW (sequentially, one at a time)\n\
+                             Review each document below. Write one review file per document to `.gid/reviews/`.\n\
+                             Do NOT spawn sub-agents. Process each document yourself.\n\n{}",
+                            docs.iter().enumerate()
+                                .map(|(i, d)| format!("{}. {}", i + 1, d))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        );
+                    }
+                }
+            }
+        }
+
         // Compose the task for the sub-agent
         let task = format!(
             "You are executing a ritual phase: **{}**\n\n\
              Working directory: {}\n\
              Allowed tools: {}\n\n\
-             {}\n\n\
+             {}{}\n\n\
              Complete the task using the tools. Write all outputs to files in the working directory.\n\
              When done, summarize what you did.",
             name,
             self.project_root.display(),
             tool_names.join(", "),
             skill_prompt,
+            extra_context,
         );
 
         tracing::info!(
