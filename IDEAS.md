@@ -3,6 +3,49 @@
 > All ideas captured by RustClaw's Idea Intake pipeline.
 > Format: newest first. Each idea has a unique ID for cross-referencing.
 
+## IDEA-20260405-01: Engram 作为个人认知层标准协议
+- **Date**: 2026-04-05
+- **Source**: potato insight（Telegram 对话）
+- **Category**: product/business
+- **Tags**: #engram #cognition #memory #LLM #protocol #infrastructure #商业化
+- **Effort**: High
+- **Domain**: 💡 business + 🧠 research
+
+### Summary
+大模型 = 全人类共识记忆（静态），Engram = 个人记忆层（动态）。Engram 不只是给 agent 加记忆的工具，而是**个人认知层的标准协议**。每个人的 engram DB 就是 "认知指纹"，可以插到任何 LLM 上。同时 Engram 的认知机制（ACT-R 衰减、Hebbian 关联、Consolidation、情感权重）可以反哺 LLM 训练和推理。
+
+### Key Points
+- **三层记忆架构**：LLM（全人类共识）→ Engram（个人认知层）→ 融合后的个性化智能
+- **市面竞品只做了最浅层**：Mem0/Zep/LangMem 本质是 key-value + RAG 检索，不模拟认知过程
+- **Engram 的差异化**：ACT-R 激活衰减、Hebbian 关联学习、情感权重、Consolidation（类似睡眠记忆整合）
+- **反哺 LLM 的具体方向**：
+  - 记忆衰减曲线 → 训练数据时效性权重（旧知识降权而不是删除）
+  - Hebbian 关联 → 比 attention 更高效的长期知识链接
+  - Consolidation → continual learning 的遗忘防护
+  - 个人记忆格式标准化 → 统一 schema 做 fine-tune 或 prompt 注入，效果远比 RAG 好
+- **定位升维**：卖的不是存储，是**认知基础设施**
+
+### Potential Value
+- 从 "又一个 RAG memory" 升维到 "个人认知协议标准"
+- 如果 engram schema 成为事实标准，所有 AI agent 都需要兼容
+- 可以走 open-core：协议/crate 开源 + 云端同步/跨设备/企业版付费
+- 与 xinfluencer、AgentVerse 等产品形成数据飞轮——用户的 engram 越用越有价值
+
+### Action Items
+- [ ] 整理 "Engram as Cognitive Protocol" 的 one-pager — 作为商业化定位文档 [P1]
+- [ ] 在 MEMORY-SYSTEM-RESEARCH.md 7层路线图中加入 "Protocol 标准化" 层 [P1]
+- [ ] 调研 MCP (Model Context Protocol) 等现有协议，看 engram 能否定义记忆层标准 [P2]
+- [ ] 设计 engram schema v3：考虑跨模型、跨 agent、跨设备的统一记忆格式 [P2]
+
+### Connections
+- 直接关联：MEMORY-SYSTEM-RESEARCH.md（7层改进路线图）
+- 直接关联：ENGRAM-V2-DESIGN.md（当前架构基础）
+- 关联 IDEA-20260403-02（Knowledge Compiler）— 知识管理 + 个人认知层是同一个方向
+- 关联 IDEA-20260403-03（Meta-Harness）— harness 的执行记忆也应该存入 engram
+
+### Status: 💡 New
+---
+
 ## IDEA-20260403-03: Harness 自我优化系统（Meta-Harness）
 - **Date**: 2026-04-03
 - **Source**: potato voice + Meta-Harness 论文 intake

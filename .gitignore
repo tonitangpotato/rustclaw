@@ -10,3 +10,6 @@ target/
 *.ogg
 *.mp3
 hello.py
+
+# Internal docs (not for public repo)
+docs/
