@@ -43,13 +43,13 @@ Check the beginning of your prompt for a `[REVIEW_DEPTH: quick|standard|full]` d
 
 | Depth | Triage Size | Phases to Run | Checks |
 |---|---|---|---|
-| **quick** | small | Phase 0 + Phase 1 + Phase 4 | 0-5, 16-20 (11 checks) |
-| **standard** | medium | Phase 0-5 | 0-24 (25 checks) |
-| **full** | large (default) | Phase 0-6 | All 27 checks |
+| **quick** | small | Phase 0 + Phase 1 + Phase 4 | 0-6, 17-21 (12 checks) |
+| **standard** | medium | Phase 0-5 | 0-25 (26 checks) |
+| **full** | large (default) | Phase 0-6 | All 28 checks |
 
 **If no `[REVIEW_DEPTH]` directive is present, default to `full`.**
 
-For `quick` reviews: skip coverage & gaps, consistency checks, traceability, and stakeholder alignment. Focus on individual requirement quality and implementability only — the goal is fast validation that each requirement is specific and testable.
+For `quick` reviews: skip coverage & gaps, consistency checks, traceability, and stakeholder alignment. Focus on individual requirement quality (including implementation leakage detection) and implementability only — the goal is fast validation that each requirement is specific, testable, and not a disguised design decision.
 
 For `standard` reviews: skip Phase 6 (Stakeholder Alignment). These checks are valuable but less critical for incremental requirement updates.
 
@@ -68,49 +68,50 @@ Read the entire requirements document, then run the checks applicable to your re
 3. **Measurability** — Quantitative requirements must have concrete numbers. "Low latency" → flag. "<200ms p95" → pass. "High availability" → flag. "99.9% uptime" → pass.
 4. **Atomicity** — Each requirement should describe ONE thing. Compound requirements ("System does X AND Y AND Z") should be split. Each should be independently implementable and testable.
 5. **Completeness of each requirement** — Does each requirement specify: (a) the actor/trigger, (b) the expected behavior, (c) the expected outcome? Missing any of these → flag.
+6. **Implementation leakage** — Apply the Substitution Test to every GOAL: "Could someone satisfy this with a completely different internal implementation?" If the GOAL specifies field names, schema layouts, algorithm choices, function signatures, enum variants, or internal data structures → it's a design decision disguised as a requirement. This is the #1 source of requirements that pass all other checks but cause endless review cycles — the contradictions are structural (design decisions conflicting with each other), not editorial. **Especially watch for infrastructure/framework features** where the "product" is a schema or API — the schema details feel like requirements but aren't. Strip field names and code identifiers; what remains should still be a valid, verifiable requirement.
 
 ### Phase 2: Coverage & Gaps
 
-6. **Happy path coverage** — Are all normal user flows covered by at least one requirement? Trace through: user starts → main actions → expected outcomes.
-7. **Error/edge case coverage** — What happens when things go wrong? Network failure, invalid input, empty data, concurrent access, timeout. Each error scenario should have a requirement or explicit non-requirement.
-8. **Non-functional requirements** — Check for presence of:
+7. **Happy path coverage** — Are all normal user flows covered by at least one requirement? Trace through: user starts → main actions → expected outcomes.
+8. **Error/edge case coverage** — What happens when things go wrong? Network failure, invalid input, empty data, concurrent access, timeout. Each error scenario should have a requirement or explicit non-requirement.
+9. **Non-functional requirements** — Check for presence of:
    - Performance (latency, throughput, resource limits)
    - Security (auth, authz, data protection, input validation)
    - Reliability (error recovery, data durability, retry behavior)
    - Observability (logging, metrics, alerting)
    - Scalability (data volume, user count, growth projections)
    If any category is missing entirely → flag (it might be intentionally out of scope, but should be stated).
-9. **Boundary conditions** — For any numeric parameter: what are min/max values? What happens at 0? At MAX_INT? Empty string? Null?
-10. **State transitions** — If the system has states, are transitions between ALL states defined? Any state with no exit? Any state unreachable from the initial state?
+10. **Boundary conditions** — For any numeric parameter: what are min/max values? What happens at 0? At MAX_INT? Empty string? Null?
+11. **State transitions** — If the system has states, are transitions between ALL states defined? Any state with no exit? Any state unreachable from the initial state?
 
 ### Phase 3: Consistency & Contradictions
 
-11. **Internal consistency** — Do any two requirements contradict each other? Check every pair of requirements that touch the same feature/component.
-12. **Terminology consistency** — Same concept, same name everywhere. Check for synonyms used interchangeably (e.g., "user" vs "client" vs "customer" vs "account").
-13. **Priority consistency** — If requirements have priorities, do high-priority items depend on low-priority items? That's a priority inversion → flag.
-14. **Numbering/referencing** — Do cross-references resolve? If GOAL-42 says "see GOAL-15", does GOAL-15 exist and is it relevant?
-15. **GUARDs vs GOALs alignment** — GUARDs (constraints) should not contradict GOALs (features). A GUARD that makes a GOAL unimplementable → critical flag.
+12. **Internal consistency** — Do any two requirements contradict each other? Check every pair of requirements that touch the same feature/component.
+13. **Terminology consistency** — Same concept, same name everywhere. Check for synonyms used interchangeably (e.g., "user" vs "client" vs "customer" vs "account").
+14. **Priority consistency** — If requirements have priorities, do high-priority items depend on low-priority items? That's a priority inversion → flag.
+15. **Numbering/referencing** — Do cross-references resolve? If GOAL-42 says "see GOAL-15", does GOAL-15 exist and is it relevant?
+16. **GUARDs vs GOALs alignment** — GUARDs (constraints) should not contradict GOALs (features). A GUARD that makes a GOAL unimplementable → critical flag.
 
 ### Phase 4: Implementability
 
-16. **Technology assumptions** — Does a requirement implicitly assume a specific technology? If so, is that technology choice documented and justified? "Use WebSocket for real-time" is fine if justified; "real-time updates" without specifying mechanism is ambiguous.
-17. **External dependencies** — Requirements that depend on external services/APIs: are those dependencies explicitly named? Version pinned? What happens if the dependency is unavailable?
-18. **Data requirements** — For features that need data: where does the data come from? What format? How much? How often updated? Storage requirements?
-19. **Migration/compatibility** — If replacing existing functionality: is backward compatibility required? Data migration plan? Feature parity checklist?
-20. **Scope boundaries** — Are explicit non-requirements/non-goals stated? Without them, scope creep is inevitable. Every "we won't do X" is as valuable as "we will do Y".
+17. **Technology assumptions** — Does a requirement implicitly assume a specific technology? If so, is that technology choice documented and justified? "Use WebSocket for real-time" is fine if justified; "real-time updates" without specifying mechanism is ambiguous.
+18. **External dependencies** — Requirements that depend on external services/APIs: are those dependencies explicitly named? Version pinned? What happens if the dependency is unavailable?
+19. **Data requirements** — For features that need data: where does the data come from? What format? How much? How often updated? Storage requirements?
+20. **Migration/compatibility** — If replacing existing functionality: is backward compatibility required? Data migration plan? Feature parity checklist?
+21. **Scope boundaries** — Are explicit non-requirements/non-goals stated? Without them, scope creep is inevitable. Every "we won't do X" is as valuable as "we will do Y".
 
 ### Phase 5: Traceability & Organization
 
-21. **Unique identifiers** — Every requirement has a unique ID (GOAL-1, GUARD-1, etc.)? No duplicates? No gaps in numbering that suggest deleted requirements without explanation?
-22. **Grouping/categorization** — Are requirements organized by feature/domain? Or is it a flat list where related requirements are scattered?
-23. **Dependency graph** — Are dependencies between requirements explicit? Which requirements must be implemented before others? Any circular dependencies?
-24. **Acceptance criteria** — Does each requirement (or at least each epic/feature group) have clear acceptance criteria that differ from the requirement itself?
+22. **Unique identifiers** — Every requirement has a unique ID (GOAL-1, GUARD-1, etc.)? No duplicates? No gaps in numbering that suggest deleted requirements without explanation?
+23. **Grouping/categorization** — Are requirements organized by feature/domain? Or is it a flat list where related requirements are scattered?
+24. **Dependency graph** — Are dependencies between requirements explicit? Which requirements must be implemented before others? Any circular dependencies?
+25. **Acceptance criteria** — Does each requirement (or at least each epic/feature group) have clear acceptance criteria that differ from the requirement itself?
 
 ### Phase 6: Stakeholder Alignment
 
-25. **User perspective** — Are requirements written from the user's perspective where appropriate? Or are they all system-internal ("the database shall...")? User-facing features need user-centric language.
-26. **Success metrics** — How will you know the requirements are met in production? Are there observable metrics beyond "tests pass"?
-27. **Risk identification** — Are high-risk requirements identified? Complex, novel, or uncertain requirements should be flagged for prototyping/spike.
+26. **User perspective** — Are requirements written from the user's perspective where appropriate? Or are they all system-internal ("the database shall...")? User-facing features need user-centric language.
+27. **Success metrics** — How will you know the requirements are met in production? Are there observable metrics beyond "tests pass"?
+28. **Risk identification** — Are high-risk requirements identified? Complex, novel, or uncertain requirements should be flagged for prototyping/spike.
 
 ## Output Format
 
@@ -164,7 +165,7 @@ After writing the review file, report a **brief summary** to the user:
 
 ## Rules
 
-- **Run ALL 27 checks.** Don't skip checks even if early ones find nothing.
+- **Run ALL 28 checks.** Don't skip checks even if early ones find nothing.
 - **No "looks good" without evidence.** For each passed check, note what you verified and the count.
 - **Check EVERY requirement individually for checks #1-5.** Don't just sample — exhaustive review.
 - **Build the coverage matrix.** This is the most valuable output — it shows what's missing, not just what's wrong.

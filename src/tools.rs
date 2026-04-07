@@ -28,7 +28,6 @@ use gid_core::{
     working_mem,
     ignore,
     ritual::scope::{default_scope_for_phase, ToolScope},
-    harness::{create_plan, ExecutionPlan},
 };
 use crate::config::AgentConfig;
 use crate::memory::MemoryManager;
@@ -246,8 +245,8 @@ impl ToolRegistry {
 
         self.register(Box::new(GidStatsTool::new(gid_pathbuf.clone())));
 
-        // Additional gid-core tools (execute, semantify, complexity, working memory, ignore, scope)
-        self.register(Box::new(GidExecuteTool::new(graph.clone())));
+        // Additional gid-core tools (semantify, complexity, working memory, ignore, scope)
+        // GidExecuteTool removed — functionality merged into GidPlanTool with detail=true
         self.register(Box::new(GidSemantifyTool::new(graph.clone(), path.clone())));
         self.register(Box::new(GidComplexityTool));
         self.register(Box::new(GidWorkingMemoryTool));
@@ -2609,6 +2608,10 @@ impl Tool for GidTasksTool {
                     "type": "string",
                     "description": "Filter by status: todo, in_progress, done, blocked, cancelled",
                     "enum": ["todo", "in_progress", "done", "blocked", "cancelled"]
+                },
+                "node_type": {
+                    "type": "string",
+                    "description": "Filter by node type. Default shows project nodes only (task/feature/component/legacy). Use 'code' for code nodes, 'all' for everything."
                 }
             }
         })
@@ -2635,6 +2638,20 @@ impl Tool for GidTasksTool {
         } else {
             graph.nodes.iter().collect()
         };
+
+        // Apply node_type filter (default: project nodes only)
+        let node_type_filter = input["node_type"].as_str();
+        let nodes: Vec<&Node> = nodes.into_iter().filter(|n| {
+            match node_type_filter {
+                Some("all") => true,
+                Some("code") => n.source.as_deref() == Some("extract"),
+                Some(t) => n.node_type.as_deref() == Some(t),
+                None => {
+                    // Default: project nodes only (source != "extract")
+                    n.source.as_deref() != Some("extract")
+                }
+            }
+        }).collect();
 
         for node in &nodes {
             let deps: Vec<String> = graph.edges_from(&node.id)
@@ -2676,7 +2693,7 @@ impl Tool for GidAddTaskTool {
     }
 
     fn description(&self) -> &str {
-        "Add a new task to the project graph."
+        "Add a node to the project graph (task, feature, component, or planned code node)."
     }
 
     fn input_schema(&self) -> Value {
@@ -2689,7 +2706,12 @@ impl Tool for GidAddTaskTool {
                 "status": { "type": "string", "enum": ["todo", "in_progress", "done", "blocked"], "description": "Initial status (default: todo)" },
                 "priority": { "type": "integer", "description": "Priority 0-255 (0=highest, optional)" },
                 "tags": { "type": "array", "items": { "type": "string" }, "description": "Tags (optional)" },
-                "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Task IDs this depends on (optional)" }
+                "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Task IDs this depends on (optional)" },
+                "node_type": { "type": "string", "description": "Node type: task, feature, component, code, etc. (optional)" },
+                "source": { "type": "string", "description": "Source origin: manual, code_extract, design, etc. (optional)" },
+                "node_kind": { "type": "string", "description": "Specific classification within node_type (optional)" },
+                "file_path": { "type": "string", "description": "Associated file path for code nodes (optional)" },
+                "metadata": { "type": "object", "description": "Additional metadata key-value pairs (optional)" }
             },
             "required": ["id", "title"]
         })
@@ -2712,6 +2734,14 @@ impl Tool for GidAddTaskTool {
         }
         if let Some(tags) = input["tags"].as_array() {
             node = node.with_tags(tags.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+        }
+
+        if let Some(nt) = input["node_type"].as_str() { node.node_type = Some(nt.to_string()); }
+        if let Some(src) = input["source"].as_str() { node.source = Some(src.to_string()); }
+        if let Some(nk) = input["node_kind"].as_str() { node.node_kind = Some(nk.to_string()); }
+        if let Some(fp) = input["file_path"].as_str() { node.file_path = Some(fp.to_string()); }
+        if let Some(meta) = input["metadata"].as_object() {
+            for (k, v) in meta { node.metadata.insert(k.clone(), v.clone()); }
         }
 
         let mut graph = self.graph.write().await;
@@ -2765,7 +2795,12 @@ impl Tool for GidUpdateTaskTool {
                 "id": { "type": "string", "description": "Task ID to update" },
                 "status": { "type": "string", "enum": ["todo", "in_progress", "done", "blocked", "cancelled"], "description": "New status" },
                 "title": { "type": "string", "description": "New title (optional)" },
-                "description": { "type": "string", "description": "New description (optional)" }
+                "description": { "type": "string", "description": "New description (optional)" },
+                "tags": { "type": "array", "items": { "type": "string" }, "description": "Tags (optional)" },
+                "metadata": { "type": "object", "description": "Additional metadata key-value pairs — shallow merge (optional)" },
+                "priority": { "type": "integer", "description": "Priority 0-255 (0=highest, optional)" },
+                "node_type": { "type": "string", "description": "Node type (optional)" },
+                "node_kind": { "type": "string", "description": "Node kind (optional)" }
             },
             "required": ["id"]
         })
@@ -2796,6 +2831,27 @@ impl Tool for GidUpdateTaskTool {
         if let Some(desc) = input["description"].as_str() {
             changes.push("description updated".to_string());
             node.description = Some(desc.to_string());
+        }
+        if let Some(tags) = input["tags"].as_array() {
+            let new_tags: Vec<String> = tags.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+            changes.push(format!("tags → {:?}", new_tags));
+            node.tags = new_tags;
+        }
+        if let Some(meta) = input["metadata"].as_object() {
+            for (k, v) in meta { node.metadata.insert(k.clone(), v.clone()); }
+            changes.push("metadata updated (shallow merge)".to_string());
+        }
+        if let Some(p) = input["priority"].as_u64() {
+            changes.push(format!("priority → {}", p));
+            node.priority = Some(p as u8);
+        }
+        if let Some(nt) = input["node_type"].as_str() {
+            changes.push(format!("node_type → {}", nt));
+            node.node_type = Some(nt.to_string());
+        }
+        if let Some(nk) = input["node_kind"].as_str() {
+            changes.push(format!("node_kind → {}", nk));
+            node.node_kind = Some(nk.to_string());
         }
 
         if changes.is_empty() {
@@ -2840,7 +2896,7 @@ impl Tool for GidAddEdgeTool {
             "properties": {
                 "from": { "type": "string", "description": "Source task ID" },
                 "to": { "type": "string", "description": "Target task ID" },
-                "relation": { "type": "string", "enum": ["depends_on", "blocks", "subtask_of", "relates_to"], "description": "Relationship type (default: depends_on)" }
+                "relation": { "type": "string", "description": "Relationship type (default: depends_on). Common values: depends_on, blocks, subtask_of, relates_to, implements, contains, tests_for, calls, imports, defined_in, belongs_to, maps_to, overrides, inherits" }
             },
             "required": ["from", "to"]
         })
@@ -2992,7 +3048,8 @@ impl Tool for GidQueryImpactTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "id": { "type": "string", "description": "Task ID to analyze" }
+                "id": { "type": "string", "description": "Task ID to analyze" },
+                "relations": { "type": "array", "items": { "type": "string" }, "description": "Filter traversal by edge relations (e.g. depends_on, blocks, tests_for, implements, calls, imports). Default: all relations." }
             },
             "required": ["id"]
         })
@@ -3004,7 +3061,14 @@ impl Tool for GidQueryImpactTool {
         let graph = self.graph.read().await;
         let engine = QueryEngine::new(&graph);
 
-        let impacted = engine.impact(id);
+        let relations_input: Option<Vec<String>> = input["relations"].as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+        let impacted = if let Some(ref rels) = relations_input {
+            let rel_refs: Vec<&str> = rels.iter().map(|s| s.as_str()).collect();
+            engine.impact_filtered(id, Some(&rel_refs))
+        } else {
+            engine.impact(id)
+        };
 
         if impacted.is_empty() {
             return Ok(ToolResult {
@@ -3049,7 +3113,8 @@ impl Tool for GidQueryDepsTool {
             "type": "object",
             "properties": {
                 "id": { "type": "string", "description": "Task ID to query" },
-                "transitive": { "type": "boolean", "description": "Include transitive dependencies (default: true)" }
+                "transitive": { "type": "boolean", "description": "Include transitive dependencies (default: true)" },
+                "relations": { "type": "array", "items": { "type": "string" }, "description": "Filter traversal by edge relations (e.g. depends_on, blocks, tests_for, implements, calls, imports). Default: all relations." }
             },
             "required": ["id"]
         })
@@ -3062,7 +3127,14 @@ impl Tool for GidQueryDepsTool {
         let graph = self.graph.read().await;
         let engine = QueryEngine::new(&graph);
 
-        let deps = engine.deps(id, transitive);
+        let relations_input: Option<Vec<String>> = input["relations"].as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+        let deps = if let Some(ref rels) = relations_input {
+            let rel_refs: Vec<&str> = rels.iter().map(|s| s.as_str()).collect();
+            engine.deps_filtered(id, transitive, Some(&rel_refs))
+        } else {
+            engine.deps(id, transitive)
+        };
 
         if deps.is_empty() {
             return Ok(ToolResult {
@@ -3338,7 +3410,7 @@ impl Tool for GidRefactorTool {
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["rename", "merge", "update_title"],
+                    "enum": ["rename", "merge", "update_title", "delete"],
                     "description": "Operation type"
                 },
                 "id": { "type": "string", "description": "Target node ID" },
@@ -3426,8 +3498,28 @@ impl Tool for GidRefactorTool {
                     is_error: false,
                 })
             }
+            "delete" => {
+                // Count edges before removal (remove_node cleans them up)
+                let edge_count = graph.edges.iter().filter(|e| e.from == id || e.to == id).count();
+
+                match graph.remove_node(id) {
+                    Some(_removed) => {
+                        save_gid_graph(&graph, &self.path)?;
+                        Ok(ToolResult {
+                            output: format!("✅ Deleted node '{}' and {} associated edges", id, edge_count),
+                            is_error: false,
+                        })
+                    }
+                    None => {
+                        Ok(ToolResult {
+                            output: format!("Node '{}' not found", id),
+                            is_error: true,
+                        })
+                    }
+                }
+            }
             _ => Ok(ToolResult {
-                output: format!("Unknown operation: {}. Use 'rename', 'merge', or 'update_title'.", operation),
+                output: format!("Unknown operation: {}. Use 'rename', 'merge', 'update_title', or 'delete'.", operation),
                 is_error: true,
             }),
         }
@@ -3780,19 +3872,22 @@ impl Tool for GidPlanTool {
     }
 
     fn description(&self) -> &str {
-        "Create an execution plan from the current graph. Shows layers, task ordering, and parallelism."
+        "Create an execution plan from the current graph. Shows layers, task ordering, and parallelism. Use detail=true for critical path and turn estimates."
     }
 
     fn input_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
-            "properties": {}
+            "properties": {
+                "detail": { "type": "boolean", "description": "If true, include critical path analysis and estimated turns (default: false)" }
+            }
         })
     }
 
-    async fn execute(&self, _input: Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
         use gid_core::harness::create_plan;
 
+        let detail = input["detail"].as_bool().unwrap_or(false);
         let graph = self.graph.read().await;
         let plan = create_plan(&graph)?;
 
@@ -3804,6 +3899,17 @@ impl Tool for GidPlanTool {
                 output.push_str(&format!("  - {} — {}\n", task_info.id, task_info.title));
             }
             output.push('\n');
+        }
+
+        if detail {
+            if !plan.critical_path.is_empty() {
+                output.push_str("Critical Path:\n");
+                for task_id in &plan.critical_path {
+                    output.push_str(&format!("  → {}\n", task_id));
+                }
+                output.push('\n');
+            }
+            output.push_str(&format!("Estimated total turns: {}\n", plan.estimated_total_turns));
         }
 
         Ok(ToolResult {
@@ -3865,109 +3971,6 @@ impl Tool for GidStatsTool {
             stats.total_tokens,
             stats.duration_secs,
         );
-
-        Ok(ToolResult {
-            output,
-            is_error: false,
-        })
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// GID Execute Tool — Create execution plan from graph (planning only)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-struct GidExecuteTool {
-    graph: Arc<RwLock<Graph>>,
-}
-
-impl GidExecuteTool {
-    fn new(graph: Arc<RwLock<Graph>>) -> Self {
-        Self { graph }
-    }
-}
-
-#[async_trait]
-impl Tool for GidExecuteTool {
-    fn name(&self) -> &str {
-        "gid_execute"
-    }
-
-    fn description(&self) -> &str {
-        "Create an execution plan from the task graph. Shows layers, parallelism, critical path, and estimated turns. Use gid_plan for a simpler view or gid_execute for full execution details."
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "dry_run": {
-                    "type": "boolean",
-                    "description": "If true (default), only show the plan without executing. Set to false to actually execute tasks."
-                }
-            }
-        })
-    }
-
-    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
-        let dry_run = input["dry_run"].as_bool().unwrap_or(true);
-
-        let graph = self.graph.read().await;
-        
-        // Create execution plan from graph
-        let plan: ExecutionPlan = match create_plan(&graph) {
-            Ok(p) => p,
-            Err(e) => {
-                return Ok(ToolResult {
-                    output: format!("Failed to create execution plan: {}", e),
-                    is_error: true,
-                });
-            }
-        };
-
-        let mut output = format!(
-            "Execution Plan\n\
-             ══════════════\n\
-             Total tasks: {}\n\
-             Layers: {}\n\
-             Estimated turns: {}\n\n",
-            plan.total_tasks, plan.layers.len(), plan.estimated_total_turns
-        );
-
-        // Show critical path
-        if !plan.critical_path.is_empty() {
-            output.push_str("Critical Path:\n");
-            for task_id in &plan.critical_path {
-                output.push_str(&format!("  → {}\n", task_id));
-            }
-            output.push('\n');
-        }
-
-        // Show layers
-        for layer in &plan.layers {
-            output.push_str(&format!(
-                "Layer {} ({} tasks, parallel):\n",
-                layer.index, layer.tasks.len()
-            ));
-            for task in &layer.tasks {
-                let deps = if task.depends_on.is_empty() {
-                    String::new()
-                } else {
-                    format!(" [deps: {}]", task.depends_on.join(", "))
-                };
-                output.push_str(&format!(
-                    "  • {} — {} (~{} turns){}\n",
-                    task.id, task.title, task.estimated_turns, deps
-                ));
-            }
-            output.push('\n');
-        }
-
-        if dry_run {
-            output.push_str("(dry run - no tasks executed)\n");
-        } else {
-            output.push_str("⚠️ Full execution not available in this tool. Use ritual workflow or spawn sub-agents.\n");
-        }
 
         Ok(ToolResult {
             output,

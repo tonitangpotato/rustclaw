@@ -28,6 +28,8 @@ This is Phase 2 of the GID pipeline: Idea → **Requirements** → Design → Gr
 
 Requirements documents define **WHAT** the system must do (not HOW). Every criterion must be verifiable — if you can't test it, it's not a criterion.
 
+**⚠️ The #1 failure mode is writing implementation details disguised as requirements.** This is especially common for infrastructure/framework features where WHAT and HOW feel intertwined. See "The WHAT/HOW Boundary" section below — read it before writing any GOAL.
+
 ## When to Use
 
 - After idea intake (Phase 1) produces a clear project concept
@@ -171,27 +173,67 @@ Numbers must be sequential — GUARD-1, GUARD-2, etc.}
 
 ## The WHAT/HOW Boundary
 
-**This is the most common mistake.** Requirements describe observable behavior, not implementation.
+**This is the #1 source of requirements bugs.** Three rounds of review can't fix a document that mixes requirements with design decisions — the contradictions are structural, not editorial.
+
+Requirements describe **observable behavior from outside the system**. Design describes **how the system achieves that behavior internally**.
+
+### The Substitution Test
+
+> **If you could achieve the same observable result with a completely different implementation, the requirement is valid. If the requirement specifies the implementation itself, it belongs in DESIGN.md.**
+
+Ask: "Could someone satisfy this GOAL using a different internal approach?" If yes → good requirement. If the GOAL *dictates* the approach → it's a design decision.
 
 ### ❌ Implementation details (belong in DESIGN.md)
+
 ```
 BAD:  "Detects cycles using Kahn's algorithm"
-BAD:  "Merges are serialized via mutex/lock"
-BAD:  "Extracts sections via heading-level matching algorithm"
+      → Specifies the algorithm. Requirement = detect cycles. How = design.
+
+BAD:  "Code nodes use `node_type = "code"` and `node_kind` for precise type"
+      → Specifies field names and schema layout. Requirement = code nodes are distinguishable from task nodes. How fields are named = design.
+
+BAD:  "Layer is derived from `source == "extract"`, not from `node_type`"
+      → Specifies the derivation mechanism. Requirement = layers are deterministic. Which field drives it = design.
+
+BAD:  "Bridge edges use `edge.metadata["source"] = "extract"`"
+      → Specifies schema. Requirement = code-to-feature connections are queryable. What the edge looks like internally = design.
+
 BAD:  "Uses SQLite for persistence"
+      → Specifies technology. Requirement = state persists across crashes. Storage backend = design.
+
 BAD:  "Implements retry with exponential backoff"
+      → Specifies algorithm. Requirement = failed operations are retried before giving up. Retry strategy = design.
+
+BAD:  "Merges are serialized via mutex/lock"
+      → Specifies concurrency mechanism. Requirement = concurrent merges don't corrupt data. How = design.
 ```
 
 ### ✅ Observable behavior (belongs in requirements)
+
 ```
-GOOD: "Detects dependency cycles and rejects cyclic graphs with cycle path details"
-GOOD: "Merges within a layer are serialized — no two merges happen concurrently"
-GOOD: "Extracts design section text matching the referenced section number"
-GOOD: "Execution state persists across crashes"
-GOOD: "Failed tasks are retried with enhanced context before marking blocked"
+GOOD: "Detects dependency cycles and rejects cyclic graphs with cycle path in error message"
+GOOD: "Code nodes are distinguishable from project nodes in all query and display operations"
+GOOD: "Node layer classification is deterministic — same input always produces same layer"
+GOOD: "Code-to-feature connections are queryable in both directions (feature→code, code→feature)"
+GOOD: "Execution state persists across process crashes — no data loss on restart"
+GOOD: "Failed tasks are retried with enhanced context before marking as blocked"
+GOOD: "Concurrent graph modifications never corrupt data or lose writes"
 ```
 
-**Rule of thumb:** If you removed the requirement text and replaced it with a completely different implementation that achieves the same observable result, would the requirement still be valid? If yes, it's a good requirement. If the requirement specifies the implementation itself, it's too specific.
+### 🔥 The Infrastructure Trap
+
+**Infrastructure and framework features are where this boundary is hardest.** When the "product" is a schema, an API, or a data pipeline, it feels like the schema IS the requirement. It's not.
+
+Examples from a graph engine:
+
+| ❌ Disguised design decision | ✅ Actual requirement |
+|---|---|
+| "Node struct has `source`, `node_type`, `node_kind` fields" | "Each node carries enough metadata to determine its origin (extract vs manual) and category (code vs task)" |
+| "`ready_tasks()` filters by `status == Todo && source != extract`" | "Task readiness queries never return code-only nodes" |
+| "Edge relations include `BelongsTo`, `TestsFor`, `Implements`" | "The graph supports structural (containment), testing, and implementation relationships between nodes" |
+| "FTS5 index covers `title` and `description` columns" | "Full-text search covers node titles and descriptions" |
+
+**The pattern:** Strip field names, function signatures, enum variants, and schema details. What's left is the requirement. The stripped parts go to DESIGN.md.
 
 ## What Is NOT a Requirement
 
@@ -203,8 +245,10 @@ Some statements look like requirements but aren't verifiable functional behavior
 | "gidterm's backend is not used" | Architecture decision | DESIGN.md |
 | "Use Opus for complex tasks" | Configuration preference | execution.yml |
 | "Follow the 7-phase pipeline" | Process description | DESIGN.md overview |
+| "`node_type` is for coarse layer, `node_kind` for precise type" | Field-level schema design | DESIGN.md |
+| "deprecated `code_node_to_task_id()` is not called" | Implementation cleanup detail | Task description |
 
-**Test:** Can a test or human verify this by observing system behavior? If not, it's not a requirement.
+**Test:** Can a test or human verify this by observing **system output/behavior** (not by reading source code)? If you'd need to read the struct definition to verify it → it's not a requirement.
 
 ## Numbering Rules
 
@@ -264,8 +308,9 @@ After writing, verify against design doc:
 
 - [ ] **Naming**: Only GOAL-X.Y and GUARD-X used (no CR, INV, AC, CP)
 - [ ] **Numbering**: Sequential within each module, no gaps
-- [ ] **WHAT not HOW**: No algorithms, data structures, or implementation patterns in requirement text
-- [ ] **All functional**: Every GOAL describes observable/testable behavior (not guidelines, decisions, or preferences)
+- [ ] **WHAT not HOW**: No algorithms, data structures, field names, schema layouts, or implementation patterns in requirement text. Run the Substitution Test on every GOAL: "Could this be satisfied with a different implementation?" If the GOAL dictates the implementation → rewrite it.
+- [ ] **No infrastructure trap**: For framework/infra features, verify GOALs describe observable behavior, not internal schema. Strip field names and function signatures — what's left should still be a valid requirement.
+- [ ] **All functional**: Every GOAL describes observable/testable behavior (not guidelines, architecture decisions, or preferences)
 - [ ] **Priority assigned**: Every GOAL has [P0], [P1], or [P2]
 - [ ] **Severity assigned**: Every GUARD has [hard] or [soft]
 - [ ] **Refs specific**: Every ref points to a specific subsection, not a top-level section

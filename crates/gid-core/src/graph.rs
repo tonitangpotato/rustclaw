@@ -82,6 +82,15 @@ pub struct Node {
     /// Node type: task, file, component, feature, layer, etc.
     #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
     pub node_type: Option<String>,
+    /// Source origin: e.g. "manual", "code_extract", "design"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Node kind: more specific classification within a node_type
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_kind: Option<String>,
+    /// File path associated with this node (for code nodes)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
     /// Knowledge storage: findings, file cache, and tool history.
     #[serde(default, skip_serializing_if = "KnowledgeNode::is_empty")]
     pub knowledge: KnowledgeNode,
@@ -101,6 +110,9 @@ impl Node {
             tags: Vec::new(),
             priority: None,
             node_type: None,
+            source: None,
+            node_kind: None,
+            file_path: None,
             knowledge: KnowledgeNode::default(),
             metadata: HashMap::new(),
         }

@@ -36,6 +36,30 @@ impl<'a> QueryEngine<'a> {
             .collect()
     }
 
+    /// Impact analysis filtered by edge relations.
+    pub fn impact_filtered(&self, node_id: &str, relations: Option<&[&str]>) -> Vec<&'a Node> {
+        let rels: Vec<&str> = relations.map(|r| r.to_vec()).unwrap_or_else(|| vec!["depends_on"]);
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        queue.push_back(node_id.to_string());
+        visited.insert(node_id.to_string());
+
+        while let Some(current) = queue.pop_front() {
+            for edge in &self.graph.edges {
+                if edge.to == current && rels.contains(&edge.relation.as_str()) {
+                    if visited.insert(edge.from.clone()) {
+                        queue.push_back(edge.from.clone());
+                    }
+                }
+            }
+        }
+
+        visited.remove(node_id);
+        self.graph.nodes.iter()
+            .filter(|n| visited.contains(&n.id))
+            .collect()
+    }
+
     /// Dependencies: what does `node_id` depend on? (transitive)
     pub fn deps(&self, node_id: &str, transitive: bool) -> Vec<&'a Node> {
         if !transitive {
@@ -57,6 +81,40 @@ impl<'a> QueryEngine<'a> {
         while let Some(current) = queue.pop_front() {
             for edge in &self.graph.edges {
                 if edge.from == current && edge.relation == "depends_on" {
+                    if visited.insert(edge.to.clone()) {
+                        queue.push_back(edge.to.clone());
+                    }
+                }
+            }
+        }
+
+        visited.remove(node_id);
+        self.graph.nodes.iter()
+            .filter(|n| visited.contains(&n.id))
+            .collect()
+    }
+
+    /// Dependencies filtered by edge relations.
+    pub fn deps_filtered(&self, node_id: &str, transitive: bool, relations: Option<&[&str]>) -> Vec<&'a Node> {
+        let rels: Vec<&str> = relations.map(|r| r.to_vec()).unwrap_or_else(|| vec!["depends_on"]);
+        if !transitive {
+            let dep_ids: HashSet<&str> = self.graph.edges.iter()
+                .filter(|e| e.from == node_id && rels.contains(&e.relation.as_str()))
+                .map(|e| e.to.as_str())
+                .collect();
+            return self.graph.nodes.iter()
+                .filter(|n| dep_ids.contains(n.id.as_str()))
+                .collect();
+        }
+
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        queue.push_back(node_id.to_string());
+        visited.insert(node_id.to_string());
+
+        while let Some(current) = queue.pop_front() {
+            for edge in &self.graph.edges {
+                if edge.from == current && rels.contains(&edge.relation.as_str()) {
                     if visited.insert(edge.to.clone()) {
                         queue.push_back(edge.to.clone());
                     }
