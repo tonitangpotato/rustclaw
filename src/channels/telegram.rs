@@ -29,6 +29,8 @@ struct TelegramBot {
     ritual_event_registry: crate::ritual_runner::EventRegistry,
     /// Active autopilot handle (if running)
     autopilot_handle: Arc<tokio::sync::Mutex<Option<crate::autopilot::AutopilotHandle>>>,
+    /// Generation counter for autopilot resume timers (prevents stacking)
+    autopilot_resume_gen: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl TelegramBot {
@@ -50,6 +52,7 @@ impl TelegramBot {
             ritual_cancel_registry: crate::ritual_runner::new_cancel_registry(),
             ritual_event_registry: crate::ritual_runner::new_event_registry(),
             autopilot_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            autopilot_resume_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
     
@@ -312,16 +315,19 @@ impl TelegramBot {
         let session_key = format!("telegram:{}", chat_id);
 
         // Pause autopilot while user is chatting — resume after 60s idle
+        // Uses generation counter so only the latest timer resumes
         {
             let guard = self.autopilot_handle.lock().await;
             if let Some(ref h) = *guard {
-                if h.is_running() && !h.is_paused() {
+                if h.is_running() {
                     h.pause();
+                    let gen = self.autopilot_resume_gen.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    let gen_ref = self.autopilot_resume_gen.clone();
                     let handle = h.clone();
-                    // Auto-resume after 60s of no user messages
                     tokio::spawn(async move {
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                        if handle.is_paused() {
+                        // Only resume if no newer timer was spawned
+                        if gen_ref.load(std::sync::atomic::Ordering::Relaxed) == gen && handle.is_paused() {
                             handle.resume();
                             tracing::info!("Autopilot auto-resumed after 60s idle");
                         }
@@ -704,8 +710,16 @@ Choose a model:", current),
                 });
 
                 match crate::autopilot::run(self.runner.clone(), config, &workspace, Some(notify_fn)).await {
-                    Ok((handle, _join)) => {
+                    Ok((handle, join)) => {
                         *handle_guard = Some(handle);
+                        // Monitor the join handle for panics/errors
+                        tokio::spawn(async move {
+                            match join.await {
+                                Ok(Ok(count)) => tracing::info!("Autopilot finished: {} tasks completed", count),
+                                Ok(Err(e)) => tracing::error!("Autopilot error: {}", e),
+                                Err(e) => tracing::error!("Autopilot task panicked: {}", e),
+                            }
+                        });
                         self.send_message(
                             chat_id,
                             &format!("🤖 Autopilot started on `{}`", task_file),

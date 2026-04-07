@@ -136,6 +136,7 @@ fn find_task_by_description<'a>(tasks: &'a [Task], description: &str) -> Option<
 }
 
 /// Mark a task as skipped in the file by appending ⚠️ SKIPPED.
+/// Matches by exact description to avoid false matches on similar tasks.
 fn mark_task_skipped(file_path: &Path, description: &str, reason: &str) -> anyhow::Result<()> {
     let content = std::fs::read_to_string(file_path)?;
     let mut result = String::with_capacity(content.len() + 50);
@@ -143,9 +144,14 @@ fn mark_task_skipped(file_path: &Path, description: &str, reason: &str) -> anyho
 
     for line in content.lines() {
         let trimmed = line.trim();
-        if !found && trimmed.starts_with("- [ ] ") && trimmed.contains(description.split_whitespace().take(5).collect::<Vec<_>>().join(" ").as_str()) {
-            result.push_str(&format!("{} ⚠️ SKIPPED: {}", line, reason));
-            found = true;
+        if !found && trimmed.starts_with("- [ ] ") {
+            let line_desc = &trimmed["- [ ] ".len()..];
+            if line_desc == description || line_desc.starts_with(description) || description.starts_with(line_desc) {
+                result.push_str(&format!("{} ⚠️ SKIPPED: {}", line, reason));
+                found = true;
+            } else {
+                result.push_str(line);
+            }
         } else {
             result.push_str(line);
         }
