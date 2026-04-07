@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 mod agent;
+mod autopilot;
 mod auth_profiles;
 mod browser;
 mod channels;

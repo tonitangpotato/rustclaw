@@ -27,6 +27,8 @@ struct TelegramBot {
     ritual_cancel_registry: crate::ritual_runner::CancelRegistry,
     /// Shared event registry for sending events to paused rituals
     ritual_event_registry: crate::ritual_runner::EventRegistry,
+    /// Active autopilot handle (if running)
+    autopilot_handle: Arc<tokio::sync::Mutex<Option<crate::autopilot::AutopilotHandle>>>,
 }
 
 impl TelegramBot {
@@ -47,6 +49,7 @@ impl TelegramBot {
             active_sessions: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
             ritual_cancel_registry: crate::ritual_runner::new_cancel_registry(),
             ritual_event_registry: crate::ritual_runner::new_event_registry(),
+            autopilot_handle: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
     
@@ -616,6 +619,71 @@ Choose a model:", current),
                         (false, n) => format!("⛔ Cancelled {} task(s).", n),
                     };
                     self.send_message(chat_id, &msg, None).await?;
+                }
+                Ok(true)
+            }
+            "/autopilot" => {
+                let arg = text.strip_prefix("/autopilot").unwrap_or("").trim();
+                let session_key = format!("telegram:{}", chat_id);
+                let mut handle_guard = self.autopilot_handle.lock().await;
+
+                if arg == "stop" || arg == "off" {
+                    if let Some(h) = handle_guard.take() {
+                        h.stop();
+                        self.send_message(chat_id, "⛔ Autopilot stopped.", None).await?;
+                    } else {
+                        self.send_message(chat_id, "No autopilot running.", None).await?;
+                    }
+                    return Ok(true);
+                }
+
+                if arg == "status" {
+                    if let Some(ref h) = *handle_guard {
+                        if h.is_running() {
+                            self.send_message(chat_id, "🤖 Autopilot is running.", None).await?;
+                        } else {
+                            self.send_message(chat_id, "Autopilot finished.", None).await?;
+                            *handle_guard = None;
+                        }
+                    } else {
+                        self.send_message(chat_id, "No autopilot running.", None).await?;
+                    }
+                    return Ok(true);
+                }
+
+                // Check if already running
+                if let Some(ref h) = *handle_guard {
+                    if h.is_running() {
+                        self.send_message(chat_id, "⚠️ Autopilot already running. Use `/autopilot stop` first.", None).await?;
+                        return Ok(true);
+                    }
+                }
+
+                let task_file = if arg.is_empty() { "HEARTBEAT.md" } else { arg };
+                let workspace = self.runner.workspace_root().to_path_buf();
+                let config = crate::autopilot::AutopilotConfig {
+                    task_file: std::path::PathBuf::from(task_file),
+                    max_turns_per_task: 40,
+                    max_total_turns: 200,
+                    session_key: session_key.clone(),
+                };
+
+                match crate::autopilot::run(self.runner.clone(), config, &workspace).await {
+                    Ok((handle, _join)) => {
+                        *handle_guard = Some(handle);
+                        self.send_message(
+                            chat_id,
+                            &format!("🤖 Autopilot started on `{}`", task_file),
+                            None,
+                        ).await?;
+                    }
+                    Err(e) => {
+                        self.send_message(
+                            chat_id,
+                            &format!("❌ Autopilot error: {}", e),
+                            None,
+                        ).await?;
+                    }
                 }
                 Ok(true)
             }
