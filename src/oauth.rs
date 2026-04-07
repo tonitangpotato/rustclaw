@@ -164,6 +164,31 @@ impl OAuthTokenManager {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
+
+            // If refresh token was invalidated (another process refreshed it),
+            // re-read from Keychain and retry once with the updated token.
+            if body.contains("invalid_grant") {
+                tracing::warn!("Refresh token invalidated (another process likely refreshed it). Re-reading Keychain...");
+                if let Ok((creds, _account)) = read_keychain_credentials() {
+                    let kc = &creds.claude_ai_oauth;
+                    // If keychain has a newer, non-expired token, use it directly
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    if now_ms < kc.expires_at {
+                        tracing::info!("Found valid token in Keychain (expires_at={}), using it", kc.expires_at);
+                        state.access_token = kc.access_token.clone();
+                        state.refresh_token = kc.refresh_token.clone();
+                        state.expires_at_ms = kc.expires_at;
+                        return Ok(state.access_token.clone());
+                    }
+                    // Keychain token also expired but has a different refresh token — update state
+                    // so the next call to get_token() will retry with the new refresh token
+                    if kc.refresh_token != state.refresh_token {
+                        tracing::info!("Updated in-memory refresh token from Keychain, next request will retry");
+                        state.refresh_token = kc.refresh_token.clone();
+                    }
+                }
+            }
+
             anyhow::bail!(
                 "OAuth token refresh failed (HTTP {}): {}",
                 status,
