@@ -14,7 +14,7 @@ use tokio::sync::RwLock;
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 
 /// Anthropic OAuth token endpoint.
-const TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
+const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 
 /// Keychain service name used by Claude Code.
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";

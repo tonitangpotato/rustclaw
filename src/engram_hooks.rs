@@ -56,7 +56,7 @@ impl Hook for EngramRecallHook {
                         })
                         .collect();
                     let memory_block = format!(
-                        "\n## Recalled Memories (auto)\n{}\n",
+                        "\n## ⚠️ Recalled Memories (auto) — You may have prior context on this topic. Review before answering.\n{}\n",
                         memories.join("\n")
                     );
 

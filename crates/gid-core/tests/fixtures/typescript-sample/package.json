@@ -1,0 +1,12 @@
+{
+  "name": "typescript-sample-fixture",
+  "version": "1.0.0",
+  "description": "Test fixture for LSP integration tests",
+  "private": true,
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}
