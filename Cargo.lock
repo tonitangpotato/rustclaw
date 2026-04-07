@@ -1009,8 +1009,6 @@ dependencies = [
 [[package]]
 name = "engramai"
 version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f30136c76cff3aa879270b0b346b0058f4c2afd27e05c5809f582f1c6c881f8"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1454,6 +1452,7 @@ dependencies = [
  "glob",
  "regex",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",

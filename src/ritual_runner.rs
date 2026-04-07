@@ -898,7 +898,17 @@ impl RitualRunner {
                 // Try to parse JSON from response
                 let json_str = Self::extract_json_str(&response_text);
                 match serde_json::from_str::<TriageResult>(json_str) {
-                    Ok(result) => {
+                    Ok(mut result) => {
+                        // Deterministic override: if design already exists, skip design phase
+                        // regardless of what Haiku says. LLM triage is advisory, not authoritative
+                        // for facts we can verify deterministically.
+                        if let Some(ps) = &ritual_state.project {
+                            if ps.has_design && !result.skip_design {
+                                tracing::info!("Override: skip_design=true (design already exists)");
+                                result.skip_design = true;
+                            }
+                        }
+
                         tracing::info!(
                             clarity = %result.clarity,
                             size = %result.size,
