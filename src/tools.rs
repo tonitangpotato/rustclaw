@@ -22,7 +22,7 @@ use gid_core::{
     history::HistoryManager,
     refactor,
     CodeGraph,
-    unify::{codegraph_to_graph_nodes, merge_code_layer},
+    unify::{codegraph_to_graph_nodes, merge_code_layer, graph_to_codegraph},
     semantify,
     complexity,
     working_mem,
@@ -3768,6 +3768,25 @@ fn find_project_root(dir: &std::path::Path) -> Option<std::path::PathBuf> {
     first_weak_match
 }
 
+/// Load CodeGraph from graph.yml first, falling back to extract_from_dir.
+fn load_code_graph_for_tool(dir: &std::path::Path) -> CodeGraph {
+    // Try graph.yml first
+    let project_root = find_project_root(dir).unwrap_or_else(|| dir.to_path_buf());
+    let graph_yml = project_root.join(".gid").join("graph.yml");
+    if graph_yml.exists() {
+        if let Ok(yaml_str) = std::fs::read_to_string(&graph_yml) {
+            if let Ok(graph) = serde_yaml::from_str::<Graph>(&yaml_str) {
+                let code_graph = graph_to_codegraph(&graph);
+                if !code_graph.nodes.is_empty() {
+                    return code_graph;
+                }
+            }
+        }
+    }
+    // Fallback to extraction
+    CodeGraph::extract_from_dir(dir)
+}
+
 // ── gid_schema: get code schema (classes, functions, signatures) ──
 
 struct GidSchemaTool {
@@ -3841,8 +3860,8 @@ impl Tool for GidSchemaTool {
         }
         drop(graph);
 
-        // Fallback: extract from source
-        let code_graph = CodeGraph::extract_from_dir(dir_path);
+        // Fallback: extract from source (prefer graph.yml)
+        let code_graph = load_code_graph_for_tool(dir_path);
         let schema = code_graph.get_schema();
 
         if schema.is_empty() {
@@ -4224,8 +4243,8 @@ impl Tool for GidComplexityTool {
             });
         }
         
-        // Extract code graph
-        let code_graph = CodeGraph::extract_from_dir(dir_path);
+        // Extract code graph (prefer graph.yml)
+        let code_graph = load_code_graph_for_tool(dir_path);
         
         // Get keywords
         let keywords: Vec<&str> = if let Some(kw_array) = input["keywords"].as_array() {
@@ -4326,9 +4345,9 @@ impl Tool for GidWorkingMemoryTool {
         let dir = input["dir"].as_str().unwrap_or("src");
         let dir_path = std::path::Path::new(dir);
         
-        // Extract code graph
+        // Extract code graph (prefer graph.yml)
         let code_graph = if dir_path.exists() {
-            CodeGraph::extract_from_dir(dir_path)
+            load_code_graph_for_tool(dir_path)
         } else {
             CodeGraph::default()
         };

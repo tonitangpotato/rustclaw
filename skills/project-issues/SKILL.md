@@ -1,7 +1,7 @@
 ---
 name: project-issues
 description: Track bugs, improvements, and issues discovered during project usage
-version: "1.0.0"
+version: "2.0.0"
 author: potato
 triggers:
   patterns:
@@ -33,29 +33,50 @@ max_body_size: 4096
 ---
 # SKILL: Project Issue Tracker
 
-> Capture bugs, improvements, and issues discovered during project usage into structured, per-project ISSUES.md files. Never lose a finding again.
+> Capture bugs, improvements, and issues discovered during project usage into structured issue tracking. Never lose a finding again.
 
 ## Philosophy
 
 使用项目的过程中总会发现问题——bug、性能瓶颈、UX 改进、缺失功能。这些发现如果散落在 daily log、engram、随机文件里，以后根本找不到。
 
-**每个项目一个 ISSUES.md，统一格式，统一位置。** 想改的时候一个文件看全部。
+**每个项目在 `.gid/issues/` 下统一管理所有 issue。**
+
+## Directory Structure
+
+```
+{project_root}/.gid/issues/
+├── ISSUES.md                ← 统一索引：记录所有 issue 的摘要
+├── ISS-001/                 ← 每个 issue 一个目录（工作间）
+│   ├── requirements.md      ← 如果需要
+│   ├── design.md            ← 如果需要
+│   └── ...                  ← 实际修复过程中的文档
+├── ISS-002/
+│   ├── design.md
+│   ├── implementation-plan.md
+│   └── ...
+└── ISS-NNN/
+```
+
+**核心规则：**
+- `ISSUES.md` 是索引/目录 — 记录每个 issue 的摘要信息
+- `ISS-NNN/` 是工作间 — 该 issue 的 fix 过程中产生的所有文档（requirements, design, task 等）
+- 简单 issue 可能只需要 ISSUES.md 里的一条记录，不需要子目录
+- 复杂 issue（需要 design review、多步实现等）才需要创建 `ISS-NNN/` 目录
 
 ## Storage Location
 
-每个项目的 ISSUES.md 放在项目根目录：
+每个项目的 issues 放在 `{project_root}/.gid/issues/`：
 
 ```
-/Users/potato/rustclaw/ISSUES.md              ← RustClaw 本身
-/Users/potato/clawd/projects/gid-rs/ISSUES.md ← gid-rs
-/Users/potato/clawd/projects/xinfluencer/ISSUES.md
-/Users/potato/clawd/projects/agentctl/ISSUES.md
+/Users/potato/rustclaw/.gid/issues/ISSUES.md          ← RustClaw
+/Users/potato/clawd/projects/gid-rs/.gid/issues/ISSUES.md  ← gid-rs
+/Users/potato/clawd/projects/xinfluencer/.gid/issues/ISSUES.md
 ...etc
 ```
 
 **项目路径映射**（已知项目）：
 - **RustClaw**: `/Users/potato/rustclaw/`
-- **engramai/engram**: `/Users/potato/clawd/projects/engram-ai-rust/` (crates.io crate)
+- **engramai/engram**: `/Users/potato/clawd/projects/engram-ai-rust/`
 - **gid-core/gid-rs**: `/Users/potato/clawd/projects/gid-rs/`
 - **agentctl**: `/Users/potato/clawd/projects/agentctl/`
 - **xinfluencer**: `/Users/potato/clawd/projects/xinfluencer/`
@@ -64,7 +85,7 @@ max_body_size: 4096
 
 如果项目不在已知列表里，**问 potato 路径**。
 
-**⚠️ 绝对不要自己创建项目目录。** ISSUES.md 必须放在**已存在**的项目根目录下。如果目录不存在，说明路径映射有误——问 potato 而不是 mkdir。
+**⚠️ 绝对不要自己创建项目目录。** `.gid/issues/` 目录可以创建，但项目根目录必须已存在。
 
 ## Trigger Conditions
 
@@ -76,9 +97,16 @@ max_body_size: 4096
 
 也可以在心跳检查或开发过程中**主动**记录发现的问题。
 
-## Issue Format
+## ISSUES.md Format (索引)
 
 ```markdown
+# Issues: {项目名}
+
+> 项目使用过程中发现的 bug、改进点和待办事项。
+> 格式: ISS-{NNN} [{type}] [{priority}] [{status}]
+
+---
+
 ## ISS-{NNN} [{type}] [{priority}] [{status}]
 **发现日期**: {YYYY-MM-DD}
 **发现者**: {potato / RustClaw / 来源}
@@ -93,8 +121,12 @@ max_body_size: 4096
 **建议方案**:
 {如果有想法的话。没有也可以写"待分析"}
 
+**工作目录**: `.gid/issues/ISS-{NNN}/` （如果有）
+
 **相关**:
 {关联的 issue、idea、或其他文档引用}
+
+---
 ```
 
 ### 字段说明
@@ -126,14 +158,14 @@ max_body_size: 4096
 
 从 potato 的描述中判断是哪个项目的 issue。如果不明确，问一下。
 
-### Step 2: 确认项目路径存在 & 读取现有 ISSUES.md
+### Step 2: 确认路径 & 读取现有 ISSUES.md
 
 ```
 → 先确认项目根目录存在（ls 检查），不存在就问 potato 正确路径
-→ 读取项目的 ISSUES.md（如果存在）
+→ 创建 .gid/issues/ 目录（如果不存在）
+→ 读取 .gid/issues/ISSUES.md（如果存在）
 → 找到最大的 ISS-NNN 编号，下一个 +1
-→ 如果 ISSUES.md 不存在但项目目录存在，创建新 ISSUES.md（见下方模板）
-→ ⚠️ 绝对不要创建新的项目目录
+→ 如果 ISSUES.md 不存在，用模板创建
 ```
 
 ### Step 3: 分析与分类
@@ -149,20 +181,40 @@ max_body_size: 4096
 
 ### Step 4: 写入 ISSUES.md
 
-追加新 issue 到文件末尾（在 `---` 分隔线之前，如果有的话）。
+追加新 issue 到文件末尾。
 
-### Step 5: 交叉记录
+### Step 5: 创建工作目录（按需）
+
+**只在以下情况创建 `ISS-NNN/` 目录：**
+- Issue 是 P0/P1 且需要 design 或 multi-step fix
+- potato 明确要求做 design/requirements
+- 修复过程中产生了文档需要存放
+
+**简单 issue（小 bug fix、config change）不需要子目录。** ISSUES.md 里的记录就够了。
+
+创建时：
+```bash
+mkdir -p {project_root}/.gid/issues/ISS-{NNN}
+```
+
+工作目录里可能放的文件：
+- `requirements.md` — issue 的需求分析
+- `design.md` — 修复方案设计
+- `tasks.md` — 任务分解
+- 其他修复过程中的 artifact
+
+### Step 6: 交叉记录
 
 1. **Daily log** — 在 `memory/YYYY-MM-DD.md` 追加一行：
    ```
    ## Issue Recorded: {项目名} ISS-{NNN}
    - {一句话描述}
-   - See {项目路径}/ISSUES.md
+   - See {项目路径}/.gid/issues/ISSUES.md
    ```
 
 2. **Engram** — 存储记忆以便未来 recall：
    ```
-   engram_store(type=factual, importance=0.5, 
+   engram_store(type=factual, importance=0.5,
      content="{项目名} issue ISS-{NNN}: {一句话描述}. Type: {type}, Priority: {priority}")
    ```
 
@@ -177,39 +229,25 @@ max_body_size: 4096
        priority: P0
    ```
 
-### Step 6: 回复 potato
+### Step 7: 回复 potato
 
 ```
 🐛 **Issue Recorded: {项目名} ISS-{NNN}**
 类型: {type} | 优先级: {priority}
 {一句话描述}
-📝 已写入 {项目路径}/ISSUES.md
+📝 已写入 {项目路径}/.gid/issues/ISSUES.md
+{如果创建了工作目录: "📂 工作目录: .gid/issues/ISS-{NNN}/"}
 
 {如果有建议方案: "💡 建议方案: {简述}"}
 {如果关联到已有 issue: "🔗 关联: ISS-{XXX} ({描述})"}
-```
-
-## New File Template
-
-当项目根目录存在但 ISSUES.md 不存在时，用此模板创建。
-**⚠️ 只创建文件，不创建目录。** 项目目录必须已存在。
-
-```markdown
-# Issues: {项目名}
-
-> 项目使用过程中发现的 bug、改进点和待办事项。
-> 格式: ISS-{NNN} [{type}] [{priority}] [{status}]
-
----
-
 ```
 
 ## Batch Commands
 
 potato 可能会用这些命令：
 
-- **"看看 {项目} 有什么 issue"** → 读取并汇总该项目的 ISSUES.md
-- **"所有项目的 open issues"** → 扫描所有已知项目的 ISSUES.md，汇总 open 状态的
+- **"看看 {项目} 有什么 issue"** → 读取并汇总该项目的 `.gid/issues/ISSUES.md`
+- **"所有项目的 open issues"** → 扫描所有已知项目的 `.gid/issues/ISSUES.md`，汇总 open 状态的
 - **"ISS-003 done"** → 更新状态为 done，加上修复日期
 - **"清理 {项目} 的 issues"** → 把 done/wontfix 的归档到底部
 
@@ -232,3 +270,4 @@ RustClaw 不只是被动记录。在以下场景**主动**创建 issue：
 - **编号永远递增。** 不复用已删除的编号。
 - **优先级可以调整。** 发现时给个初始判断，后续 potato 可以改。
 - **不确定是不是 issue？记下来。** 宁可多记一个 wontfix，也不要漏掉一个真正的问题。
+- **ISS 文档放项目的 `.gid/issues/` 下。** 不要放根目录、不要放 `docs/`。
