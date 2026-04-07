@@ -688,8 +688,8 @@ Choose a model:", current),
                 let workspace = self.runner.workspace_root().to_path_buf();
                 let config = crate::autopilot::AutopilotConfig {
                     task_file: std::path::PathBuf::from(task_file),
-                    max_turns_per_task: 40,
-                    max_total_turns: 200,
+                    max_turns_per_task: 60,
+                    max_total_turns: 300,
                     session_key: session_key.clone(),
                 };
 

@@ -30,8 +30,8 @@ impl Default for AutopilotConfig {
     fn default() -> Self {
         Self {
             task_file: PathBuf::from("HEARTBEAT.md"),
-            max_turns_per_task: 40,
-            max_total_turns: 200,
+            max_turns_per_task: 60,
+            max_total_turns: 300,
             session_key: String::new(),
         }
     }
@@ -312,6 +312,14 @@ pub async fn run(
                         task_turns += 1;
                         total_turns += 1;
                         handle_clone.total_turns.store(total_turns, Ordering::Relaxed);
+
+                        // Progress report every 10 turns
+                        if task_turns % 10 == 0 {
+                            notify(&format!(
+                                "Progress: {} turns on '{}' ({} total turns)",
+                                task_turns, task_desc, total_turns,
+                            ));
+                        }
 
                         // Check if task was marked done — match by description, not line number
                         if let Ok(updated_content) = std::fs::read_to_string(&task_file) {
