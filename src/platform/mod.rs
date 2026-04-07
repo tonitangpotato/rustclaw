@@ -98,11 +98,18 @@ impl PlatformService {
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], self.config.port));
         let router = server::create_router(Arc::clone(&self.state));
 
-        tracing::info!("Platform server listening on http://{}", addr);
-
         tokio::spawn(async move {
-            let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-            axum::serve(listener, router).await.unwrap();
+            let listener = match tokio::net::TcpListener::bind(addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!("Platform server failed to bind {}: {} — running without platform server", addr, e);
+                    return;
+                }
+            };
+            tracing::info!("Platform server listening on http://{}", addr);
+            if let Err(e) = axum::serve(listener, router).await {
+                tracing::warn!("Platform server error: {}", e);
+            }
         });
 
         Ok(())

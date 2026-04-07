@@ -958,12 +958,20 @@ pub async fn start_dashboard(
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
-    tracing::info!("Dashboard listening on http://{}", addr);
 
     // Run server in background
     tokio::spawn(async move {
-        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-        axum::serve(listener, app).await.unwrap();
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!("Dashboard failed to bind {}: {} — running without dashboard", addr, e);
+                return;
+            }
+        };
+        tracing::info!("Dashboard listening on http://{}", addr);
+        if let Err(e) = axum::serve(listener, app).await {
+            tracing::warn!("Dashboard server error: {}", e);
+        }
     });
 
     Ok(())

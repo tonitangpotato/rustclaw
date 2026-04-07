@@ -1,6 +1,8 @@
 //! Discord channel adapter using serenity.
 //!
-//! Connects via Discord Gateway, handles messages, mentions, and reactions.
+//! Connects via Discord Gateway, handles messages, mentions, reactions,
+//! and file attachments. Supports structured MessageContext for rich
+//! sender metadata and reply-to propagation.
 
 use std::sync::Arc;
 
@@ -13,6 +15,7 @@ use serenity::Client;
 
 use crate::agent::AgentRunner;
 use crate::config::DiscordConfig;
+use crate::context::{self, ChannelCapabilities, ChatType, MessageContext, QuotedMessage};
 use crate::text_utils;
 
 /// Discord bot handler.
@@ -29,6 +32,27 @@ impl DiscordHandler {
             config,
             runner,
             bot_id: std::sync::RwLock::new(None),
+        }
+    }
+
+    /// Return Discord channel capabilities.
+    fn capabilities() -> ChannelCapabilities {
+        ChannelCapabilities {
+            name: "discord".into(),
+            supports_reactions: true,
+            supports_inline_buttons: false,
+            supports_voice: false,
+            supports_reply_to: true,
+            supports_typing: true,
+            supports_markdown: true,
+            supports_tables: false,
+            max_message_length: 2000,
+            format_notes: vec![
+                "Use bullet lists instead of tables — Discord renders them poorly on mobile".into(),
+                "Code blocks use triple backticks with optional language hint".into(),
+                "Bold: **text**, Italic: *text*, Strikethrough: ~~text~~".into(),
+                "Spoiler: ||text||, Links: [text](url)".into(),
+            ],
         }
     }
 
@@ -94,12 +118,15 @@ impl DiscordHandler {
         // - Strikethrough: ~~text~~ (same)
         // - Spoiler: ||text|| (Discord-specific)
         // - Links: [text](url) (same)
-        
+
         // Remove Telegram-specific escaping (backslashes before special chars)
         let mut result = text.to_string();
-        
+
         // Unescape characters that Telegram MarkdownV2 escapes but Discord doesn't need
-        let unescape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!'];
+        let unescape_chars = [
+            '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.',
+            '!',
+        ];
         for c in unescape_chars {
             result = result.replace(&format!("\\{}", c), &c.to_string());
         }
@@ -107,10 +134,56 @@ impl DiscordHandler {
         result
     }
 
+    /// Build a MessageContext from a Discord message.
+    fn build_message_context(&self, msg: &Message) -> MessageContext {
+        let chat_type = if msg.guild_id.is_some() {
+            // Guild message — try to get guild name
+            ChatType::Group {
+                title: msg
+                    .guild_id
+                    .map(|gid| format!("guild:{}", gid)),
+            }
+        } else {
+            ChatType::Direct
+        };
+
+        // Build reply-to context if this is a reply
+        let reply_to = msg.referenced_message.as_ref().map(|ref_msg| {
+            QuotedMessage::from_discord(
+                &ref_msg.author.name,
+                &ref_msg.author.id.to_string(),
+                &ref_msg.content,
+                ref_msg.id.get(),
+            )
+        });
+
+        MessageContext {
+            sender_id: Some(msg.author.id.to_string()),
+            sender_name: Some(msg.author.name.clone()),
+            sender_username: msg.author.global_name.clone(),
+            chat_type,
+            reply_to,
+            message_id: Some(msg.id.get() as i64),
+        }
+    }
+
     /// Send a message, handling long messages and file attachments.
-    async fn send_response(&self, ctx: &Context, channel_id: ChannelId, response: &str) -> anyhow::Result<()> {
-        let converted = Self::convert_markdown(response);
-        
+    /// Uses ProcessedResponse to handle reply_to tags.
+    async fn send_response(
+        &self,
+        ctx: &Context,
+        channel_id: ChannelId,
+        response: &str,
+        _original_msg_id: Option<u64>,
+    ) -> anyhow::Result<()> {
+        let processed = context::ProcessedResponse::from_raw(response);
+
+        if processed.is_silent {
+            return Ok(());
+        }
+
+        let converted = Self::convert_markdown(&processed.text);
+
         // Check for FILE: patterns
         let file_re = regex::Regex::new(r"FILE:(/[^\s]+)").unwrap();
         let mut text_without_files = converted.clone();
@@ -119,7 +192,8 @@ impl DiscordHandler {
         for cap in file_re.captures_iter(&converted) {
             let file_path = cap[1].to_string();
             files_to_send.push(file_path.clone());
-            text_without_files = text_without_files.replace(&format!("FILE:{}", file_path), "");
+            text_without_files =
+                text_without_files.replace(&format!("FILE:{}", file_path), "");
         }
 
         let clean_text = text_without_files.trim();
@@ -127,8 +201,16 @@ impl DiscordHandler {
         // Discord message limit is 2000 chars
         if !clean_text.is_empty() {
             let chunks = text_utils::split_message(clean_text, 2000);
-            for chunk in chunks {
-                let builder = CreateMessage::new().content(chunk);
+            for (i, chunk) in chunks.iter().enumerate() {
+                let mut builder = CreateMessage::new().content(chunk.to_string());
+                // Reply to the original message for the first chunk if reply_to is set
+                if i == 0 {
+                    if let Some(reply_id) = processed.reply_to {
+                        builder = builder.reference_message(serenity::all::MessageReference::from(
+                            (channel_id, serenity::all::MessageId::new(reply_id as u64)),
+                        ));
+                    }
+                }
                 channel_id.send_message(&ctx.http, builder).await?;
             }
         }
@@ -140,7 +222,8 @@ impl DiscordHandler {
                 let builder = CreateMessage::new().add_file(attachment);
                 channel_id.send_message(&ctx.http, builder).await?;
             } else {
-                let builder = CreateMessage::new().content(format!("⚠️ File not found: {}", file_path));
+                let builder =
+                    CreateMessage::new().content(format!("⚠️ File not found: {}", file_path));
                 channel_id.send_message(&ctx.http, builder).await?;
             }
         }
@@ -153,8 +236,17 @@ impl DiscordHandler {
 impl EventHandler for DiscordHandler {
     async fn ready(&self, _ctx: Context, ready: Ready) {
         let discriminator = ready.user.discriminator.map(|d| d.get()).unwrap_or(0);
-        tracing::info!("Discord bot connected as {}#{}", ready.user.name, discriminator);
+        tracing::info!(
+            "Discord bot connected as {}#{}",
+            ready.user.name,
+            discriminator
+        );
         *self.bot_id.write().unwrap() = Some(ready.user.id);
+
+        // Set channel capabilities on the runner
+        self.runner
+            .set_channel_capabilities(Self::capabilities())
+            .await;
     }
 
     async fn message(&self, ctx: Context, msg: Message) {
@@ -207,11 +299,16 @@ impl EventHandler for DiscordHandler {
         }
 
         // Build session key
-        let session_key = format!("discord:{}:{}", 
-            msg.guild_id.map(|g| g.to_string()).unwrap_or_else(|| "dm".to_string()),
+        let session_key = format!(
+            "discord:{}:{}",
+            msg.guild_id
+                .map(|g| g.to_string())
+                .unwrap_or_else(|| "dm".to_string()),
             msg.channel_id
         );
-        let user_id = msg.author.id.to_string();
+
+        // Build structured message context
+        let msg_ctx = self.build_message_context(&msg);
 
         tracing::info!(
             "Discord message from {} in {}: {}",
@@ -223,17 +320,19 @@ impl EventHandler for DiscordHandler {
         // Show typing indicator
         let typing = msg.channel_id.start_typing(&ctx.http);
 
-        // Process with agent
+        // Process with agent using structured context
         match self
             .runner
-            .process_message(&session_key, &content, Some(&user_id), Some("discord"))
+            .process_message_with_context(&session_key, &content, &msg_ctx, false)
             .await
         {
             Ok(response) => {
                 drop(typing); // Stop typing indicator
-                let trimmed = response.trim();
-                if !trimmed.is_empty() && trimmed != "NO_REPLY" && trimmed != "HEARTBEAT_OK" {
-                    if let Err(e) = self.send_response(&ctx, msg.channel_id, trimmed).await {
+                if !response.is_silent {
+                    if let Err(e) = self
+                        .send_response(&ctx, msg.channel_id, &response.text, Some(msg.id.get()))
+                        .await
+                    {
                         tracing::error!("Failed to send response: {}", e);
                     }
                 }
@@ -241,15 +340,17 @@ impl EventHandler for DiscordHandler {
             Err(e) => {
                 drop(typing);
                 tracing::error!("Agent error: {}", e);
-                if let Err(send_err) = msg.channel_id.say(&ctx.http, format!("⚠️ Error: {}", e)).await {
+                if let Err(send_err) = msg
+                    .channel_id
+                    .say(&ctx.http, format!("⚠️ Error: {}", e))
+                    .await
+                {
                     tracing::error!("Failed to send error message: {}", send_err);
                 }
             }
         }
     }
 }
-
-/// Split a message into chunks respecting Discord's character limit.
 
 /// Start the Discord channel.
 pub async fn start(config: DiscordConfig, runner: Arc<AgentRunner>) -> anyhow::Result<()> {

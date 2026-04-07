@@ -25,6 +25,8 @@ struct TelegramBot {
     active_sessions: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
     /// Shared cancel registry for running rituals
     ritual_cancel_registry: crate::ritual_runner::CancelRegistry,
+    /// Shared event registry for sending events to paused rituals
+    ritual_event_registry: crate::ritual_runner::EventRegistry,
 }
 
 impl TelegramBot {
@@ -44,6 +46,7 @@ impl TelegramBot {
             bot_username,
             active_sessions: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
             ritual_cancel_registry: crate::ritual_runner::new_cancel_registry(),
+            ritual_event_registry: crate::ritual_runner::new_event_registry(),
         })
     }
     
@@ -368,6 +371,9 @@ impl TelegramBot {
                             self.send_message(chat_id, &format!("⚠️ BTW error: {}", e), reply_to).await?;
                         }
                     }
+                } else if self.try_route_to_waiting_ritual(chat_id, &text).await {
+                    // Message was routed to a waiting ritual — done
+                    tracing::info!("Routed message to waiting ritual for chat {}", chat_id);
                 } else {
                     // Queue the message for injection into the running session
                     self.runner.queue_message(
@@ -380,6 +386,14 @@ impl TelegramBot {
                 }
                 return Ok(());
             }
+        }
+
+        // Check for a waiting ritual even when session is idle (e.g. user types
+        // plain text while the main agent is not running but a ritual is paused).
+        typing_handle.abort();
+        if self.try_route_to_waiting_ritual(chat_id, &text).await {
+            tracing::info!("Routed message to waiting ritual (idle session) for chat {}", chat_id);
+            return Ok(());
         }
 
         // Mark session as active
@@ -585,19 +599,21 @@ Choose a model:", current),
                         self.send_message(chat_id, &format!("Sub-agent `{}` not found.", task_id), None).await?;
                     }
                 } else {
-                    // /stop — cancel main session + all sub-agents
+                    // /stop — cancel main session + all sub-agents + all running rituals
                     let main_cancelled = self.runner.cancel_session(&session_key).await;
                     let sub_count = self.runner.cancel_all_subagents().await;
+                    let ritual_runner = self.make_ritual_runner(chat_id);
+                    let ritual_count = ritual_runner.cancel_all_running();
                     // Also remove from active sessions so new messages aren't queued
                     {
                         let mut active = self.active_sessions.lock().await;
                         active.remove(&session_key);
                     }
-                    let msg = match (main_cancelled, sub_count) {
+                    let msg = match (main_cancelled, sub_count + ritual_count) {
                         (true, 0) => "⛔ Stopped.".to_string(),
-                        (true, n) => format!("⛔ Stopped + cancelled {} sub-agent(s).", n),
+                        (true, n) => format!("⛔ Stopped + cancelled {} task(s).", n),
                         (false, 0) => "Nothing running.".to_string(),
-                        (false, n) => format!("⛔ Cancelled {} sub-agent(s).", n),
+                        (false, n) => format!("⛔ Cancelled {} task(s).", n),
                     };
                     self.send_message(chat_id, &msg, None).await?;
                 }
@@ -663,7 +679,7 @@ Choose a model:", current),
     /// Handle /ritual subcommands.
     async fn handle_ritual_command(&self, chat_id: i64, arg: &str) -> anyhow::Result<()> {
         use gid_core::ritual::{
-            V2State as RitualState, V2Event as RitualEvent,
+            V2Event as RitualEvent,
         };
 
         match arg {
@@ -842,10 +858,45 @@ Choose a model:", current),
                     }
                 }
             }
-            arg if arg.starts_with("approve ") || arg == "approve" => {
-                let approved = arg.strip_prefix("approve ").unwrap_or("all").trim().to_string();
+            arg if arg.starts_with("approve ") || arg == "approve"
+                || arg.starts_with("apply ") || arg == "apply" => {
+                // "apply" is a common alias for "approve" (users say "apply all" for review findings)
+                let approved = arg.strip_prefix("approve ")
+                    .or_else(|| arg.strip_prefix("apply "))
+                    .unwrap_or("all")
+                    .trim()
+                    .to_string();
                 let runner = self.make_ritual_runner(chat_id);
-                let state = runner.load_state()?;
+                // Find rituals waiting for approval
+                let waiting: Vec<_> = runner.list_rituals()?
+                    .into_iter()
+                    .filter(|r| r.phase == gid_core::ritual::V2Phase::WaitingApproval)
+                    .collect();
+
+                let state = match waiting.len() {
+                    0 => {
+                        self.send_message(
+                            chat_id,
+                            "⚠️ No ritual is waiting for approval. Use `/ritual status` to check.",
+                            None,
+                        ).await?;
+                        return Ok(());
+                    }
+                    1 => waiting.into_iter().next().unwrap(),
+                    _ => {
+                        // Multiple waiting — ask user which one
+                        let mut msg = "⚠️ Multiple rituals waiting for approval:\n".to_string();
+                        for (i, r) in waiting.iter().enumerate() {
+                            let task_preview: String = r.task.chars().take(60).collect();
+                            msg.push_str(&format!("{}. `{}` — {}\n", i + 1, r.id, task_preview));
+                        }
+                        msg.push_str("\nSpecify which: `/ritual approve all` applies to the most recent.\nOr cancel unwanted rituals with `/ritual cancel <id>`.");
+                        self.send_message(chat_id, &msg, None).await?;
+                        // Default: use most recent (already sorted by updated_at desc)
+                        waiting.into_iter().next().unwrap()
+                    }
+                };
+
                 if state.phase != gid_core::ritual::V2Phase::WaitingApproval {
                     self.send_message(
                         chat_id,
@@ -853,10 +904,12 @@ Choose a model:", current),
                         None,
                     ).await?;
                 } else {
-                    self.send_message(chat_id, &format!("✅ Applying approved findings: {}", approved), None).await?;
+                    let ritual_id = state.id.clone();
+                    let task_preview: String = state.task.chars().take(60).collect();
+                    self.send_message(chat_id, &format!("✅ Applying findings to ritual '{}': {}", task_preview, approved), None).await?;
                     let bot = self.clone();
                     tokio::spawn(async move {
-                        match runner.send_event(RitualEvent::UserApproval { approved }).await {
+                        match runner.send_event_to(&ritual_id, RitualEvent::UserApproval { approved }).await {
                             Ok(state) => {
                                 if let Err(e) = runner.save_state(&state) {
                                     tracing::error!("Failed to save ritual state: {}", e);
@@ -871,6 +924,59 @@ Choose a model:", current),
                 }
             }
             task => {
+                // Guard: reject short/ambiguous text that looks like a mistyped command
+                // rather than a real task description. This prevents "/ritual apply all"
+                // from starting a ritual with task "apply all".
+                let normalized = task.trim().to_lowercase();
+                let looks_like_command = matches!(
+                    normalized.as_str(),
+                    "apply" | "apply all" | "approve" | "approve all"
+                    | "yes" | "no" | "ok" | "skip" | "retry" | "cancel"
+                    | "help" | "list" | "status"
+                ) || normalized.len() < 10;
+
+                if looks_like_command {
+                    // Check if there's a waiting ritual that should receive this
+                    let runner = self.make_ritual_runner(chat_id);
+                    if let Ok(state) = runner.load_state() {
+                        if state.phase == gid_core::ritual::V2Phase::WaitingApproval
+                            || state.phase == gid_core::ritual::V2Phase::WaitingClarification
+                        {
+                            // Route to the waiting ritual instead of starting a new one
+                            if let Some(event) = self.build_ritual_event_from_text(task, &state) {
+                                self.send_message(chat_id, "💬 Routing to waiting ritual...", None).await?;
+                                let bot = self.clone();
+                                tokio::spawn(async move {
+                                    match runner.send_event(event).await {
+                                        Ok(new_state) => {
+                                            if let Err(e) = runner.save_state(&new_state) {
+                                                tracing::error!("Failed to save ritual state: {}", e);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            let _ = bot.send_message(chat_id, &format!("❌ {}", e), None).await;
+                                        }
+                                    }
+                                });
+                                return Ok(());
+                            }
+                        }
+                    }
+                    // No waiting ritual — tell user this doesn't look like a task
+                    self.send_message(
+                        chat_id,
+                        &format!("⚠️ '{}' doesn't look like a task description. Did you mean:\n\
+                            • `/ritual approve all` — approve review findings\n\
+                            • `/ritual status` — check ritual status\n\
+                            • `/ritual cancel` — cancel current ritual\n\n\
+                            To start a new ritual, provide a full task description.",
+                            task
+                        ),
+                        None,
+                    ).await?;
+                    return Ok(());
+                }
+
                 // Start new ritual as an isolated sub-agent (independent session/context)
                 // This prevents ritual phases from polluting the main agent's context
                 self.send_message(chat_id, &format!("🚀 Starting ritual: \"{}\"", task), None).await?;
@@ -878,6 +984,7 @@ Choose a model:", current),
                 let task_string = task.to_string();
                 let notify_fn = self.make_notify_fn(chat_id);
                 let cancel_registry = self.ritual_cancel_registry.clone();
+                let event_registry = self.ritual_event_registry.clone();
                 tokio::spawn(async move {
                     // Create ritual runner with its own LLM client (separate from main agent)
                     let ritual_llm = match crate::llm::create_client(&bot.runner.config().llm) {
@@ -887,11 +994,12 @@ Choose a model:", current),
                             return;
                         }
                     };
-                    let runner = crate::ritual_runner::RitualRunner::with_cancel_registry(
+                    let runner = crate::ritual_runner::RitualRunner::with_registries(
                         bot.runner.workspace_root().to_path_buf(),
                         ritual_llm,
                         notify_fn,
                         cancel_registry,
+                        event_registry,
                     ).with_agent_runner(bot.runner.clone());
                     match runner.start(task_string).await {
                         Ok(state) => {
@@ -914,31 +1022,130 @@ Choose a model:", current),
         Ok(())
     }
 
+    /// Route a user message to a waiting ritual if one exists.
+    /// Returns true if the message was routed, false if no ritual is waiting.
+    ///
+    /// Checks disk for rituals in WaitingApproval/WaitingClarification state.
+    /// Calls advance() which is stateless — no channels, no loops, just load → transition → save.
+    async fn try_route_to_waiting_ritual(&self, chat_id: i64, text: &str) -> bool {
+        let runner = self.make_ritual_runner(chat_id);
+        let state = match runner.load_state() {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+
+        // Only intercept if a ritual is actively waiting for user input
+        if !state.phase.is_paused() {
+            return false;
+        }
+
+        let event = match self.build_ritual_event_from_text(text, &state) {
+            Some(e) => e,
+            None => return false, // Doesn't look like a ritual response → let main agent handle
+        };
+
+        let ritual_id = state.id.clone();
+        let bot = self.clone();
+        tokio::spawn(async move {
+            match runner.send_event_to(&ritual_id, event).await {
+                Ok(_) => {
+                    tracing::info!(ritual_id = %ritual_id, "User message routed to waiting ritual via advance");
+                }
+                Err(e) => {
+                    let _ = bot.send_message(chat_id, &format!("❌ Failed to resume ritual: {}", e), None).await;
+                }
+            }
+        });
+        true
+    }
+
     /// Create a notify callback that sends Telegram messages to the given chat.
     fn make_ritual_runner(&self, chat_id: i64) -> crate::ritual_runner::RitualRunner {
-        crate::ritual_runner::RitualRunner::with_cancel_registry(
+        crate::ritual_runner::RitualRunner::with_registries(
             self.runner.workspace_root().to_path_buf(),
             self.runner.llm_client(),
             self.make_notify_fn(chat_id),
             self.ritual_cancel_registry.clone(),
+            self.ritual_event_registry.clone(),
         ).with_agent_runner(self.runner.clone())
+    }
+
+    /// Build a ritual event from user free-text based on the ritual's current phase.
+    /// Returns None if the text doesn't look like a ritual response — in that case
+    /// the message should go to the main agent instead.
+    ///
+    /// For WaitingApproval: only matches explicit approval/skip patterns.
+    /// For WaitingClarification: any text is treated as clarification.
+    fn build_ritual_event_from_text(
+        &self,
+        text: &str,
+        state: &gid_core::ritual::V2State,
+    ) -> Option<gid_core::ritual::V2Event> {
+        use gid_core::ritual::V2Phase;
+        use gid_core::ritual::V2Event;
+
+        let normalized = text.trim().to_lowercase();
+
+        if state.phase == V2Phase::WaitingApproval {
+            // Only match explicit approval patterns — don't hijack unrelated messages
+            if normalized == "skip" || normalized == "跳过" {
+                return Some(V2Event::UserSkipPhase);
+            }
+            // "apply all", "apply 1,3", "approve all", "all", "yes", "ok", "好"
+            if normalized.starts_with("apply ")
+                || normalized.starts_with("approve ")
+                || normalized == "apply" || normalized == "approve"
+                || normalized == "all" || normalized == "apply all" || normalized == "approve all"
+                || normalized == "yes" || normalized == "ok" || normalized == "好"
+                || normalized == "全部应用" || normalized == "应用"
+            {
+                let approved = normalized
+                    .strip_prefix("apply ")
+                    .or_else(|| normalized.strip_prefix("approve "))
+                    .unwrap_or("all")
+                    .trim()
+                    .to_string();
+                return Some(V2Event::UserApproval { approved });
+            }
+            // Numbered selection like "1,3,5" or "FINDING-1,3"
+            if normalized.contains("finding") || normalized.chars().all(|c| c.is_ascii_digit() || c == ',' || c == ' ') {
+                return Some(V2Event::UserApproval { approved: normalized });
+            }
+            // Doesn't look like an approval — let it go to main agent
+            None
+        } else if state.phase == V2Phase::WaitingClarification {
+            // Any text is valid clarification
+            Some(V2Event::UserClarification { response: text.to_string() })
+        } else {
+            None
+        }
     }
 
     /// Handle a sub-agent lifecycle event: trigger a proactive agent turn so the agent
     /// knows its sub-agent completed/failed and can act on it.
     async fn handle_subagent_event(&self, event: crate::events::SubAgentEvent) {
         let (parent_key, system_msg) = match &event {
-            crate::events::SubAgentEvent::Completed { task_id, parent_session_key, task_summary, result_preview, duration_secs } => {
+            crate::events::SubAgentEvent::Completed { task_id, parent_session_key, task_summary, result_preview, files_modified, duration_secs } => {
+                let files_str = if files_modified.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    files_modified.join(", ")
+                };
                 let msg = format!(
-                    "[system] Your sub-agent '{}' has completed ({:.0}s).\nTask: {}\nResult summary: {}",
-                    task_id, duration_secs, task_summary, result_preview
+                    "[system] Your sub-agent '{}' has completed ({:.0}s).\nTask: {}\nFiles modified: {}\nResult summary: {}",
+                    task_id, duration_secs, task_summary, files_str, result_preview
                 );
                 (parent_session_key.clone(), msg)
             }
-            crate::events::SubAgentEvent::Failed { task_id, parent_session_key, task_summary, error, duration_secs } => {
+            crate::events::SubAgentEvent::Failed { task_id, parent_session_key, task_summary, error, files_modified, duration_secs } => {
+                let files_str = if files_modified.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    files_modified.join(", ")
+                };
                 let msg = format!(
-                    "[system] Your sub-agent '{}' has FAILED ({:.0}s).\nTask: {}\nError: {}",
-                    task_id, duration_secs, task_summary, error
+                    "[system] Your sub-agent '{}' has FAILED ({:.0}s).\nTask: {}\nError: {}\nFiles modified before failure: {}",
+                    task_id, duration_secs, task_summary, error, files_str
                 );
                 (parent_session_key.clone(), msg)
             }
@@ -1431,8 +1638,9 @@ Choose a model:", current),
 
         // Voice mode toggle is handled by LLM via set_voice_mode tool.
 
-        // Step 4: Process through agent with [Voice message] prefix
-        let user_message = format!("[Voice message] {}", transcription);
+        // Step 4: Process transcribed text as a normal message.
+        // No prefix — agent treats it the same as typed text.
+        let user_message = transcription;
         let session_key = format!("telegram:{}", chat_id);
 
         let msg_ctx = crate::context::MessageContext {

@@ -1,7 +1,8 @@
 //! Slack channel adapter using Socket Mode.
 //!
 //! Connects via WebSocket for real-time events. Uses Socket Mode which requires
-//! an app-level token in addition to the bot token.
+//! an app-level token in addition to the bot token. Supports structured
+//! MessageContext for rich sender metadata and thread-based reply routing.
 
 use std::sync::Arc;
 
@@ -11,6 +12,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
 use crate::agent::AgentRunner;
 use crate::config::SlackConfig;
+use crate::context::{ChannelCapabilities, ChatType, MessageContext, ProcessedResponse};
 use crate::text_utils;
 
 const SLACK_API: &str = "https://slack.com/api";
@@ -41,7 +43,9 @@ impl SlackBot {
             anyhow::bail!("Slack auth.test failed: {:?}", resp.error);
         }
 
-        let bot_user_id = resp.user_id.ok_or_else(|| anyhow::anyhow!("No user_id in auth.test"))?;
+        let bot_user_id =
+            resp.user_id
+                .ok_or_else(|| anyhow::anyhow!("No user_id in auth.test"))?;
         tracing::info!("Slack bot authenticated as user_id={}", bot_user_id);
 
         Ok(Self {
@@ -50,6 +54,27 @@ impl SlackBot {
             runner,
             bot_user_id,
         })
+    }
+
+    /// Return Slack channel capabilities.
+    fn capabilities() -> ChannelCapabilities {
+        ChannelCapabilities {
+            name: "slack".into(),
+            supports_reactions: true,
+            supports_inline_buttons: true,
+            supports_voice: false,
+            supports_reply_to: true, // via threads
+            supports_typing: false,
+            supports_markdown: true,
+            supports_tables: false,
+            max_message_length: 4000,
+            format_notes: vec![
+                "Use Slack mrkdwn format: *bold*, _italic_, ~strikethrough~".into(),
+                "Links: <url|text> (auto-converted from markdown)".into(),
+                "Code blocks use triple backticks with language hint".into(),
+                "Use bullet lists instead of tables — Slack does not render them".into(),
+            ],
+        }
     }
 
     /// Get WebSocket URL for Socket Mode.
@@ -67,7 +92,8 @@ impl SlackBot {
             anyhow::bail!("apps.connections.open failed: {:?}", resp.error);
         }
 
-        resp.url.ok_or_else(|| anyhow::anyhow!("No URL in response"))
+        resp.url
+            .ok_or_else(|| anyhow::anyhow!("No URL in response"))
     }
 
     /// Check if message mentions the bot.
@@ -94,7 +120,10 @@ impl SlackBot {
         let mut result = text.to_string();
 
         // Unescape Telegram-style escapes
-        let unescape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!'];
+        let unescape_chars = [
+            '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.',
+            '!',
+        ];
         for c in unescape_chars {
             result = result.replace(&format!("\\{}", c), &c.to_string());
         }
@@ -113,7 +142,12 @@ impl SlackBot {
     }
 
     /// Send a message to a channel.
-    async fn send_message(&self, channel: &str, text: &str, thread_ts: Option<&str>) -> anyhow::Result<()> {
+    async fn send_message(
+        &self,
+        channel: &str,
+        text: &str,
+        thread_ts: Option<&str>,
+    ) -> anyhow::Result<()> {
         let mrkdwn = Self::to_mrkdwn(text);
 
         // Split long messages (Slack limit: 4000 chars for text field)
@@ -148,15 +182,20 @@ impl SlackBot {
     }
 
     /// Upload a file to a channel.
-    async fn upload_file(&self, channel: &str, file_path: &str, thread_ts: Option<&str>) -> anyhow::Result<()> {
+    async fn upload_file(
+        &self,
+        channel: &str,
+        file_path: &str,
+        thread_ts: Option<&str>,
+    ) -> anyhow::Result<()> {
         let file_bytes = tokio::fs::read(file_path).await?;
         let file_name = std::path::Path::new(file_path)
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("file");
 
-        let part = reqwest::multipart::Part::bytes(file_bytes)
-            .file_name(file_name.to_string());
+        let part =
+            reqwest::multipart::Part::bytes(file_bytes).file_name(file_name.to_string());
 
         let mut form = reqwest::multipart::Form::new()
             .text("channels", channel.to_string())
@@ -183,17 +222,29 @@ impl SlackBot {
         Ok(())
     }
 
-    /// Send a response, handling file attachments.
-    async fn send_response(&self, channel: &str, response: &str, thread_ts: Option<&str>) -> anyhow::Result<()> {
+    /// Send a response, handling file attachments and ProcessedResponse.
+    async fn send_response(
+        &self,
+        channel: &str,
+        response: &str,
+        thread_ts: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let processed = ProcessedResponse::from_raw(response);
+
+        if processed.is_silent {
+            return Ok(());
+        }
+
         // Check for FILE: patterns
         let file_re = regex::Regex::new(r"FILE:(/[^\s]+)").unwrap();
-        let mut text_without_files = response.to_string();
+        let mut text_without_files = processed.text.clone();
         let mut files_to_send: Vec<String> = Vec::new();
 
-        for cap in file_re.captures_iter(response) {
+        for cap in file_re.captures_iter(&processed.text) {
             let file_path = cap[1].to_string();
             files_to_send.push(file_path.clone());
-            text_without_files = text_without_files.replace(&format!("FILE:{}", file_path), "");
+            text_without_files =
+                text_without_files.replace(&format!("FILE:{}", file_path), "");
         }
 
         let clean_text = text_without_files.trim();
@@ -208,14 +259,59 @@ impl SlackBot {
             if std::path::Path::new(&file_path).exists() {
                 if let Err(e) = self.upload_file(channel, &file_path, thread_ts).await {
                     tracing::error!("Failed to upload file {}: {}", file_path, e);
-                    self.send_message(channel, &format!("⚠️ Failed to upload: {}", file_path), thread_ts).await?;
+                    self.send_message(
+                        channel,
+                        &format!("⚠️ Failed to upload: {}", file_path),
+                        thread_ts,
+                    )
+                    .await?;
                 }
             } else {
-                self.send_message(channel, &format!("⚠️ File not found: {}", file_path), thread_ts).await?;
+                self.send_message(
+                    channel,
+                    &format!("⚠️ File not found: {}", file_path),
+                    thread_ts,
+                )
+                .await?;
             }
         }
 
         Ok(())
+    }
+
+    /// Build a MessageContext from a Slack event.
+    fn build_message_context(&self, event: &serde_json::Value) -> MessageContext {
+        let user = event["user"].as_str().unwrap_or("unknown");
+        let channel = event["channel"].as_str().unwrap_or("");
+        let thread_ts = event["thread_ts"].as_str();
+
+        // Determine chat type: DMs start with "D", channels with "C", groups with "G"
+        let chat_type = if channel.starts_with('D') {
+            ChatType::Direct
+        } else {
+            ChatType::Group {
+                title: Some(format!("channel:{}", channel)),
+            }
+        };
+
+        // Build reply-to context if this is a threaded message
+        let reply_to = thread_ts.and_then(|_ts| {
+            // In Slack, thread_ts indicates this is a reply in a thread.
+            // The parent message isn't directly available here, but we know
+            // it's a thread reply.
+            None // We'd need an API call to get parent message text
+        });
+
+        MessageContext {
+            sender_id: Some(user.to_string()),
+            sender_name: None, // Would require users.info API call
+            sender_username: Some(user.to_string()), // Slack user IDs as username fallback
+            chat_type,
+            reply_to,
+            message_id: event["ts"]
+                .as_str()
+                .and_then(|ts| ts.replace('.', "").parse::<i64>().ok()),
+        }
     }
 
     /// Process a Socket Mode event.
@@ -235,14 +331,17 @@ impl SlackBot {
     }
 
     /// Handle Events API payload.
-    async fn handle_events_api(&self, payload: &serde_json::Value) -> anyhow::Result<()> {
+    async fn handle_events_api(
+        &self,
+        payload: &serde_json::Value,
+    ) -> anyhow::Result<()> {
         let event = match payload.get("event") {
             Some(e) => e,
             None => return Ok(()),
         };
 
         let event_type = event["type"].as_str().unwrap_or("");
-        
+
         match event_type {
             "message" | "app_mention" => {
                 self.handle_message(event).await?;
@@ -263,9 +362,10 @@ impl SlackBot {
         }
 
         let channel = event["channel"].as_str().unwrap_or("");
-        let user = event["user"].as_str().unwrap_or("");
         let text = event["text"].as_str().unwrap_or("");
-        let thread_ts = event["thread_ts"].as_str().or_else(|| event["ts"].as_str());
+        let thread_ts = event["thread_ts"]
+            .as_str()
+            .or_else(|| event["ts"].as_str());
 
         // Check channel filter
         if !self.should_process_channel(channel) {
@@ -276,7 +376,7 @@ impl SlackBot {
         // Check if mentioned (for normal messages, not app_mention events)
         let event_type = event["type"].as_str().unwrap_or("");
         let is_app_mention = event_type == "app_mention";
-        
+
         if !is_app_mention && !self.is_mentioned(text) {
             tracing::debug!("Ignoring message without mention");
             return Ok(());
@@ -291,30 +391,33 @@ impl SlackBot {
 
         // Build session key
         let session_key = format!("slack:{}", channel);
-        let user_id = user.to_string();
+
+        // Build structured message context
+        let msg_ctx = self.build_message_context(event);
 
         tracing::info!(
             "Slack message from {} in {}: {}",
-            user,
+            msg_ctx.sender_id.as_deref().unwrap_or("unknown"),
             channel,
             text_utils::truncate_chars(&content, 50)
         );
 
-        // Process with agent
+        // Process with agent using structured context
         match self
             .runner
-            .process_message(&session_key, &content, Some(&user_id), Some("slack"))
+            .process_message_with_context(&session_key, &content, &msg_ctx, false)
             .await
         {
             Ok(response) => {
-                let trimmed = response.trim();
-                if !trimmed.is_empty() && trimmed != "NO_REPLY" && trimmed != "HEARTBEAT_OK" {
-                    self.send_response(channel, trimmed, thread_ts).await?;
+                if !response.is_silent {
+                    self.send_response(channel, &response.text, thread_ts)
+                        .await?;
                 }
             }
             Err(e) => {
                 tracing::error!("Agent error: {}", e);
-                self.send_message(channel, &format!("⚠️ Error: {}", e), thread_ts).await?;
+                self.send_message(channel, &format!("⚠️ Error: {}", e), thread_ts)
+                    .await?;
             }
         }
 
@@ -325,7 +428,7 @@ impl SlackBot {
     async fn run(&self) -> anyhow::Result<()> {
         loop {
             tracing::info!("Connecting to Slack Socket Mode...");
-            
+
             let url = self.get_socket_url().await?;
             tracing::debug!("WebSocket URL: {}", url);
 
@@ -338,13 +441,18 @@ impl SlackBot {
                         match msg_result {
                             Ok(WsMessage::Text(text)) => {
                                 // Parse envelope
-                                if let Ok(envelope) = serde_json::from_str::<SocketModeEnvelope>(&text) {
+                                if let Ok(envelope) =
+                                    serde_json::from_str::<SocketModeEnvelope>(&text)
+                                {
                                     // Acknowledge the event
                                     if let Some(envelope_id) = &envelope.envelope_id {
                                         let ack = serde_json::json!({
                                             "envelope_id": envelope_id
                                         });
-                                        if let Err(e) = write.send(WsMessage::Text(ack.to_string().into())).await {
+                                        if let Err(e) = write
+                                            .send(WsMessage::Text(ack.to_string().into()))
+                                            .await
+                                        {
                                             tracing::error!("Failed to send ack: {}", e);
                                             break;
                                         }
@@ -386,8 +494,6 @@ impl SlackBot {
     }
 }
 
-/// Split a message into chunks respecting Slack's character limit.
-
 // --- Slack API response types ---
 
 #[derive(Debug, Deserialize)]
@@ -420,6 +526,10 @@ struct SocketModeEnvelope {
 
 /// Start the Slack channel.
 pub async fn start(config: SlackConfig, runner: Arc<AgentRunner>) -> anyhow::Result<()> {
-    let bot = SlackBot::new(config, runner).await?;
+    let bot = SlackBot::new(config, runner.clone()).await?;
+
+    // Set channel capabilities on the runner
+    runner.set_channel_capabilities(SlackBot::capabilities()).await;
+
     bot.run().await
 }

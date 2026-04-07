@@ -177,12 +177,12 @@ pub fn strip_markdown(markdown: &str) -> String {
     let opts = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
     let parser = Parser::new_ext(markdown, opts);
     let mut out = String::with_capacity(markdown.len());
-    let mut in_code_block = false;
+    let mut _in_code_block = false;
 
     for event in parser {
         match event {
-            Event::Start(Tag::CodeBlock(_)) => { in_code_block = true; }
-            Event::End(TagEnd::CodeBlock) => { in_code_block = false; out.push('\n'); }
+            Event::Start(Tag::CodeBlock(_)) => { _in_code_block = true; }
+            Event::End(TagEnd::CodeBlock) => { _in_code_block = false; out.push('\n'); }
             Event::Start(Tag::Item) => { out.push_str("• "); }
             Event::End(TagEnd::Item) => { if !out.ends_with('\n') { out.push('\n'); } }
             Event::End(TagEnd::Paragraph) => { out.push('\n'); }
