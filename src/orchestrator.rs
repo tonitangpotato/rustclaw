@@ -525,16 +525,16 @@ impl Orchestrator {
         let result = match runner.spawn_agent_with_options(agent_config, max_iterations) {
             Ok(subagent) => {
                 match runner
-                    .process_with_subagent(&subagent, description, Some(task_id))
+                    .process_with_subagent(&subagent, description, Some(task_id), None)
                     .await
                 {
-                    Ok(output) => {
+                    Ok(loop_result) => {
                         tracing::info!("Task {} completed successfully", task_id);
                         TaskResult {
                             task_id: task_id.to_string(),
                             agent_id: agent_id.clone(),
                             success: true,
-                            output,
+                            output: loop_result.output,
                             tokens_used: 0, // TODO: track actual usage
                             duration_ms: start.elapsed().as_millis() as u64,
                         }

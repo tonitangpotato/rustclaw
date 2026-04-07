@@ -130,6 +130,28 @@ impl ToolRegistry {
         registry
     }
     
+    /// Register tools for a typed agent. Only registers tools named in the list.
+    /// Tool names: "read_file", "write_file", "edit_file", "list_dir", "search_files", "exec", "web_fetch", "tts", "stt"
+    pub fn for_agent_type(tools: &[&str], workspace_root: &str) -> Self {
+        let mut registry = Self::new();
+        registry.workspace_root = Some(std::path::PathBuf::from(workspace_root));
+        for tool_name in tools {
+            match *tool_name {
+                "exec" => registry.register(Box::new(ExecTool)),
+                "read_file" => registry.register(Box::new(ReadFileTool::new(workspace_root))),
+                "write_file" => registry.register(Box::new(WriteFileTool::new(workspace_root))),
+                "edit_file" => registry.register(Box::new(EditFileTool::new(workspace_root))),
+                "list_dir" => registry.register(Box::new(ListDirTool::new(workspace_root))),
+                "search_files" => registry.register(Box::new(SearchFilesTool::new(workspace_root))),
+                "web_fetch" => registry.register(Box::new(WebFetchTool)),
+                "tts" => registry.register(Box::new(TtsTool)),
+                "stt" => registry.register(Box::new(SttTool)),
+                other => tracing::warn!("Unknown tool name in agent type: {}", other),
+            }
+        }
+        registry
+    }
+
     /// Register core tools for sub-agents with shared memory (engram).
     /// Sub-agents share the main memory manager for cross-agent memory access.
     /// The agent_id parameter sets the namespace for engram operations.
@@ -2191,6 +2213,11 @@ impl Tool for SpawnSpecialistTool {
                 "skill": {
                     "type": "string",
                     "description": "Skill name to inject (e.g., 'review-requirements', 'review-design'). The skill's SKILL.md content is prepended to the task prompt, giving the sub-agent full instructions."
+                },
+                "files": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "File paths to pre-load into the sub-agent's context. Content is included directly so the sub-agent doesn't waste iterations reading these files. Paths relative to workspace."
                 }
             },
             "required": ["task"]
@@ -2212,6 +2239,12 @@ impl Tool for SpawnSpecialistTool {
         let role = input["role"].as_str();
         let model_override = input["model"].as_str();
         let workspace_override = input["workspace"].as_str();
+
+        // Parse files to pre-load
+        let preload_files: Vec<String> = input["files"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
 
         // Resolve skill: explicit param → auto-detect via SkillRegistry
         let skill_registry = &runner.workspace().skill_registry;
@@ -2244,7 +2277,36 @@ impl Tool for SpawnSpecialistTool {
         } else {
             raw_task.to_string()
         };
-        let max_iterations = input["max_iterations"].as_u64().unwrap_or(80) as u32;
+        let max_iterations = input["max_iterations"].as_u64().unwrap_or(0) as u32; // 0 = use AgentType default
+
+        // Pre-load files into context blocks
+        let workspace_root = workspace_override
+            .or(runner.config().workspace.as_deref())
+            .unwrap_or(".");
+        let workspace_path = std::path::Path::new(workspace_root);
+        let preload_context: Vec<crate::agent::ContextBlock> = if !preload_files.is_empty() {
+            let full_paths: Vec<std::path::PathBuf> = preload_files.iter()
+                .map(|rel| {
+                    let p = std::path::Path::new(rel);
+                    if p.is_absolute() { p.to_path_buf() } else { workspace_path.join(rel) }
+                })
+                .filter(|p| p.exists())
+                .collect();
+            if full_paths.len() < preload_files.len() {
+                let missing: Vec<&str> = preload_files.iter()
+                    .filter(|rel| {
+                        let p = std::path::Path::new(rel.as_str());
+                        let full = if p.is_absolute() { p.to_path_buf() } else { workspace_path.join(rel) };
+                        !full.exists()
+                    })
+                    .map(|s| s.as_str())
+                    .collect();
+                tracing::warn!("Pre-load: {} files not found: {:?}", missing.len(), missing);
+            }
+            crate::ritual_runner::preload_files_with_budget(&full_paths, workspace_path, 120_000)
+        } else {
+            vec![]
+        };
         let wait = input["wait"].as_bool().unwrap_or(true);
 
         // Generate a unique task/session ID
@@ -2337,101 +2399,100 @@ impl Tool for SpawnSpecialistTool {
                     }
                 };
 
-                match runner_clone.spawn_agent_with_options(&final_config_clone, effective_max_iterations) {
-                    Ok(subagent) => {
-                        // Spawn a periodic progress ping (every 5 minutes)
-                        let ping_notify_slot = notify_slot_ping.clone();
-                        let ping_task_summary = task_summary.clone();
-                        let ping_agent_id = final_config_clone.id.clone();
-                        let ping_start = start_time;
-                        let ping_handle = tokio::spawn(async move {
-                            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
-                            interval.tick().await; // skip first immediate tick
-                            loop {
-                                interval.tick().await;
-                                let elapsed = format_subagent_duration(ping_start.elapsed());
-                                let msg = format!(
-                                    "⏳ **Sub-agent still running** ({})\n📋 Task: {}\n🆔 ID: {}",
-                                    elapsed, ping_task_summary, ping_agent_id
-                                );
-                                let notify_opt = {
-                                    let slot = ping_notify_slot.lock().unwrap();
-                                    slot.as_ref().cloned()
-                                };
-                                if let Some(notify) = notify_opt {
-                                    notify(msg).await;
-                                }
-                            }
-                        });
-
-                        let result = runner_clone.process_with_subagent(&subagent, &task_owned, Some(&final_config_clone.id)).await;
-                        ping_handle.abort(); // Stop progress pings
-
-                        match result {
-                            Ok(result) => {
-                                let elapsed = start_time.elapsed();
-                                let duration = format_subagent_duration(elapsed);
-                                let result_preview = if result.chars().count() > 200 {
-                                    format!("{}...", result.chars().take(200).collect::<String>())
-                                } else {
-                                    result.clone()
-                                };
-                                tracing::info!("Background sub-agent {} completed: {} chars", final_config_clone.id, result.len());
-                                let completion_msg = format!(
-                                    "✅ **Sub-agent completed** ({})\n\n\
-                                     📋 Task: {}\n\
-                                     🆔 ID: {}\n\
-                                     📝 Result:\n{}",
-                                    duration, task_summary, final_config_clone.id, result_preview
-                                );
-                                // Notify user via Telegram
-                                send_notify(completion_msg.clone());
-                                // Broadcast completion event — telegram.rs listener triggers proactive agent turn
-                                if let Some(ref tx) = event_tx {
-                                    let _ = tx.send(crate::events::SubAgentEvent::Completed {
-                                        task_id: final_config_clone.id.clone(),
-                                        parent_session_key: parent_session_key.clone().unwrap_or_default(),
-                                        task_summary: task_summary.clone(),
-                                        result_preview: result_preview.clone(),
-                                        duration_secs: elapsed.as_secs_f64(),
-                                    });
-                                }
-                            }
-                            Err(e) => {
-                                let elapsed = start_time.elapsed();
-                                let duration = format_subagent_duration(elapsed);
-                                tracing::error!("Background sub-agent {} failed: {}", final_config_clone.id, e);
-                                let fail_msg = format!(
-                                    "❌ **Sub-agent failed** ({})\n\n\
-                                     📋 Task: {}\n\
-                                     🆔 ID: {}\n\
-                                     💥 Error: {}",
-                                    duration, task_summary, final_config_clone.id, e
-                                );
-                                send_notify(fail_msg.clone());
-                                // Broadcast failure event
-                                if let Some(ref tx) = event_tx {
-                                    let _ = tx.send(crate::events::SubAgentEvent::Failed {
-                                        task_id: final_config_clone.id.clone(),
-                                        parent_session_key: parent_session_key.clone().unwrap_or_default(),
-                                        task_summary: task_summary.clone(),
-                                        error: e.to_string(),
-                                        duration_secs: elapsed.as_secs_f64(),
-                                    });
-                                }
+                // Map role to agent type
+                let agent_type = match final_config_clone.name.as_deref() {
+                    Some(r) if r.contains("explorer") || r.contains("researcher") || r.contains("Explorer") => &crate::agent::AgentType::EXPLORER,
+                    Some(r) if r.contains("reviewer") || r.contains("Reviewer") => &crate::agent::AgentType::REVIEWER,
+                    Some(r) if r.contains("planner") || r.contains("architect") || r.contains("Planner") => &crate::agent::AgentType::PLANNER,
+                    _ => &crate::agent::AgentType::CODER,
+                };
+                // Spawn a periodic progress ping (every 5 minutes)
+                    let ping_notify_slot = notify_slot_ping.clone();
+                    let ping_task_summary = task_summary.clone();
+                    let ping_agent_id = final_config_clone.id.clone();
+                    let ping_start = start_time;
+                    let ping_handle = tokio::spawn(async move {
+                        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+                        interval.tick().await; // skip first immediate tick
+                        loop {
+                            interval.tick().await;
+                            let elapsed = format_subagent_duration(ping_start.elapsed());
+                            let msg = format!(
+                                "⏳ **Sub-agent still running** ({})\n📋 Task: {}\n🆔 ID: {}",
+                                elapsed, ping_task_summary, ping_agent_id
+                            );
+                            let notify_opt = {
+                                let slot = ping_notify_slot.lock().unwrap();
+                                slot.as_ref().cloned()
+                            };
+                            if let Some(notify) = notify_opt {
+                                notify(msg).await;
                             }
                         }
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to spawn background sub-agent {}: {}", final_config_clone.id, e);
-                        send_notify(format!(
-                            "❌ **Failed to spawn sub-agent**\n\n\
+                    });
+
+                    let options = crate::agent::SubAgentOptions {
+                        model: final_config_clone.model.clone(),
+                        max_iterations: if effective_max_iterations > 0 { Some(effective_max_iterations) } else { None },
+                        workspace: final_config_clone.workspace.as_ref().map(std::path::PathBuf::from),
+                        context: preload_context.clone(),
+                    };
+                    let sub_result = runner_clone.run_subagent(agent_type, &task_owned, options).await;
+                    ping_handle.abort(); // Stop progress pings
+
+                    let elapsed = start_time.elapsed();
+                    let duration = format_subagent_duration(elapsed);
+
+                    if sub_result.outcome.is_success() {
+                        let result_preview = if sub_result.output.chars().count() > 200 {
+                            format!("{}...", sub_result.output.chars().take(200).collect::<String>())
+                        } else {
+                            sub_result.output.clone()
+                        };
+                        tracing::info!("Background sub-agent {} completed: {} chars, {} tokens, {} files",
+                            sub_result.agent_id, sub_result.output.len(), sub_result.tokens, sub_result.files_modified.len());
+                        let completion_msg = format!(
+                            "✅ **Sub-agent completed** ({})\n\n\
                              📋 Task: {}\n\
-                             💥 Error: {}",
-                            task_summary, e
-                        ));
-                    }
-                }
+                             🆔 ID: {}\n\
+                             📝 Result:\n{}\n\
+                             📁 Files: {:?}",
+                            duration, task_summary, sub_result.agent_id, result_preview, sub_result.files_modified
+                        );
+                        send_notify(completion_msg.clone());
+                        if let Some(ref tx) = event_tx {
+                            let _ = tx.send(crate::events::SubAgentEvent::Completed {
+                                task_id: sub_result.agent_id.clone(),
+                                parent_session_key: parent_session_key.clone().unwrap_or_default(),
+                                task_summary: task_summary.clone(),
+                                result_preview: result_preview.clone(),
+                                files_modified: sub_result.files_modified.clone(),
+                                duration_secs: elapsed.as_secs_f64(),
+                            });
+                        }
+                    } else {
+                        let error_display = sub_result.outcome.display();
+                        tracing::error!("Background sub-agent {} failed: {}", sub_result.agent_id, error_display);
+                        let fail_msg = format!(
+                            "❌ **Sub-agent failed** ({})\n\n\
+                             📋 Task: {}\n\
+                             🆔 ID: {}\n\
+                             💥 {}\n\
+                             🪙 Tokens: {}, Turns: {}",
+                            duration, task_summary, sub_result.agent_id, error_display, sub_result.tokens, sub_result.turns
+                        );
+                        send_notify(fail_msg.clone());
+                        if let Some(ref tx) = event_tx {
+                            let _ = tx.send(crate::events::SubAgentEvent::Failed {
+                                task_id: sub_result.agent_id.clone(),
+                                parent_session_key: parent_session_key.clone().unwrap_or_default(),
+                                task_summary: task_summary.clone(),
+                                error: error_display.clone(),
+                                files_modified: sub_result.files_modified.clone(),
+                                duration_secs: elapsed.as_secs_f64(),
+                            });
+                        }
+                        }
             });
 
             return Ok(ToolResult {
@@ -2451,44 +2512,46 @@ impl Tool for SpawnSpecialistTool {
             });
         }
 
-        // Wait mode: spawn and wait for result
-        match runner.spawn_agent_with_options(&final_config, effective_max_iterations) {
-            Ok(subagent) => {
-                match runner.process_with_subagent(&subagent, &task, Some(&task_id)).await {
-                    Ok(result) => {
-                        tracing::info!("Sub-agent {} completed: {} chars", task_id, result.len());
-                        // Truncate sub-agent output to prevent blowing up parent's context
-                        let max_output = 8000; // ~2000 tokens
-                        let truncated_result = if result.chars().count() > max_output {
-                            let preview: String = result.chars().take(max_output).collect();
-                            format!("{}\n\n... (truncated from {} chars — sub-agent wrote full output to files)", preview, result.chars().count())
-                        } else {
-                            result
-                        };
-                        Ok(ToolResult {
-                            output: format!(
-                                "## Sub-agent '{}' completed\n\n### Result:\n{}",
-                                task_id, truncated_result
-                            ),
-                            is_error: false,
-                        })
-                    }
-                    Err(e) => {
-                        tracing::error!("Sub-agent {} failed: {}", task_id, e);
-                        Ok(ToolResult {
-                            output: format!("Sub-agent '{}' failed: {}", task_id, e),
-                            is_error: true,
-                        })
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::error!("Failed to spawn sub-agent {}: {}", task_id, e);
-                Ok(ToolResult {
-                    output: format!("Failed to spawn sub-agent: {}", e),
-                    is_error: true,
-                })
-            }
+        // Wait mode: run typed sub-agent and wait for result
+        let agent_type = match role {
+            Some("explorer" | "researcher") => &crate::agent::AgentType::EXPLORER,
+            Some("reviewer") => &crate::agent::AgentType::REVIEWER,
+            Some("planner" | "architect") => &crate::agent::AgentType::PLANNER,
+            _ => &crate::agent::AgentType::CODER,
+        };
+        let options = crate::agent::SubAgentOptions {
+            model: final_config.model.clone(),
+            max_iterations: if effective_max_iterations > 0 { Some(effective_max_iterations) } else { None },
+            workspace: final_config.workspace.as_ref().map(std::path::PathBuf::from),
+            context: preload_context,
+        };
+        let sub_result = runner.run_subagent(agent_type, &task, options).await;
+        tracing::info!("Sub-agent {} — {} ({} tokens, {} turns, {} files)",
+            sub_result.agent_id, sub_result.outcome.display(), sub_result.tokens, sub_result.turns, sub_result.files_modified.len());
+
+        if sub_result.outcome.is_success() {
+            let max_output = 8000;
+            let truncated_result = if sub_result.output.chars().count() > max_output {
+                let preview: String = sub_result.output.chars().take(max_output).collect();
+                format!("{}\n\n... (truncated from {} chars — sub-agent wrote full output to files)", preview, sub_result.output.chars().count())
+            } else {
+                sub_result.output
+            };
+            Ok(ToolResult {
+                output: format!(
+                    "## Sub-agent '{}' completed\n\n### Result:\n{}\n\n### Files modified:\n{}",
+                    sub_result.agent_id, truncated_result,
+                    if sub_result.files_modified.is_empty() { "(none)".to_string() }
+                    else { sub_result.files_modified.join("\n") }
+                ),
+                is_error: false,
+            })
+        } else {
+            Ok(ToolResult {
+                output: format!("Sub-agent '{}' failed: {}\nTokens: {}, Turns: {}\nFiles modified before failure: {:?}",
+                    sub_result.agent_id, sub_result.outcome.display(), sub_result.tokens, sub_result.turns, sub_result.files_modified),
+                is_error: true,
+            })
         }
     }
 }
@@ -3428,38 +3491,98 @@ impl Tool for GidExtractTool {
             });
         }
 
+        // Determine if this is an external directory (outside workspace).
+        // If so, write to a separate .gid/graph.yml in that project instead of
+        // merging into the workspace graph.
+        let workspace_graph_path = std::path::Path::new(self.path.as_str());
+        let workspace_dir = workspace_graph_path
+            .parent() // .gid/
+            .and_then(|p| p.parent()) // workspace root
+            .unwrap_or(std::path::Path::new("."));
+        let canonical_dir = dir_path.canonicalize().unwrap_or_else(|_| dir_path.to_path_buf());
+        let canonical_ws = workspace_dir.canonicalize().unwrap_or_else(|_| workspace_dir.to_path_buf());
+        let is_external = !canonical_dir.starts_with(&canonical_ws);
+
         // Extract code graph from directory
         let code_graph = CodeGraph::extract_from_dir(dir_path);
         let code_nodes = code_graph.nodes.len();
         let code_edges = code_graph.edges.len();
 
-        // Load existing task graph
-        let mut graph = self.graph.write().await;
-        let existing_nodes = graph.nodes.len();
-        let existing_edges = graph.edges.len();
+        if is_external {
+            // External project: find project root and write to its own .gid/graph.yml
+            let project_root = find_project_root(dir_path).unwrap_or_else(|| dir_path.to_path_buf());
+            let gid_dir = project_root.join(".gid");
+            std::fs::create_dir_all(&gid_dir)?;
+            let target_graph_path = gid_dir.join("graph.yml");
 
-        // Build unified graph (merges code + task graphs)
-        let unified = build_unified_graph(&code_graph, &graph);
+            // Load existing graph from that project (or empty)
+            let existing = gid_load_graph(&target_graph_path).unwrap_or_default();
+            let existing_nodes = existing.nodes.len();
+            let existing_edges = existing.edges.len();
 
-        // Replace the graph with unified version
-        *graph = unified;
+            // Build unified graph
+            let unified = build_unified_graph(&code_graph, &existing);
+            let total_nodes = unified.nodes.len();
+            let total_edges = unified.edges.len();
 
-        // Save updated graph
-        save_gid_graph(&graph, &self.path)?;
+            // Save to the external project's .gid/
+            gid_save_graph(&unified, &target_graph_path)?;
 
-        let new_nodes = graph.nodes.len() - existing_nodes;
-        let new_edges = graph.edges.len() - existing_edges;
+            Ok(ToolResult {
+                output: format!(
+                    "✅ Code extraction complete (external project):\n  - Analyzed: {}\n  - Found: {} code nodes, {} edges\n  - Existing graph: {} nodes, {} edges\n  - New unified: {} nodes, {} edges\n  - Saved to: {}",
+                    dir, code_nodes, code_edges,
+                    existing_nodes, existing_edges,
+                    total_nodes, total_edges,
+                    target_graph_path.display()
+                ),
+                is_error: false,
+            })
+        } else {
+            // Internal: merge into workspace graph (original behavior)
+            let mut graph = self.graph.write().await;
+            let existing_nodes = graph.nodes.len();
+            let existing_edges = graph.edges.len();
 
-        Ok(ToolResult {
-            output: format!(
-                "✅ Code extraction complete:\n  - Analyzed: {} (found {} code nodes, {} edges)\n  - Existing graph: {} nodes, {} edges\n  - New unified: {} nodes, {} edges\n  - Added: {} nodes, {} edges",
-                dir, code_nodes, code_edges,
-                existing_nodes, existing_edges,
-                graph.nodes.len(), graph.edges.len(),
-                new_nodes, new_edges
-            ),
-            is_error: false,
-        })
+            let unified = build_unified_graph(&code_graph, &graph);
+            *graph = unified;
+            save_gid_graph(&graph, &self.path)?;
+
+            let new_nodes = graph.nodes.len() - existing_nodes;
+            let new_edges = graph.edges.len() - existing_edges;
+
+            Ok(ToolResult {
+                output: format!(
+                    "✅ Code extraction complete:\n  - Analyzed: {} (found {} code nodes, {} edges)\n  - Existing graph: {} nodes, {} edges\n  - New unified: {} nodes, {} edges\n  - Added: {} nodes, {} edges",
+                    dir, code_nodes, code_edges,
+                    existing_nodes, existing_edges,
+                    graph.nodes.len(), graph.edges.len(),
+                    new_nodes, new_edges
+                ),
+                is_error: false,
+            })
+        }
+    }
+}
+
+/// Walk up from `dir` to find the project root (directory containing .git, Cargo.toml, package.json, etc.)
+fn find_project_root(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let markers = [".git", "Cargo.toml", "package.json", "pyproject.toml", "go.mod", ".gid"];
+    let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let mut current = if canonical.is_file() {
+        canonical.parent()?.to_path_buf()
+    } else {
+        canonical
+    };
+    loop {
+        for marker in &markers {
+            if current.join(marker).exists() {
+                return Some(current);
+            }
+        }
+        if !current.pop() {
+            return None;
+        }
     }
 }
 
@@ -4340,6 +4463,10 @@ impl Tool for StartRitualTool {
                 "task": {
                     "type": "string",
                     "description": "Description of the development task to accomplish"
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": "Optional workspace/project root directory path. If not provided, extracts from task text or uses default workspace."
                 }
             },
             "required": ["task"]
@@ -4351,6 +4478,25 @@ impl Tool for StartRitualTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'task' parameter"))?
             .to_string();
+
+        // Determine project root: explicit workspace param > extract from task > default
+        let workspace_override = input["workspace"]
+            .as_str()
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute() && p.exists() && p.is_dir());
+
+        let project_root = if let Some(ref ws) = workspace_override {
+            ws.clone()
+        } else {
+            self.workspace_root.clone()
+        };
+
+        // If workspace was provided, append it to task text so extract_target_project_dir can use it
+        let task = if let Some(ref ws) = workspace_override {
+            format!("{}\nProject location: {}", task, ws.display())
+        } else {
+            task
+        };
 
         let llm_client = match &self.llm_client {
             Some(c) => c.clone(),
@@ -4373,7 +4519,7 @@ impl Tool for StartRitualTool {
             }));
 
         let runner = crate::ritual_runner::RitualRunner::new(
-            self.workspace_root.clone(),
+            project_root,
             llm_client,
             notify,
         );
@@ -4399,8 +4545,35 @@ impl Tool for StartRitualTool {
                     gid_core::ritual::state_machine::RitualPhase::Cancelled => {
                         "🛑 Ritual was cancelled.".to_string()
                     }
+                    gid_core::ritual::state_machine::RitualPhase::WaitingApproval => {
+                        let review_target = state.review_target.as_deref().unwrap_or("unknown");
+                        format!(
+                            "⏸️ Ritual paused — waiting for approval of {} review.\n\
+                             Review findings are in `.gid/reviews/`.\n\
+                             The user can approve via `/ritual approve all` or `/ritual skip`.\n\
+                             You may continue implementing independently if the design is already clear.",
+                            review_target
+                        )
+                    }
+                    gid_core::ritual::state_machine::RitualPhase::WaitingClarification => {
+                        let questions = state.error_context.as_deref().unwrap_or("Task needs clarification");
+                        format!(
+                            "⏸️ Ritual paused — task is ambiguous and needs clarification.\n\
+                             Questions: {}\n\
+                             Ask the user for details, then use `/ritual retry` to resume.",
+                            questions
+                        )
+                    }
                     _ => {
-                        format!("Ritual ended in {} phase.", phase_name)
+                        let mut msg = format!("Ritual ended in {} phase.", phase_name);
+                        if let Some(ref err) = state.error_context {
+                            msg.push_str(&format!("\nError: {}", err));
+                        }
+                        if let Some(ref root) = state.target_root {
+                            msg.push_str(&format!("\nTarget root: {}", root));
+                        }
+                        msg.push_str("\nThis usually means project detection failed or the workspace path is wrong.");
+                        msg
                     }
                 };
 

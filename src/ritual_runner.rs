@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use anyhow::Result;
 use gid_core::ritual::{
-    V2State as RitualState, V2Phase as RitualPhase, V2Event as RitualEvent,
+    V2Phase as RitualPhase,
+    V2State as RitualState, V2Event as RitualEvent,
     V2Action as RitualAction, V2ProjectState as ProjectState,
     ImplementStrategy, transition, truncate,
 };
@@ -21,8 +22,20 @@ pub type NotifyFn = Arc<dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Fut
 /// Key: ritual ID, Value: CancellationToken.
 pub type CancelRegistry = Arc<std::sync::Mutex<std::collections::HashMap<String, tokio_util::sync::CancellationToken>>>;
 
+/// Shared registry for sending events to paused rituals waiting in-loop.
+/// Key: ritual ID, Value: oneshot Sender for the resume event.
+pub type EventRegistry = Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::Sender<RitualEvent>>>>;
+
+/// Default timeout (seconds) before auto-approving a paused ritual.
+const AUTO_APPROVE_TIMEOUT_SECS: u64 = 1800; // 30 minutes — user needs time to read review findings
+
 /// Create a new empty cancel registry.
 pub fn new_cancel_registry() -> CancelRegistry {
+    Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Create a new empty event registry.
+pub fn new_event_registry() -> EventRegistry {
     Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -34,6 +47,7 @@ pub struct RitualRunner {
     llm_client: Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>,
     notify: NotifyFn,
     cancel_registry: CancelRegistry,
+    event_registry: EventRegistry,
     /// Optional AgentRunner for running skill phases as isolated sub-agents.
     /// When set, each phase gets its own session with auto-compact, persist, etc.
     agent_runner: Option<Arc<crate::agent::AgentRunner>>,
@@ -45,7 +59,7 @@ impl RitualRunner {
         llm_client: Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>,
         notify: NotifyFn,
     ) -> Self {
-        Self::with_cancel_registry(project_root, llm_client, notify, new_cancel_registry())
+        Self::with_registries(project_root, llm_client, notify, new_cancel_registry(), new_event_registry())
     }
 
     pub fn with_cancel_registry(
@@ -53,6 +67,16 @@ impl RitualRunner {
         llm_client: Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>,
         notify: NotifyFn,
         cancel_registry: CancelRegistry,
+    ) -> Self {
+        Self::with_registries(project_root, llm_client, notify, cancel_registry, new_event_registry())
+    }
+
+    pub fn with_registries(
+        project_root: PathBuf,
+        llm_client: Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>,
+        notify: NotifyFn,
+        cancel_registry: CancelRegistry,
+        event_registry: EventRegistry,
     ) -> Self {
         let rituals_dir = project_root.join(".gid/rituals");
         let legacy_state_path = project_root.join(".gid/ritual-state.json");
@@ -63,6 +87,7 @@ impl RitualRunner {
             llm_client,
             notify,
             cancel_registry,
+            event_registry,
             agent_runner: None,
         }
     }
@@ -110,7 +135,6 @@ impl RitualRunner {
     pub fn list_rituals(&self) -> Result<Vec<RitualState>> {
         let mut rituals = Vec::new();
 
-        // Check rituals dir
         if self.rituals_dir.exists() {
             for entry in std::fs::read_dir(&self.rituals_dir)? {
                 let entry = entry?;
@@ -140,11 +164,35 @@ impl RitualRunner {
     }
 
     /// Find the latest active (non-terminal, non-idle) ritual.
+    /// Prioritizes rituals in Waiting* phases (user interaction needed) over
+    /// rituals in other active phases (running in background).
     fn find_latest_active(&self) -> Result<Option<RitualState>> {
         let rituals = self.list_rituals()?;
+        // First: look for a ritual waiting for user input (most likely what user is responding to)
+        let waiting = rituals.iter().find(|r| r.phase.is_paused());
+        if let Some(r) = waiting {
+            return Ok(Some(r.clone()));
+        }
+        // Second: any non-terminal, non-idle ritual
         Ok(rituals.into_iter().find(|r| {
             !r.phase.is_terminal() && r.phase != gid_core::ritual::V2Phase::Idle
         }))
+    }
+
+    /// Find the ritual currently waiting for approval, if any.
+    pub fn find_waiting_approval(&self) -> Result<Option<RitualState>> {
+        let rituals = self.list_rituals()?;
+        Ok(rituals.into_iter().find(|r| {
+            r.phase == gid_core::ritual::V2Phase::WaitingApproval
+        }))
+    }
+
+    /// Get the target project root for a ritual.
+    /// Returns state.target_root if set, otherwise self.project_root.
+    fn target_root_for(&self, state: &RitualState) -> PathBuf {
+        state.target_root.as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.project_root.clone())
     }
 
     /// Save state to disk (uses ritual ID for path).
@@ -157,32 +205,24 @@ impl RitualRunner {
     }
 
     /// Start a new ritual with a task description.
-    /// Multiple rituals can now run in parallel.
+    /// Extracts target project root from the task text if present (e.g., "Project location: /path/to/project").
+    /// Otherwise uses the runner's workspace root.
     pub async fn start(&self, task: String) -> Result<RitualState> {
-        let state = RitualState::new();
-        let ritual_id = state.id.clone();
-        tracing::info!(ritual_id = %ritual_id, task = %task, "Starting new ritual");
-
-        // Register cancellation token
-        let cancel_token = tokio_util::sync::CancellationToken::new();
-        {
-            let mut reg = self.cancel_registry.lock().unwrap();
-            reg.insert(ritual_id.clone(), cancel_token.clone());
-        }
-
-        let result = self.run_loop(state, RitualEvent::Start { task }, cancel_token).await;
-
-        // Cleanup token from registry
-        {
-            let mut reg = self.cancel_registry.lock().unwrap();
-            reg.remove(&ritual_id);
-        }
-
-        result
+        let target_root = extract_target_project_dir(&task)
+            .unwrap_or_else(|| self.project_root.clone());
+        let state = RitualState::new()
+            .with_target_root(target_root.to_string_lossy().to_string());
+        tracing::info!(
+            ritual_id = %state.id,
+            target_root = %target_root.display(),
+            task = %truncate(&task, 80),
+            "Starting new ritual"
+        );
+        self.save_state(&state)?;
+        self.advance(&state.id, RitualEvent::Start { task }).await
     }
 
     /// Cancel a running ritual by ID (triggers cancellation token).
-    /// Returns true if a running ritual was found and cancelled.
     pub fn cancel_running(&self, ritual_id: &str) -> bool {
         let reg = self.cancel_registry.lock().unwrap();
         if let Some(token) = reg.get(ritual_id) {
@@ -203,85 +243,218 @@ impl RitualRunner {
         count
     }
 
-    /// Send a user event (Cancel, Retry, SkipPhase) to the current ritual.
+    /// Send a user event to a specific ritual by ID.
+    pub async fn send_event_to(&self, ritual_id: &str, event: RitualEvent) -> Result<RitualState> {
+        // For UserCancel, also trigger cancellation of any running action
+        if matches!(&event, RitualEvent::UserCancel) {
+            self.cancel_running(ritual_id);
+        }
+        self.advance(ritual_id, event).await
+    }
+
+    /// Send a user event to the most relevant active ritual.
     pub async fn send_event(&self, event: RitualEvent) -> Result<RitualState> {
         let state = self.load_state()?;
-        let ritual_id = state.id.clone();
+        self.send_event_to(&state.id, event).await
+    }
 
-        // For UserCancel, also trigger cancellation token of running ritual
-        if matches!(&event, RitualEvent::UserCancel) {
-            self.cancel_running(&ritual_id);
+    // ═══════════════════════════════════════════════════════════════════════
+    // Core: advance — the single entry point for all ritual state transitions
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Advance a ritual by one step: transition(state, event) → execute actions.
+    ///
+    /// This is the entire ritual execution model:
+    /// 1. Load state from disk
+    /// 2. Run the pure transition function
+    /// 3. Save new state to disk immediately
+    /// 4. Execute fire-and-forget actions (notify, cleanup)
+    /// 5. If terminal/paused: return (user calls advance again when ready)
+    /// 6. If event-producing action: spawn it in background, which calls advance again on completion
+    ///
+    /// No loop. No channels. No timeout. State lives on disk.
+    /// Process can restart at any time — just call advance again.
+    pub async fn advance(&self, ritual_id: &str, event: RitualEvent) -> Result<RitualState> {
+        let state = self.load_state_by_id(ritual_id)?;
+
+        tracing::info!(
+            ritual_id = %ritual_id,
+            from_phase = %state.phase.display_name(),
+            event = ?format!("{:?}", &event).chars().take(80).collect::<String>(),
+            "Advancing ritual"
+        );
+
+        // Guard: don't advance a terminal ritual (except via UserRetry from Escalated)
+        if state.phase.is_terminal() && !matches!(&event, RitualEvent::UserRetry | RitualEvent::UserCancel) {
+            tracing::warn!(ritual_id = %ritual_id, phase = %state.phase.display_name(), "Cannot advance terminal ritual");
+            return Ok(state);
         }
 
-        // Re-register token for the continued loop
+        // Pure transition
+        let (new_state, actions) = transition(&state, event);
+
+        // Save immediately — even if action execution crashes, state is correct on disk
+        self.save_state(&new_state)?;
+
+        // Send notifications
+        for action in &actions {
+            if let RitualAction::Notify { message } = action {
+                if new_state.phase == RitualPhase::WaitingApproval {
+                    self.fire_and_forget_notify(self.enrich_review_notification(message, &new_state));
+                } else {
+                    self.fire_and_forget_notify(message.clone());
+                }
+            }
+        }
+
+        // Terminal: execute cleanup actions, send summary, done
+        if new_state.phase.is_terminal() {
+            self.execute_fire_and_forget_with_state(&actions, &new_state).await;
+            self.send_terminal_notification(&new_state).await;
+            return Ok(new_state);
+        }
+
+        // Paused (WaitingApproval, WaitingClarification): save and return.
+        // User will call advance() again when they respond.
+        if new_state.phase.is_paused() {
+            self.execute_fire_and_forget_with_state(&actions, &new_state).await;
+            tracing::info!(
+                ritual_id = %ritual_id,
+                phase = %new_state.phase.display_name(),
+                "Ritual paused — waiting for user input"
+            );
+            return Ok(new_state);
+        }
+
+        // Active phase: spawn the event-producing action in background.
+        // When it completes, it calls advance() again with the result event.
+        self.execute_fire_and_forget_with_state(&actions, &new_state).await;
+        self.spawn_event_producing_action(ritual_id, &actions, &new_state);
+
+        Ok(new_state)
+    }
+
+    /// Spawn the event-producing action (RunSkill, RunTriage, etc.) in background.
+    /// On completion, recursively calls advance() with the result event.
+    fn spawn_event_producing_action(
+        &self,
+        ritual_id: &str,
+        actions: &[RitualAction],
+        state: &RitualState,
+    ) {
+        // Find the event-producing action
+        let ep_action = match actions.iter().find(|a| a.is_event_producing()) {
+            Some(a) => a.clone(),
+            None => {
+                tracing::error!(ritual_id = %ritual_id, "No event-producing action in non-paused transition");
+                return;
+            }
+        };
+
+        let ritual_id = ritual_id.to_string();
+        let state = state.clone();
+
+        // Clone everything the spawned task needs (self is not Send, so we clone fields).
+        // Use the ritual's target_root so all operations run in the correct project directory.
+        let project_root = self.target_root_for(&state);
+        let rituals_dir = self.rituals_dir.clone();
+        let legacy_state_path = self.legacy_state_path.clone();
+        let llm_client = self.llm_client.clone();
+        let notify = self.notify.clone();
+        let cancel_registry = self.cancel_registry.clone();
+        let event_registry = self.event_registry.clone();
+        let agent_runner = self.agent_runner.clone();
+
+        // Register cancellation token for this action
         let cancel_token = tokio_util::sync::CancellationToken::new();
         {
             let mut reg = self.cancel_registry.lock().unwrap();
             reg.insert(ritual_id.clone(), cancel_token.clone());
         }
 
-        let result = self.run_loop(state, event, cancel_token).await;
+        tokio::spawn(async move {
+            // Rebuild a RitualRunner inside the spawned task
+            let runner = RitualRunner {
+                project_root,
+                rituals_dir,
+                legacy_state_path,
+                llm_client,
+                notify,
+                cancel_registry: cancel_registry.clone(),
+                event_registry,
+                agent_runner,
+            };
 
-        {
-            let mut reg = self.cancel_registry.lock().unwrap();
-            reg.remove(&ritual_id);
-        }
-
-        result
-    }
-
-    /// The core loop: transition → execute actions → get event → repeat until terminal.
-    async fn run_loop(
-        &self,
-        mut state: RitualState,
-        mut event: RitualEvent,
-        cancel_token: tokio_util::sync::CancellationToken,
-    ) -> Result<RitualState> {
-        loop {
-            // Check cancellation before each iteration
-            if cancel_token.is_cancelled() {
-                tracing::info!(ritual_id = %state.id, "Ritual cancelled via token");
-                event = RitualEvent::UserCancel;
-            }
-
-            let (new_state, actions) = transition(&state, event);
-            state = new_state;
-
-            if state.phase.is_terminal() || state.phase.is_paused() {
-                // Terminal or paused: save state, send notification
-                self.execute_fire_and_forget_with_state(&actions, &state).await;
-                if state.phase.is_terminal() {
-                    self.send_terminal_notification(&state).await;
-                }
-                break;
-            }
-
-            // Execute the single event-producing action with cancellation
-            let (evt, tokens_used) = tokio::select! {
+            // Execute the action with cancellation support
+            let (result_event, tokens_used) = tokio::select! {
                 _ = cancel_token.cancelled() => {
-                    tracing::info!(ritual_id = %state.id, "Ritual interrupted during action execution");
+                    tracing::info!(ritual_id = %ritual_id, "Action cancelled");
                     (RitualEvent::UserCancel, 0)
                 }
-                result = self.execute_event_producing(&actions, &state) => {
+                result = runner.execute_event_producing_single(&ep_action, &state, &cancel_token) => {
                     match result {
                         Ok(pair) => pair,
-                        Err(e) => (RitualEvent::SkillFailed {
-                            phase: state.phase.display_name().to_string(),
-                            error: format!("Executor error: {}", e),
-                        }, 0),
+                        Err(e) => {
+                            tracing::error!(ritual_id = %ritual_id, "Action execution error: {}", e);
+                            (RitualEvent::SkillFailed {
+                                phase: state.phase.display_name().to_string(),
+                                error: format!("Executor error: {}", e),
+                            }, 0)
+                        }
                     }
                 }
             };
-            // Record tokens BEFORE SaveState fires
+
+            // Record tokens
             if tokens_used > 0 {
-                let phase_name = state.phase.display_name().to_lowercase();
-                state = state.add_phase_tokens(&phase_name, tokens_used);
+                if let Ok(mut current_state) = runner.load_state_by_id(&ritual_id) {
+                    let phase_name = current_state.phase.display_name().to_lowercase();
+                    current_state = current_state.add_phase_tokens(&phase_name, tokens_used);
+                    let _ = runner.save_state(&current_state);
+                }
             }
-            // Now fire-and-forget (SaveState will include token counts)
-            self.execute_fire_and_forget_with_state(&actions, &state).await;
-            event = evt;
+
+            // Cleanup cancellation token
+            {
+                let mut reg = cancel_registry.lock().unwrap();
+                reg.remove(&ritual_id);
+            }
+
+            // Recurse: advance with the result event
+            if let Err(e) = runner.advance(&ritual_id, result_event).await {
+                tracing::error!(ritual_id = %ritual_id, "Advance after action failed: {}", e);
+            }
+        });
+    }
+
+    /// Execute a single event-producing action. Returns (event, tokens_used).
+    async fn execute_event_producing_single(
+        &self,
+        action: &RitualAction,
+        state: &RitualState,
+        cancel_token: &tokio_util::sync::CancellationToken,
+    ) -> Result<(RitualEvent, u64)> {
+        match action {
+            RitualAction::DetectProject => {
+                self.detect_project().await.map(|e| (e, 0))
+            }
+            RitualAction::RunSkill { name, context } => {
+                self.run_skill(name, context, cancel_token).await
+            }
+            RitualAction::RunShell { command } => {
+                self.run_shell(command).await.map(|e| (e, 0))
+            }
+            RitualAction::RunTriage { task } => {
+                self.run_triage(task, state).await
+            }
+            RitualAction::RunPlanning => {
+                self.run_planning().await
+            }
+            RitualAction::RunHarness { tasks } => {
+                self.run_harness(tasks, cancel_token).await
+            }
+            _ => Err(anyhow::anyhow!("Not an event-producing action: {:?}", action)),
         }
-        Ok(state)
     }
 
     /// Execute fire-and-forget actions (Notify, SaveState, UpdateGraph, Cleanup).
@@ -289,8 +462,9 @@ impl RitualRunner {
     async fn execute_fire_and_forget_with_state(&self, actions: &[RitualAction], state: &RitualState) {
         for action in actions {
             match action {
-                RitualAction::Notify { message } => {
-                    self.fire_and_forget_notify(message.clone());
+                RitualAction::Notify { .. } => {
+                    // Notifications are sent BEFORE event-producing actions in run_loop.
+                    // Skip here to avoid duplicate notifications.
                 }
                 RitualAction::SaveState => {
                     if let Err(e) = self.save_state(state) {
@@ -304,30 +478,25 @@ impl RitualRunner {
                     self.cleanup().await;
                 }
                 RitualAction::ApplyReview { approved } => {
-                    // Fire-and-forget: spawn a sub-agent to apply approved review findings
+                    // Fire-and-forget: use typed REVIEWER sub-agent to apply findings
+                    let target_root = self.target_root_for(state);
                     if let Some(ref runner) = self.agent_runner {
                         let task = format!(
                             "Apply the approved review findings to the documents in {}.\n\
                              Approved findings: {}\n\
                              Read the review file from .gid/reviews/, read the full target document, \
                              and apply ONLY the approved changes using Edit tool.",
-                            self.project_root.display(), approved
+                            target_root.display(), approved
                         );
-                        let config = crate::config::AgentConfig {
-                            id: format!("apply_review_{}", chrono::Utc::now().format("%H%M%S")),
-                            name: Some("ApplyReview".to_string()),
-                            workspace: Some(self.project_root.to_string_lossy().to_string()),
-                            model: Some("claude-sonnet-4-5-20250929".to_string()),
-                            default: false,
+                        let options = crate::agent::SubAgentOptions {
+                            workspace: Some(target_root.clone()),
+                            ..Default::default()
                         };
-                        match runner.spawn_agent_with_options(&config, 15) {
-                            Ok(subagent) => {
-                                match runner.process_with_subagent(&subagent, &task, None).await {
-                                    Ok(output) => tracing::info!("ApplyReview completed: {}", truncate(&output, 200)),
-                                    Err(e) => tracing::error!("ApplyReview failed: {}", e),
-                                }
-                            }
-                            Err(e) => tracing::error!("Failed to spawn ApplyReview sub-agent: {}", e),
+                        let sub_result = runner.run_subagent(&crate::agent::AgentType::REVIEWER, &task, options).await;
+                        if sub_result.outcome.is_success() {
+                            tracing::info!("ApplyReview completed: {}", truncate(&sub_result.output, 200));
+                        } else {
+                            tracing::error!("ApplyReview failed: {}", sub_result.outcome.display());
                         }
                     } else {
                         tracing::warn!("ApplyReview skipped — no AgentRunner available");
@@ -345,6 +514,81 @@ impl RitualRunner {
         tokio::spawn(async move {
             notify(message).await;
         });
+    }
+
+    /// Enrich the WaitingApproval notification with actual review findings from .gid/reviews/.
+    fn enrich_review_notification(&self, original_msg: &str, state: &RitualState) -> String {
+        // Find the most recent review file, skipping SUMMARY.md which is written last
+        // and contains no FINDING- entries.
+        let reviews_dir = self.target_root_for(state).join(".gid/reviews");
+        let latest_review = match std::fs::read_dir(&reviews_dir) {
+            Ok(entries) => {
+                let mut files: Vec<_> = entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| {
+                        let name = e.file_name().to_string_lossy().to_lowercase();
+                        name.ends_with(".md") && !name.starts_with("summary")
+                    })
+                    .collect();
+                files.sort_by_key(|e| std::cmp::Reverse(e.metadata().ok().and_then(|m| m.modified().ok())));
+                files.first().map(|e| e.path())
+            }
+            Err(_) => None,
+        };
+
+        let review_path = match latest_review {
+            Some(p) => p,
+            None => return original_msg.to_string(),
+        };
+
+        let content = match std::fs::read_to_string(&review_path) {
+            Ok(c) => c,
+            Err(_) => return original_msg.to_string(),
+        };
+
+        // Parse findings: lines starting with "### FINDING-"
+        // Capture the first non-blank, non-bold-label body line as the issue summary.
+        let mut findings = Vec::new();
+        let mut current_finding: Option<(String, String)> = None; // (header, issue)
+
+        for line in content.lines() {
+            if line.starts_with("### FINDING-") {
+                if let Some(f) = current_finding.take() {
+                    findings.push(f);
+                }
+                current_finding = Some((line.trim_start_matches("### ").to_string(), String::new()));
+            } else if let Some((_, ref mut issue)) = current_finding {
+                if issue.is_empty() {
+                    // Skip blank lines and bold-label lines (e.g. **Affected:**, **Suggested fix:**)
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() && !trimmed.starts_with("**") && !trimmed.starts_with("---") && !trimmed.starts_with("```") {
+                        *issue = trimmed.chars().take(120).collect::<String>();
+                        if trimmed.len() > 120 {
+                            issue.push_str("...");
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(f) = current_finding.take() {
+            findings.push(f);
+        }
+
+        if findings.is_empty() {
+            return original_msg.to_string();
+        }
+
+        // Format enriched notification
+        let file_name = review_path.file_name().unwrap_or_default().to_string_lossy();
+        let mut msg = format!("📋 Review complete ({}):\n\n", file_name);
+        for (header, issue) in &findings {
+            msg.push_str(&format!("  {}\n", header));
+            if !issue.is_empty() {
+                msg.push_str(&format!("    → {}\n", issue));
+            }
+        }
+        msg.push_str(&format!("\n{} finding(s). Reply: 'apply all' / 'apply 1,3' / 'skip'", findings.len()));
+        msg
     }
 
     /// Send enriched notification when ritual reaches a terminal state.
@@ -421,14 +665,19 @@ impl RitualRunner {
 
     /// Find and execute the single event-producing action from the action list.
     /// Returns (event, tokens_used) — tokens_used is 0 for non-LLM actions.
-    async fn execute_event_producing(&self, actions: &[RitualAction], state: &RitualState) -> Result<(RitualEvent, u64)> {
+    async fn execute_event_producing(
+        &self,
+        actions: &[RitualAction],
+        state: &RitualState,
+        cancel_token: &tokio_util::sync::CancellationToken,
+    ) -> Result<(RitualEvent, u64)> {
         for action in actions {
             match action {
                 RitualAction::DetectProject => {
                     return self.detect_project().await.map(|e| (e, 0));
                 }
                 RitualAction::RunSkill { name, context } => {
-                    return self.run_skill(name, context).await;
+                    return self.run_skill(name, context, cancel_token).await;
                 }
                 RitualAction::RunShell { command } => {
                     return self.run_shell(command).await.map(|e| (e, 0));
@@ -440,7 +689,7 @@ impl RitualRunner {
                     return self.run_planning().await;
                 }
                 RitualAction::RunHarness { tasks } => {
-                    return self.run_harness(tasks).await;
+                    return self.run_harness(tasks, cancel_token).await;
                 }
                 _ => {} // Fire-and-forget handled above
             }
@@ -449,6 +698,9 @@ impl RitualRunner {
     }
 
     /// Scan filesystem to detect project state.
+    /// Uses self.project_root — caller should ensure this points to the right project.
+    /// In the advance model, detect_project is called from execute_event_producing_single
+    /// which runs inside a spawned RitualRunner with the correct project_root.
     async fn detect_project(&self) -> Result<RitualEvent> {
         let root = &self.project_root;
 
@@ -558,7 +810,7 @@ impl RitualRunner {
     async fn run_triage(&self, task: &str, ritual_state: &RitualState) -> Result<(RitualEvent, u64)> {
         use gid_core::ritual::TriageResult;
 
-        // Build project context for triage prompt
+        // Build project context for triage prompt (single source of truth in gid-core)
         let project_ctx = if let Some(ps) = ritual_state.project.as_ref() {
             format!(
                 "Project: lang={}, has_req={}, has_design={}, has_graph={}, source_files={}, has_tests={}",
@@ -570,34 +822,10 @@ impl RitualRunner {
             "Project: unknown state".into()
         };
 
-        let prompt = format!(
-            r#"You are a triage agent. Assess this development task quickly.
-
-{project_ctx}
-
-Task: "{task}"
-
-Respond with ONLY a JSON object (no markdown, no explanation):
-{{
-  "clarity": "clear" or "ambiguous",
-  "clarify_questions": ["question1", ...] (only if ambiguous, otherwise empty array),
-  "size": "small", "medium", or "large",
-  "skip_design": true/false,
-  "skip_graph": true/false
-}}
-
-Guidelines:
-- "small": bug fix, add a simple command, change a config value, rename something
-- "medium": add a feature that touches 2-3 files, refactor a module
-- "large": new subsystem, architectural change, multi-file feature
-- skip_design=true if the task is small enough that a DESIGN.md update adds no value
-- skip_graph=true if the task doesn't add new architectural nodes/edges
-- "ambiguous" if the task description is vague, could mean multiple things, or lacks critical info
-- Short ≠ simple. "fix the bug" is ambiguous. "fix the auth retry loop in llm.rs" is clear and small."#
-        );
+        let prompt = gid_core::ritual::build_triage_prompt(task, &project_ctx);
 
         // Use haiku for triage (cheap, fast)
-        let model = "haiku";
+        let model = "claude-haiku-4-5-20251001";
         tracing::info!(task = task, model = model, "Running triage");
 
         let llm = self.llm_client.read().await;
@@ -667,11 +895,61 @@ Guidelines:
         output.trim()
     }
 
-    /// Run a skill phase using the RitualLlmAdapter, or as an isolated sub-agent if AgentRunner is available.
-    async fn run_skill(&self, name: &str, context: &str) -> Result<(RitualEvent, u64)> {
-        // If AgentRunner is available, run as isolated sub-agent (full context management)
+    /// Run a skill phase. Uses typed sub-agent via run_subagent when AgentRunner is available.
+    /// Falls back to direct RitualLlmAdapter when AgentRunner is None (testing, standalone).
+    async fn run_skill(
+        &self,
+        name: &str,
+        context: &str,
+        cancel_token: &tokio_util::sync::CancellationToken,
+    ) -> Result<(RitualEvent, u64)> {
+        // V2: all phases use typed sub-agents when AgentRunner is available
         if let Some(ref runner) = self.agent_runner {
-            return self.run_skill_as_subagent(runner, name, context).await;
+            let agent_type = match name {
+                "implement" | "execute-tasks" => &crate::agent::AgentType::CODER,
+                "review-design" | "review-requirements" | "review-tasks" => &crate::agent::AgentType::REVIEWER,
+                "draft-design" | "update-design" => &crate::agent::AgentType::PLANNER,
+                _ => &crate::agent::AgentType::CODER,
+            };
+
+            let phase_context = match name {
+                "implement" | "execute-tasks" => build_implement_context(&self.project_root),
+                n if n.starts_with("review-") => build_review_context(name, &self.project_root),
+                _ => vec![],
+            };
+
+            let options = crate::agent::SubAgentOptions {
+                workspace: Some(self.project_root.clone()),
+                context: phase_context,
+                ..Default::default()
+            };
+
+            let result = tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    return Ok((RitualEvent::SkillFailed {
+                        phase: name.to_string(),
+                        error: "Cancelled".to_string(),
+                    }, 0));
+                }
+                r = runner.run_subagent(agent_type, context, options) => r,
+            };
+
+            return if result.outcome.is_success() {
+                tracing::info!(
+                    "Ritual phase '{}' completed via sub-agent ({} tokens, {} files)",
+                    name, result.tokens, result.files_modified.len()
+                );
+                Ok((RitualEvent::SkillCompleted {
+                    phase: name.to_string(),
+                    artifacts: result.files_modified,
+                }, result.tokens))
+            } else {
+                tracing::error!("Ritual phase '{}' failed: {}", name, result.outcome.display());
+                Ok((RitualEvent::SkillFailed {
+                    phase: name.to_string(),
+                    error: result.outcome.display(),
+                }, result.tokens))
+            };
         }
 
         // Fallback: direct execution via RitualLlmAdapter (no session management)
@@ -782,6 +1060,10 @@ Guidelines:
                 if review_phases.contains(&name) {
                     let max_reviews = 4;
                     for round in 1..=max_reviews {
+                        if cancel_token.is_cancelled() {
+                            tracing::info!(skill = name, "Self-review cancelled at round {}", round);
+                            break;
+                        }
                         let checklist = match name {
                             "draft-design" | "update-design" => "\
                              - Does the design actually solve the stated problem?\n\
@@ -900,294 +1182,16 @@ Guidelines:
         }
     }
 
-    /// Run a skill phase as an isolated sub-agent with full session management.
-    /// Each phase gets its own session, auto-compact, persist, reactive compact.
-    /// Context is completely isolated — phases communicate through files.
-    async fn run_skill_as_subagent(
-        &self,
-        runner: &Arc<crate::agent::AgentRunner>,
-        name: &str,
-        context: &str,
-    ) -> Result<(RitualEvent, u64)> {
-        use gid_core::ritual::scope::default_scope_for_phase;
-
-        let scope = default_scope_for_phase(name);
-        let model = match name {
-            "implement" => "opus",
-            _ => "sonnet",
-        };
-
-        // Build skill prompt
-        let base_prompt = self.load_skill_prompt(name);
-        let skill_prompt = if context.is_empty() {
-            base_prompt.clone()
-        } else {
-            format!("## USER TASK\n{}\n\n## INSTRUCTIONS\n{}", context, base_prompt)
-        };
-
-        // Build tool list description for the sub-agent
-        let tool_names: Vec<&str> = scope.allowed_tools.iter().map(|s| s.as_str()).collect();
-
-        // Create sub-agent config
-        let phase_id = format!("ritual_{}_{}", name, chrono::Utc::now().format("%H%M%S"));
-        let agent_config = crate::config::AgentConfig {
-            id: phase_id.clone(),
-            name: Some(format!("Ritual:{}", name)),
-            workspace: Some(self.project_root.to_string_lossy().to_string()),
-            model: Some(match model {
-                "opus" => "claude-opus-4-6".to_string(),
-                "sonnet" => "claude-sonnet-4-5-20250929".to_string(),
-                _ => model.to_string(),
-            }),
-            default: false,
-        };
-
-        let max_iterations = match name {
-            "implement" | "execute-tasks" => 40,
-            "draft-design" | "update-design" => 20,
-            "draft-requirements" => 20,
-            "verify" | "verify-quality" => 15,
-            _ => 20,
-        };
-
-        let subagent = runner.spawn_agent_with_options(&agent_config, max_iterations)?;
-
-        // For review phases, collect feature docs for per-doc sub-agent review
-        let mut review_docs: Vec<String> = Vec::new();
-        let mut extra_context = String::new();
-        if name.starts_with("review-") {
-            let features_dir = self.project_root.join(".gid/features");
-            if features_dir.is_dir() {
-                let doc_suffix = match name {
-                    "review-requirements" => "requirements",
-                    "review-design" => "design",
-                    _ => "",
-                };
-                if !doc_suffix.is_empty() {
-                    if let Ok(entries) = std::fs::read_dir(&features_dir) {
-                        for entry in entries.filter_map(|e| e.ok()) {
-                            let feature_dir = entry.path();
-                            if feature_dir.is_dir() {
-                                if let Ok(files) = std::fs::read_dir(&feature_dir) {
-                                    for file in files.filter_map(|f| f.ok()) {
-                                        let fname = file.file_name().to_string_lossy().to_string();
-                                        if fname.contains(doc_suffix) && fname.ends_with(".md") {
-                                            let full = feature_dir.join(&fname);
-                                            let rel = full.strip_prefix(&self.project_root)
-                                                .unwrap_or(&full);
-                                            review_docs.push(rel.display().to_string());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    // Also check top-level .gid/ docs
-                    let gid_dir = self.project_root.join(".gid");
-                    if let Ok(entries) = std::fs::read_dir(&gid_dir) {
-                        for entry in entries.filter_map(|e| e.ok()) {
-                            let fname = entry.file_name().to_string_lossy().to_string();
-                            if fname.contains(doc_suffix) && fname.ends_with(".md") && entry.path().is_file() {
-                                review_docs.push(format!(".gid/{}", fname));
-                            }
-                        }
-                    }
-                    review_docs.sort();
-                }
-            }
-            // Group docs into batches by size (target ~50KB per batch)
-            // This balances cross-doc reference ability vs context explosion
-            if !review_docs.is_empty() {
-                let max_batch_bytes: u64 = 50_000;
-                let mut batches: Vec<Vec<String>> = Vec::new();
-                let mut current_batch: Vec<String> = Vec::new();
-                let mut current_size: u64 = 0;
-
-                for doc in &review_docs {
-                    let full_path = self.project_root.join(doc);
-                    let file_size = std::fs::metadata(&full_path).map(|m| m.len()).unwrap_or(5000);
-                    
-                    if !current_batch.is_empty() && current_size + file_size > max_batch_bytes {
-                        batches.push(std::mem::take(&mut current_batch));
-                        current_size = 0;
-                    }
-                    current_batch.push(doc.clone());
-                    current_size += file_size;
-                }
-                if !current_batch.is_empty() {
-                    batches.push(current_batch);
-                }
-
-                if batches.len() <= 1 {
-                    // All docs fit in one batch — single sub-agent with doc list
-                    extra_context = format!(
-                        "\n\n## DOCUMENTS TO REVIEW\n\
-                         Review all documents below and write findings to `.gid/reviews/`.\n\
-                         Do NOT spawn sub-agents.\n\n{}",
-                        review_docs.iter().enumerate()
-                            .map(|(i, d)| format!("{}. {}", i + 1, d))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    );
-                    review_docs.clear(); // Don't trigger per-batch loop
-                } else {
-                    // Multiple batches needed — store for per-batch loop
-                    tracing::info!(
-                        "Review docs split into {} batches (total {} docs, target ≤{}KB per batch)",
-                        batches.len(), review_docs.len(), max_batch_bytes / 1000
-                    );
-                    // Replace review_docs with batch info for the loop below
-                    review_docs.clear(); // Clear — we'll use batches directly
-                    
-                    // Store batches in a separate variable for the per-batch loop
-                    // We need to handle this before the per-doc loop check
-                    let review_batches = batches;
-                    
-                    // --- Per-batch review loop ---
-                    let mut all_outputs = Vec::new();
-                    let mut total_tokens = 0u64;
-                    let start = std::time::Instant::now();
-
-                    for (i, batch) in review_batches.iter().enumerate() {
-                        let batch_phase_id = format!("{}_batch{}", phase_id, i);
-                        let batch_task = format!(
-                            "You are executing a ritual phase: **{}** (batch {}/{})\n\n\
-                             Working directory: {}\n\
-                             Allowed tools: {}\n\n\
-                             {}\n\n\
-                             ## DOCUMENTS TO REVIEW IN THIS BATCH\n\
-                             Review these documents and write findings to `.gid/reviews/`.\n\
-                             Write ONE review file per document. Do NOT spawn sub-agents.\n\n{}\n\n\
-                             Complete the task using the tools. When done, summarize what you did.",
-                            name, i + 1, review_batches.len(),
-                            self.project_root.display(),
-                            tool_names.join(", "),
-                            skill_prompt,
-                            batch.iter().enumerate()
-                                .map(|(j, d)| format!("{}. {}", j + 1, d))
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        );
-
-                        tracing::info!(
-                            "Review batch {}/{}: {} docs → sub-agent '{}'",
-                            i + 1, review_batches.len(), batch.len(), batch_phase_id
-                        );
-
-                        let batch_subagent = runner.spawn_agent_with_options(
-                            &crate::config::AgentConfig {
-                                id: batch_phase_id.clone(),
-                                name: Some(format!("{} (batch {})", name, i + 1)),
-                                model: Some(model.to_string()),
-                                workspace: Some(self.project_root.to_string_lossy().to_string()),
-                                default: false,
-                            },
-                            max_iterations,
-                        )?;
-
-                        match runner.process_with_subagent(&batch_subagent, &batch_task, Some(&batch_phase_id)).await {
-                            Ok(output) => {
-                                let session_key = format!("agent:{}:{}", batch_phase_id, batch_phase_id);
-                                let tokens = runner.sessions().get_session(&session_key).await
-                                    .map(|s| s.total_tokens).unwrap_or(0);
-                                total_tokens += tokens;
-                                all_outputs.push(format!("Batch {}: {}", i + 1,
-                                    if output.len() > 200 { format!("{}...", &output[..200]) } else { output }
-                                ));
-                                tracing::info!("Review batch {}/{} completed ({} tokens)", i + 1, review_batches.len(), tokens);
-                            }
-                            Err(e) => {
-                                tracing::warn!("Review batch {}/{} failed: {}", i + 1, review_batches.len(), e);
-                                all_outputs.push(format!("Batch {}: FAILED - {}", i + 1, e));
-                            }
-                        }
-                    }
-
-                    let elapsed = start.elapsed();
-                    tracing::info!(
-                        "Batched review completed: {} batches in {:.1}s, {} total tokens",
-                        review_batches.len(), elapsed.as_secs_f64(), total_tokens
-                    );
-
-                    return Ok((
-                        RitualEvent::SkillCompleted {
-                            phase: name.to_string(),
-                            artifacts: all_outputs,
-                        },
-                        total_tokens,
-                    ));
-                }
-            }
-        }
-
-        // review_docs is empty here — either all docs fit in one batch (extra_context set),
-        // or batched loop already returned above
-
-        // Compose the task for the sub-agent (single-doc or non-review phases)
-        let task = format!(
-            "You are executing a ritual phase: **{}**\n\n\
-             Working directory: {}\n\
-             Allowed tools: {}\n\n\
-             {}{}\n\n\
-             Complete the task using the tools. Write all outputs to files in the working directory.\n\
-             When done, summarize what you did.",
-            name,
-            self.project_root.display(),
-            tool_names.join(", "),
-            skill_prompt,
-            extra_context,
-        );
-
-        tracing::info!(
-            "Running ritual phase '{}' as sub-agent '{}' (model={}, max_iterations={})",
-            name, phase_id, model, max_iterations
-        );
-
-        let start = std::time::Instant::now();
-        let result = runner.process_with_subagent(&subagent, &task, Some(&phase_id)).await;
-        let elapsed = start.elapsed();
-
-        match result {
-            Ok(output) => {
-                // Estimate tokens from sub-agent session
-                let session_key = format!("agent:{}:{}", phase_id, phase_id);
-                let tokens = runner.sessions().get_session(&session_key).await
-                    .map(|s| s.total_tokens)
-                    .unwrap_or(0);
-
-                tracing::info!(
-                    "Ritual phase '{}' completed via sub-agent ({:.1}s, ~{} tokens): {}...",
-                    name,
-                    elapsed.as_secs_f64(),
-                    tokens,
-                    truncate(&output, 100)
-                );
-
-                let total_tokens = tokens;
-
-                Ok((RitualEvent::SkillCompleted {
-                    phase: name.to_string(),
-                    artifacts: Vec::new(), // artifacts tracked via file system
-                }, total_tokens))
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Ritual phase '{}' failed via sub-agent ({:.1}s): {}",
-                    name, elapsed.as_secs_f64(), e
-                );
-                Ok((RitualEvent::SkillFailed {
-                    phase: name.to_string(),
-                    error: format!("Sub-agent phase '{}' failed: {}", name, e),
-                }, 0))
-            }
-        }
-    }
-
-    /// Run multiple implementation tasks in parallel (multi-agent harness).
+    /// Run multiple implementation tasks sequentially.
     /// Each task gets its own LLM session via run_skill("implement", task).
+    /// Sequential execution avoids rate limit contention, file conflicts, and token waste.
     /// Results are collected: all succeed → SkillCompleted, any fail → SkillFailed.
-    async fn run_harness(&self, tasks: &[String]) -> Result<(RitualEvent, u64)> {
-        tracing::info!(task_count = tasks.len(), "Running harness ({} parallel tasks)", tasks.len());
+    async fn run_harness(
+        &self,
+        tasks: &[String],
+        cancel_token: &tokio_util::sync::CancellationToken,
+    ) -> Result<(RitualEvent, u64)> {
+        tracing::info!(task_count = tasks.len(), "Running harness ({} sequential tasks)", tasks.len());
 
         if tasks.is_empty() {
             return Ok((RitualEvent::SkillCompleted {
@@ -1198,78 +1202,39 @@ Guidelines:
 
         // For single task, just run directly
         if tasks.len() == 1 {
-            return self.run_skill("implement", &tasks[0]).await;
+            return self.run_skill("implement", &tasks[0], cancel_token).await;
         }
 
-        // Run tasks concurrently using tokio::spawn
-        // Each gets its own RitualLlmAdapter (separate LLM session)
-        let mut handles = Vec::new();
-        for (i, task) in tasks.iter().enumerate() {
-            let task_ctx = format!(
-                "Task {}/{}: {}\n\nIMPORTANT: Only implement THIS specific task. \
-                 Other tasks are being handled in parallel by other agents.",
-                i + 1, tasks.len(), task
-            );
-            let llm = self.llm_client.clone();
-            let project_root = self.project_root.clone();
-
-            handles.push(tokio::spawn(async move {
-                let adapter = crate::ritual_adapter::RitualLlmAdapter::new(llm);
-                use gid_core::ritual::llm::{LlmClient as GidLlmClient, ToolDefinition};
-
-                // Build tools (Read, Write, Edit, Bash)
-                let tools = vec![
-                    ToolDefinition::new("Read", "Read a file", serde_json::json!({
-                        "type": "object",
-                        "properties": {"path": {"type": "string"}},
-                        "required": ["path"]
-                    })),
-                    ToolDefinition::new("Write", "Write content to a file", serde_json::json!({
-                        "type": "object",
-                        "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
-                        "required": ["path", "content"]
-                    })),
-                    ToolDefinition::new("Edit", "Replace exact text in a file", serde_json::json!({
-                        "type": "object",
-                        "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}},
-                        "required": ["path", "old_text", "new_text"]
-                    })),
-                    ToolDefinition::new("Bash", "Run a shell command", serde_json::json!({
-                        "type": "object",
-                        "properties": {"command": {"type": "string"}},
-                        "required": ["command"]
-                    })),
-                ];
-
-                match adapter.run_skill(&task_ctx, tools, "opus", &project_root).await {
-                    Ok(result) => Ok((i, result)),
-                    Err(e) => Err((i, e.to_string())),
-                }
-            }));
-        }
-
-        // Collect results
+        // Run tasks sequentially — avoids rate limit contention, file conflicts,
+        // and duplicate system prompt overhead from parallel sessions.
         let mut total_tokens = 0u64;
         let mut all_artifacts = Vec::new();
         let mut failures = Vec::new();
 
-        for handle in handles {
-            match handle.await {
-                Ok(Ok((i, skill_result))) => {
-                    tracing::info!(task_idx = i, "Harness task {} completed", i + 1);
-                    total_tokens += skill_result.tokens_used;
-                    all_artifacts.extend(
-                        skill_result.artifacts_created.into_iter()
-                            .map(|p| p.to_string_lossy().to_string())
-                    );
+        for (i, task) in tasks.iter().enumerate() {
+            if cancel_token.is_cancelled() {
+                tracing::info!("Harness cancelled before task {}/{}", i + 1, tasks.len());
+                return Ok((RitualEvent::UserCancel, total_tokens));
+            }
+
+            let task_ctx = format!(
+                "Task {}/{}: {}\n\nIMPORTANT: Only implement THIS specific task. \
+                 Other tasks will be handled after this one completes.",
+                i + 1, tasks.len(), task
+            );
+            tracing::info!(task_idx = i, "Starting harness task {}/{}", i + 1, tasks.len());
+
+            match self.run_skill("implement", &task_ctx, cancel_token).await {
+                Ok((event, tokens)) => {
+                    tracing::info!(task_idx = i, tokens = tokens, "Harness task {}/{} completed", i + 1, tasks.len());
+                    total_tokens += tokens;
+                    if let RitualEvent::SkillCompleted { artifacts, .. } = event {
+                        all_artifacts.extend(artifacts);
+                    }
                 }
-                Ok(Err((i, error))) => {
-                    tracing::warn!(task_idx = i, error = %error, "Harness task {} failed", i + 1);
-                    failures.push(format!("Task {}: {}", i + 1, error));
-                }
-                Err(join_err) => {
-                    tracing::error!("Harness task panicked: {}", join_err);
-                    failures.push(format!("Task panicked: {}", join_err));
+                Err(e) => {
+                    tracing::warn!(task_idx = i, error = %e, "Harness task {}/{} failed", i + 1, tasks.len());
+                    failures.push(format!("Task {}: {}", i + 1, e));
                 }
             }
         }
@@ -1299,34 +1264,70 @@ Guidelines:
     }
 
     async fn run_shell(&self, command: &str) -> Result<RitualEvent> {
-        tracing::info!("Running shell command: {}", command);
+        // Re-read verify_command from .gid/config.yml at execution time,
+        // so users can update the config without restarting the ritual.
+        let command = {
+            let config = gid_core::ritual::load_gating_config(&self.project_root);
+            if let Some(ref fresh_cmd) = config.verify_command {
+                tracing::info!("Using verify_command from .gid/config.yml: {}", fresh_cmd);
+                fresh_cmd.clone()
+            } else {
+                command.to_string()
+            }
+        };
+        let work_dir = &self.project_root;
+        tracing::info!("Running shell command in {}: {}", work_dir.display(), command);
 
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(300),
-            tokio::process::Command::new("bash")
-                .arg("-lc")
-                .arg(command)
-                .current_dir(&self.project_root)
-                .output()
-        ).await
-            .map_err(|_| anyhow::anyhow!("Shell command timed out after 5 minutes: {}", command))?
-            ?;
+        // Run verification steps sequentially with labeled output.
+        // Each step is separated so the LLM knows exactly which stage failed.
+        let steps = parse_verify_steps(&command);
+        let mut all_stdout = String::new();
+        let mut all_stderr = String::new();
+        let mut final_exit_code = 0i32;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let exit_code = output.status.code().unwrap_or(-1);
+        for (i, step) in steps.iter().enumerate() {
+            let label = &step.label;
+            tracing::info!("Verify step {}/{}: [{}] {}", i + 1, steps.len(), label, step.command);
 
-        tracing::info!("Shell exit code: {}", exit_code);
+            let output = tokio::time::timeout(
+                std::time::Duration::from_secs(300),
+                tokio::process::Command::new("bash")
+                    .arg("-lc")
+                    .arg(&step.command)
+                    .current_dir(&work_dir)
+                    .output()
+            ).await
+                .map_err(|_| anyhow::anyhow!("Verify step '{}' timed out after 5 minutes", label))?
+                ?;
 
-        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let exit_code = output.status.code().unwrap_or(-1);
+
+            all_stdout.push_str(&format!("=== {} (exit {}) ===\n{}\n", label, exit_code, stdout));
+            if !stderr.is_empty() {
+                all_stderr.push_str(&format!("=== {} STDERR ===\n{}\n", label, stderr));
+            }
+
+            if !output.status.success() {
+                // Stop at first failure — report which step failed
+                final_exit_code = exit_code;
+                all_stderr.insert_str(0, &format!("FAILED at step: {}\n\n", label));
+                tracing::warn!("Verify failed at step '{}' (exit {})", label, exit_code);
+                break;
+            }
+            tracing::info!("Verify step '{}' passed", label);
+        }
+
+        if final_exit_code == 0 {
             Ok(RitualEvent::ShellCompleted {
-                stdout: truncate(&stdout, 2000),
-                exit_code,
+                stdout: truncate(&all_stdout, 2000),
+                exit_code: 0,
             })
         } else {
             Ok(RitualEvent::ShellFailed {
-                stderr: truncate(&format!("{}\n{}", stderr, stdout), 2000),
-                exit_code,
+                stderr: truncate(&format!("{}\n{}", all_stderr, all_stdout), 2000),
+                exit_code: final_exit_code,
             })
         }
     }
@@ -1334,7 +1335,7 @@ Guidelines:
     /// Run planning phase — LLM decides SingleLlm vs MultiAgent strategy.
     async fn run_planning(&self) -> Result<(RitualEvent, u64)> {
         use crate::ritual_adapter::RitualLlmAdapter;
-        use gid_core::ritual::llm::{LlmClient as GidLlmClient, ToolDefinition};
+        use gid_core::ritual::llm::LlmClient as GidLlmClient;
 
         let adapter = RitualLlmAdapter::new(self.llm_client.clone());
         let gid_client: Arc<dyn GidLlmClient> = adapter.into_arc();
@@ -1540,6 +1541,350 @@ fn format_tokens(tokens: u64) -> String {
     } else {
         format!("{}", tokens)
     }
+}
+
+/// Extract a target project directory from the task context.
+/// Looks for patterns like "Project location: /path/to/project" in the task description.
+/// Returns None if no explicit project path is found (falls back to self.project_root).
+/// A single step in the verify pipeline.
+struct VerifyStep {
+    label: String,
+    command: String,
+}
+
+/// Parse a verify command into labeled steps.
+/// Splits on `&&` and auto-labels each step based on the command content.
+///
+/// Example: "cargo check 2>&1 && cargo test --lib 2>&1 && cargo test --test '*' 2>&1"
+/// → [("check", "cargo check 2>&1"), ("unit test", "cargo test --lib 2>&1"), ("integration test", "cargo test --test '*' 2>&1")]
+fn parse_verify_steps(command: &str) -> Vec<VerifyStep> {
+    let parts: Vec<&str> = command.split("&&").map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+
+    if parts.len() <= 1 {
+        // Single command — run as-is with auto-detected label
+        return vec![VerifyStep {
+            label: auto_label(command),
+            command: command.to_string(),
+        }];
+    }
+
+    parts.iter().map(|cmd| {
+        VerifyStep {
+            label: auto_label(cmd),
+            command: cmd.to_string(),
+        }
+    }).collect()
+}
+
+/// Auto-detect a human-readable label for a shell command.
+fn auto_label(cmd: &str) -> String {
+    let cmd_lower = cmd.to_lowercase();
+    if cmd_lower.contains("check") || cmd_lower.contains("build") {
+        "compile".to_string()
+    } else if cmd_lower.contains("--test") || cmd_lower.contains("-test") {
+        "integration test".to_string()
+    } else if cmd_lower.contains("--lib") {
+        "unit test".to_string()
+    } else if cmd_lower.contains("test") {
+        "test".to_string()
+    } else if cmd_lower.contains("lint") || cmd_lower.contains("clippy") {
+        "lint".to_string()
+    } else {
+        "verify".to_string()
+    }
+}
+
+/// Build context blocks for implement/execute-tasks phases.
+/// Injects DESIGN.md, graph task nodes, and review findings.
+fn build_implement_context(project_root: &Path) -> Vec<crate::agent::ContextBlock> {
+    let mut blocks = Vec::new();
+
+    // Load DESIGN.md (feature-level or top-level)
+    for path in &[
+        project_root.join(".gid/DESIGN.md"),
+        project_root.join("DESIGN.md"),
+    ] {
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                let truncated = if content.len() > 4096 {
+                    format!("{}...\n(truncated)", &content[..content.floor_char_boundary(4096)])
+                } else {
+                    content
+                };
+                blocks.push(crate::agent::ContextBlock {
+                    label: format!("DESIGN: {} (ALREADY LOADED)", path.file_name().unwrap_or_default().to_string_lossy()),
+                    content: truncated,
+                });
+            }
+        }
+    }
+
+    // Feature-level design docs
+    let features_dir = project_root.join(".gid/features");
+    if features_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&features_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let design_path = entry.path().join("DESIGN.md");
+                if design_path.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&design_path) {
+                        let truncated = if content.len() > 4096 {
+                            format!("{}...\n(truncated)", &content[..content.floor_char_boundary(4096)])
+                        } else {
+                            content
+                        };
+                        let feature_name = entry.file_name().to_string_lossy().to_string();
+                        blocks.push(crate::agent::ContextBlock {
+                            label: format!("DESIGN: {} (ALREADY LOADED)", feature_name),
+                            content: truncated,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Graph task nodes
+    let graph_path = project_root.join(".gid/graph.yml");
+    if graph_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&graph_path) {
+            let task_lines: Vec<&str> = content.lines()
+                .filter(|l| l.contains("task-") || l.contains("title:") || l.contains("status:") || l.contains("  - id:"))
+                .take(60)
+                .collect();
+            if !task_lines.is_empty() {
+                blocks.push(crate::agent::ContextBlock {
+                    label: "Task Graph (.gid/graph.yml)".to_string(),
+                    content: format!("```yaml\n{}\n```", task_lines.join("\n")),
+                });
+            }
+        }
+    }
+
+    blocks
+}
+
+/// Build context blocks for review phases.
+/// Lists documents to review from .gid/features/.
+fn build_review_context(phase: &str, project_root: &Path) -> Vec<crate::agent::ContextBlock> {
+    let doc_suffix = match phase {
+        "review-requirements" => "requirements",
+        "review-design" => "design",
+        _ => return vec![],
+    };
+
+    let mut doc_paths = Vec::new();
+    let features_dir = project_root.join(".gid/features");
+    if features_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&features_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                if entry.path().is_dir() {
+                    if let Ok(files) = std::fs::read_dir(entry.path()) {
+                        for file in files.filter_map(|f| f.ok()) {
+                            let fname = file.file_name().to_string_lossy().to_string();
+                            if fname.contains(doc_suffix) && fname.ends_with(".md") {
+                                let rel = file.path().strip_prefix(project_root)
+                                    .unwrap_or(&file.path()).display().to_string();
+                                doc_paths.push(rel);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Also check top-level .gid/
+    if let Ok(entries) = std::fs::read_dir(project_root.join(".gid")) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if fname.contains(doc_suffix) && fname.ends_with(".md") && entry.path().is_file() {
+                doc_paths.push(format!(".gid/{}", fname));
+            }
+        }
+    }
+    doc_paths.sort();
+
+    if doc_paths.is_empty() {
+        return vec![];
+    }
+
+    // Pre-load file contents with budget
+    let full_paths: Vec<PathBuf> = doc_paths.iter()
+        .map(|rel| project_root.join(rel))
+        .collect();
+    let mut blocks = preload_files_with_budget(&full_paths, project_root, 120_000); // ~30K tokens
+
+    // Prepend instructions
+    let doc_list = doc_paths.iter().enumerate()
+        .map(|(i, d)| format!("{}. {}", i + 1, d))
+        .collect::<Vec<_>>()
+        .join("\n");
+    blocks.insert(0, crate::agent::ContextBlock {
+        label: "Review Instructions".to_string(),
+        content: format!(
+            "Review each document below. They are ALREADY LOADED in this message — do NOT call read_file on them.\n\
+             For each, write findings to `.gid/reviews/<name>-{}-review.md`.\n\n\
+             Documents:\n{}",
+            doc_suffix, doc_list
+        ),
+    });
+
+    blocks
+}
+
+/// Extract markdown structure: all headings + first non-empty line after each heading.
+fn extract_markdown_skeleton(content: &str) -> String {
+    let mut result = Vec::new();
+    let mut want_first_line = false;
+
+    for line in content.lines() {
+        if line.starts_with('#') {
+            result.push(line.to_string());
+            want_first_line = true;
+        } else if want_first_line && !line.trim().is_empty() {
+            result.push(format!("  → {}", line.trim()));
+            want_first_line = false;
+        }
+    }
+    result.join("\n")
+}
+
+/// Pre-load files with a total character budget.
+/// Each file gets an equal share. If a file exceeds its share:
+/// - Skeleton (headings + first sentences) is always included
+/// - Full content up to budget, with truncation note
+pub fn preload_files_with_budget(
+    files: &[PathBuf],
+    project_root: &Path,
+    total_budget_chars: usize,
+) -> Vec<crate::agent::ContextBlock> {
+    if files.is_empty() {
+        return vec![];
+    }
+
+    let per_file_budget = total_budget_chars / files.len();
+
+    files.iter().filter_map(|path| {
+        let content = std::fs::read_to_string(path).ok()?;
+        let rel = path.strip_prefix(project_root).unwrap_or(path).display().to_string();
+
+        let block_content = if content.len() <= per_file_budget {
+            content
+        } else {
+            // Skeleton always included
+            let skeleton = extract_markdown_skeleton(&content);
+            let skeleton_header = format!("### Outline\n{}\n\n### Content\n", skeleton);
+            let remaining = per_file_budget.saturating_sub(skeleton_header.len());
+            let truncated = &content[..content.floor_char_boundary(remaining)];
+            format!(
+                "{}{}\n\n(truncated at {} chars — read full file only if you need content beyond this point)",
+                skeleton_header, truncated, remaining
+            )
+        };
+
+        Some(crate::agent::ContextBlock {
+            label: format!("Document: {} (ALREADY LOADED — do NOT read again)", rel),
+            content: block_content,
+        })
+    }).collect()
+}
+
+fn extract_target_project_dir(context: &str) -> Option<PathBuf> {
+    // Pattern 1: Known prefix patterns (backward compat)
+    // "Project location: /path/...", "project_root: /path/...", etc.
+    for line in context.lines() {
+        let trimmed = line.trim().trim_start_matches('*').trim();
+        for prefix in &[
+            "Project location:",
+            "project location:",
+            "Project root:",
+            "project_root:",
+            "Working directory:",
+            "working directory:",
+            "Workspace:",
+            "workspace:",
+            "Target project:",
+            "target project:",
+            "Project dir:",
+            "project dir:",
+            "Project directory:",
+            "project directory:",
+        ] {
+            if let Some(rest) = trimmed.strip_prefix(prefix) {
+                let path_str = rest.trim().trim_end_matches('/');
+                let path = PathBuf::from(path_str);
+                if path.is_absolute() && path.exists() && path.is_dir() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+
+    // Pattern 2: Absolute paths in parentheses, e.g. "(/Users/potato/clawd/projects/gid-rs/)"
+    for cap in find_parenthesized_paths(context) {
+        let path = PathBuf::from(&cap);
+        if path.is_absolute() && path.exists() && path.is_dir() {
+            return Some(path);
+        }
+    }
+
+    // Pattern 3: Standalone absolute paths — /Users/..., /home/..., /opt/..., /tmp/..., /var/...
+    // Find any absolute path token in the text that exists as a directory.
+    for candidate in find_standalone_absolute_paths(context) {
+        let path = PathBuf::from(&candidate);
+        if path.exists() && path.is_dir() {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
+/// Find absolute paths enclosed in parentheses: `(/path/to/dir)` or `(/path/to/dir/)`
+fn find_parenthesized_paths(text: &str) -> Vec<String> {
+    let mut results = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'(' {
+            if let Some(close) = text[i + 1..].find(')') {
+                let inner = text[i + 1..i + 1 + close].trim();
+                let inner = inner.trim_end_matches('/');
+                if inner.starts_with('/') && !inner.contains(' ') {
+                    results.push(inner.to_string());
+                }
+                i = i + 1 + close + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    results
+}
+
+/// Find standalone absolute paths in text that look like directories.
+/// Matches paths starting with /Users/, /home/, /opt/, /tmp/, /var/, /srv/, /etc/.
+fn find_standalone_absolute_paths(text: &str) -> Vec<String> {
+    let prefixes = ["/Users/", "/home/", "/opt/", "/tmp/", "/var/", "/srv/"];
+    let mut results = Vec::new();
+
+    for line in text.lines() {
+        // Tokenize by whitespace, backticks, quotes, and common delimiters
+        for token in line.split(|c: char| c.is_whitespace() || c == '`' || c == '"' || c == '\'' || c == ',' || c == ';') {
+            let token = token.trim_start_matches('(').trim_end_matches(')');
+            let token = token.trim_end_matches('/');
+            let token = token.trim_end_matches('.');
+            if token.is_empty() {
+                continue;
+            }
+            if prefixes.iter().any(|p| token.starts_with(p)) {
+                // Ensure it looks like a path (no weird chars)
+                if token.chars().all(|c| c.is_alphanumeric() || c == '/' || c == '-' || c == '_' || c == '.') {
+                    results.push(token.to_string());
+                }
+            }
+        }
+    }
+    results
 }
 
 /// Recursively count files in a directory.
