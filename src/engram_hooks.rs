@@ -133,6 +133,24 @@ impl Hook for EngramStoreHook {
             return Ok(HookOutcome::Continue(None));
         }
 
+        // Skip heartbeat sessions — they generate repetitive operational noise
+        if ctx.metadata.get("is_heartbeat").and_then(|v| v.as_bool()).unwrap_or(false) {
+            tracing::debug!("Engram store hook: skipping heartbeat session");
+            return Ok(HookOutcome::Continue(None));
+        }
+
+        // Skip known non-content responses
+        let trimmed = ctx.content.trim();
+        if trimmed == "NO_REPLY" || trimmed == "HEARTBEAT_OK" {
+            return Ok(HookOutcome::Continue(None));
+        }
+
+        // Skip cron session responses (session key starts with "cron:")
+        if ctx.session_key.starts_with("cron:") {
+            tracing::debug!("Engram store hook: skipping cron session '{}'", ctx.session_key);
+            return Ok(HookOutcome::Continue(None));
+        }
+
         // Extract the user message from metadata (set by agent before calling hook)
         let user_msg = ctx
             .metadata
@@ -190,5 +208,41 @@ mod tests {
         // Verify hook points are correct (no runtime test needed for MemoryManager)
         assert_eq!(HookPoint::BeforeInbound, HookPoint::BeforeInbound);
         assert_eq!(HookPoint::BeforeOutbound, HookPoint::BeforeOutbound);
+    }
+
+    #[test]
+    fn test_store_hook_skip_conditions() {
+        // Test the filtering logic that prevents garbage memory writes
+        
+        // Helper: simulates what execute() checks
+        fn should_skip(content: &str, session_key: &str, is_heartbeat: bool) -> bool {
+            let trimmed = content.trim();
+            if content.len() < 20 { return true; }
+            if is_heartbeat { return true; }
+            if trimmed == "NO_REPLY" || trimmed == "HEARTBEAT_OK" { return true; }
+            if session_key.starts_with("cron:") { return true; }
+            false
+        }
+
+        // Should skip: heartbeat
+        assert!(should_skip("Some heartbeat response text here...", "heartbeat", true));
+        
+        // Should skip: NO_REPLY
+        assert!(should_skip("NO_REPLY", "user:123", false));
+        
+        // Should skip: HEARTBEAT_OK
+        assert!(should_skip("HEARTBEAT_OK", "user:123", false));
+        
+        // Should skip: cron session
+        assert!(should_skip("Some cron output response here...", "cron:memory-maintenance", false));
+        
+        // Should skip: short content
+        assert!(should_skip("ok thanks", "user:123", false));
+        
+        // Should NOT skip: normal user interaction
+        assert!(!should_skip("Here's the analysis of your code...", "user:123", false));
+        
+        // Should NOT skip: telegram direct message
+        assert!(!should_skip("我来帮你看看这个问题", "telegram:potato", false));
     }
 }

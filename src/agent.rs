@@ -1186,6 +1186,7 @@ CRITICAL CONSTRAINTS:
                 content: response_text.clone(),
                 metadata: serde_json::json!({
                     "user_message": user_message,
+                    "is_heartbeat": is_heartbeat,
                 }),
             };
             let hooks_guard = self.hooks.read().await;
