@@ -13,3 +13,4 @@ hello.py
 
 # Internal docs (not for public repo)
 docs/
+.DS_Store
