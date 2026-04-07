@@ -310,7 +310,26 @@ impl TelegramBot {
 
         // Build session key
         let session_key = format!("telegram:{}", chat_id);
-        
+
+        // Pause autopilot while user is chatting — resume after 60s idle
+        {
+            let guard = self.autopilot_handle.lock().await;
+            if let Some(ref h) = *guard {
+                if h.is_running() && !h.is_paused() {
+                    h.pause();
+                    let handle = h.clone();
+                    // Auto-resume after 60s of no user messages
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        if handle.is_paused() {
+                            handle.resume();
+                            tracing::info!("Autopilot auto-resumed after 60s idle");
+                        }
+                    });
+                }
+            }
+        }
+
         // In groups, reply to the user's message
         let reply_to = if is_group { message_id } else { None };
 
@@ -668,7 +687,23 @@ Choose a model:", current),
                     session_key: session_key.clone(),
                 };
 
-                match crate::autopilot::run(self.runner.clone(), config, &workspace).await {
+                // Build notify function that sends progress to Telegram
+                let tg_client = self.client.clone();
+                let tg_token = self.token.clone();
+                let tg_chat_id = chat_id;
+                let notify_fn: Box<dyn Fn(&str) + Send + Sync + 'static> = Box::new(move |msg: &str| {
+                    let client = tg_client.clone();
+                    let token = tg_token.clone();
+                    let text = format!("🤖 {}", msg);
+                    tokio::spawn(async move {
+                        let url = format!("https://api.telegram.org/bot{}/sendMessage", token);
+                        let _ = client.post(&url)
+                            .json(&serde_json::json!({"chat_id": tg_chat_id, "text": text}))
+                            .send().await;
+                    });
+                });
+
+                match crate::autopilot::run(self.runner.clone(), config, &workspace, Some(notify_fn)).await {
                     Ok((handle, _join)) => {
                         *handle_guard = Some(handle);
                         self.send_message(

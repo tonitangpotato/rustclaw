@@ -7,11 +7,11 @@
 //! Usage:
 //!   /autopilot memory/2026-04-07-overnight-plan.md
 //!   /autopilot stop
+//!   /autopilot status
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::Notify;
 
 /// Autopilot configuration.
 #[derive(Clone, Debug)]
@@ -42,19 +42,21 @@ impl Default for AutopilotConfig {
 pub struct Task {
     /// Line number in the file (for updating checkbox).
     pub line_number: usize,
-    /// Raw line text.
-    pub line: String,
     /// Task description (without checkbox prefix).
     pub description: String,
     /// Whether the task is completed.
     pub completed: bool,
+    /// Whether the task was skipped.
+    pub skipped: bool,
 }
 
-/// Autopilot handle — use to stop a running autopilot.
+/// Autopilot handle — use to stop or pause a running autopilot.
 #[derive(Clone)]
 pub struct AutopilotHandle {
     running: Arc<AtomicBool>,
-    stop_notify: Arc<Notify>,
+    paused: Arc<AtomicBool>,
+    tasks_completed: Arc<std::sync::atomic::AtomicU32>,
+    total_turns: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl AutopilotHandle {
@@ -64,16 +66,36 @@ impl AutopilotHandle {
 
     pub fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
-        self.stop_notify.notify_one();
+    }
+
+    /// Pause autopilot (e.g., when user sends a message).
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::Relaxed);
+    }
+
+    /// Resume after pause.
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::Relaxed);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    pub fn stats(&self) -> (u32, u32) {
+        (
+            self.tasks_completed.load(Ordering::Relaxed),
+            self.total_turns.load(Ordering::Relaxed),
+        )
     }
 }
 
 /// Parse markdown task file and extract checkbox items.
 ///
 /// Recognizes:
-/// - `- [ ] task description` → uncompleted
-/// - `- [x] task description` → completed
-/// - `- [X] task description` → completed
+/// - `- [ ] description` → uncompleted
+/// - `- [x] description` / `- [X] description` → completed
+/// - Lines containing `⚠️ SKIPPED` → skipped
 pub fn parse_tasks(content: &str) -> Vec<Task> {
     content
         .lines()
@@ -81,18 +103,20 @@ pub fn parse_tasks(content: &str) -> Vec<Task> {
         .filter_map(|(i, line)| {
             let trimmed = line.trim();
             if trimmed.starts_with("- [ ] ") {
+                let desc = trimmed["- [ ] ".len()..].to_string();
+                let skipped = desc.contains("⚠️ SKIPPED");
                 Some(Task {
                     line_number: i,
-                    line: line.to_string(),
-                    description: trimmed["- [ ] ".len()..].to_string(),
+                    description: desc,
                     completed: false,
+                    skipped,
                 })
             } else if trimmed.starts_with("- [x] ") || trimmed.starts_with("- [X] ") {
                 Some(Task {
                     line_number: i,
-                    line: line.to_string(),
                     description: trimmed["- [x] ".len()..].to_string(),
                     completed: true,
+                    skipped: false,
                 })
             } else {
                 None
@@ -101,26 +125,40 @@ pub fn parse_tasks(content: &str) -> Vec<Task> {
         .collect()
 }
 
-/// Mark a task as completed in the file by replacing `- [ ]` with `- [x]`.
-pub fn mark_task_done(file_path: &Path, line_number: usize) -> anyhow::Result<()> {
-    let content = std::fs::read_to_string(file_path)?;
-    let lines: Vec<&str> = content.lines().collect();
+/// Find a task by description content (robust against line number shifts).
+fn find_task_by_description<'a>(tasks: &'a [Task], description: &str) -> Option<&'a Task> {
+    // Exact match first
+    if let Some(t) = tasks.iter().find(|t| t.description == description) {
+        return Some(t);
+    }
+    // Prefix match (description might have been appended with status)
+    tasks.iter().find(|t| t.description.starts_with(description) || description.starts_with(&t.description))
+}
 
-    if line_number >= lines.len() {
-        anyhow::bail!("Line number {} out of range (file has {} lines)", line_number, lines.len());
+/// Mark a task as skipped in the file by appending ⚠️ SKIPPED.
+fn mark_task_skipped(file_path: &Path, description: &str, reason: &str) -> anyhow::Result<()> {
+    let content = std::fs::read_to_string(file_path)?;
+    let mut result = String::with_capacity(content.len() + 50);
+    let mut found = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !found && trimmed.starts_with("- [ ] ") && trimmed.contains(description.split_whitespace().take(5).collect::<Vec<_>>().join(" ").as_str()) {
+            result.push_str(&format!("{} ⚠️ SKIPPED: {}", line, reason));
+            found = true;
+        } else {
+            result.push_str(line);
+        }
+        result.push('\n');
     }
 
-    let mut new_lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-    new_lines[line_number] = new_lines[line_number]
-        .replacen("- [ ] ", "- [x] ", 1);
-
-    std::fs::write(file_path, new_lines.join("\n"))?;
+    std::fs::write(file_path, result)?;
     Ok(())
 }
 
-/// Find the next uncompleted task.
+/// Find the next actionable task (uncompleted and not skipped).
 pub fn next_task(tasks: &[Task]) -> Option<&Task> {
-    tasks.iter().find(|t| !t.completed)
+    tasks.iter().find(|t| !t.completed && !t.skipped)
 }
 
 /// Run autopilot: continuously execute tasks from the task file.
@@ -130,6 +168,7 @@ pub async fn run(
     runner: Arc<crate::agent::AgentRunner>,
     config: AutopilotConfig,
     workspace: &Path,
+    notify_fn: Option<Box<dyn Fn(&str) + Send + Sync + 'static>>,
 ) -> anyhow::Result<(AutopilotHandle, tokio::task::JoinHandle<anyhow::Result<u32>>)> {
     let task_file = if config.task_file.is_absolute() {
         config.task_file.clone()
@@ -143,7 +182,9 @@ pub async fn run(
 
     let handle = AutopilotHandle {
         running: Arc::new(AtomicBool::new(true)),
-        stop_notify: Arc::new(Notify::new()),
+        paused: Arc::new(AtomicBool::new(false)),
+        tasks_completed: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        total_turns: Arc::new(std::sync::atomic::AtomicU32::new(0)),
     };
     let handle_clone = handle.clone();
     let session_key = config.session_key.clone();
@@ -151,22 +192,37 @@ pub async fn run(
     let join = tokio::spawn(async move {
         let mut completed_count: u32 = 0;
         let mut total_turns: u32 = 0;
+        let notify = |msg: &str| {
+            tracing::info!("Autopilot: {}", msg);
+            if let Some(ref f) = notify_fn {
+                f(msg);
+            }
+        };
 
-        tracing::info!(
-            "Autopilot started: file={} max_turns_per_task={} max_total={}",
+        notify(&format!(
+            "Started: file={} max_turns_per_task={} max_total={}",
             task_file.display(),
             config.max_turns_per_task,
             config.max_total_turns,
-        );
+        ));
 
         loop {
-            // Check stop conditions
+            // Check stop
             if !handle_clone.running.load(Ordering::Relaxed) {
-                tracing::info!("Autopilot stopped by user");
+                notify("Stopped by user");
                 break;
             }
+
+            // Wait while paused (user is chatting)
+            while handle_clone.paused.load(Ordering::Relaxed) {
+                if !handle_clone.running.load(Ordering::Relaxed) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+
             if total_turns >= config.max_total_turns {
-                tracing::info!("Autopilot reached max total turns ({})", config.max_total_turns);
+                notify(&format!("Reached max total turns ({})", config.max_total_turns));
                 break;
             }
 
@@ -180,56 +236,66 @@ pub async fn run(
             };
 
             let tasks = parse_tasks(&content);
-            let remaining: Vec<_> = tasks.iter().filter(|t| !t.completed).collect();
+            let next = next_task(&tasks);
 
-            if remaining.is_empty() {
-                tracing::info!("Autopilot: all tasks completed! ({} done)", completed_count);
+            if next.is_none() {
+                notify(&format!("All tasks done! ({} completed)", completed_count));
                 break;
             }
+            let task = next.unwrap();
+            let task_desc = task.description.clone();
 
-            let task = remaining[0];
-            tracing::info!(
-                "Autopilot: starting task [{}/{}]: {}",
+            notify(&format!(
+                "Starting task [{}/{}]: {}",
                 completed_count + 1,
                 tasks.len(),
-                task.description,
-            );
+                task_desc,
+            ));
 
-            // Build prompt for the agent
+            // Build prompt
             let prompt = format!(
                 "You are in autopilot mode. Execute this task:\n\n\
                  **Task**: {}\n\n\
                  Read the full task file at `{}` for context.\n\
                  When done, update the checkbox in the task file from `- [ ]` to `- [x]`.\n\
-                 If you get stuck for more than 3 tool calls with no progress, \
-                 write why in the daily log and move on.",
-                task.description,
+                 If stuck after 3 attempts, update the daily log with why and stop.",
+                task_desc,
                 task_file.display(),
             );
 
-            // Run agent
             let mut task_turns: u32 = 0;
-            let task_completed;
+            let mut task_completed = false;
 
             loop {
                 if !handle_clone.running.load(Ordering::Relaxed) {
-                    task_completed = false;
                     break;
+                }
+                // Pause check — yield to user interaction
+                if handle_clone.paused.load(Ordering::Relaxed) {
+                    tracing::info!("Autopilot: paused mid-task (user interaction)");
+                    while handle_clone.paused.load(Ordering::Relaxed) {
+                        if !handle_clone.running.load(Ordering::Relaxed) { break; }
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
+                    tracing::info!("Autopilot: resumed");
                 }
                 if task_turns >= config.max_turns_per_task {
                     tracing::warn!(
                         "Autopilot: task hit max turns ({}): {}",
                         config.max_turns_per_task,
-                        task.description,
+                        task_desc,
                     );
-                    task_completed = false;
                     break;
                 }
 
                 let msg = if task_turns == 0 {
                     prompt.clone()
                 } else {
-                    "Continue the current task. If done, update the checkbox.".to_string()
+                    format!(
+                        "Continue working on: **{}**\n\
+                         Update the checkbox when done.",
+                        task_desc
+                    )
                 };
 
                 match runner
@@ -239,59 +305,61 @@ pub async fn run(
                     Ok(response) => {
                         task_turns += 1;
                         total_turns += 1;
+                        handle_clone.total_turns.store(total_turns, Ordering::Relaxed);
 
-                        // Check if the task was marked done in the file
+                        // Check if task was marked done — match by description, not line number
                         if let Ok(updated_content) = std::fs::read_to_string(&task_file) {
                             let updated_tasks = parse_tasks(&updated_content);
-                            if let Some(updated_task) = updated_tasks.get(task.line_number) {
-                                if updated_task.completed {
-                                    tracing::info!(
-                                        "Autopilot: task completed in {} turns: {}",
-                                        task_turns,
-                                        task.description,
-                                    );
+                            if let Some(updated) = find_task_by_description(&updated_tasks, &task_desc) {
+                                if updated.completed {
+                                    notify(&format!(
+                                        "Task completed in {} turns: {}",
+                                        task_turns, task_desc,
+                                    ));
                                     task_completed = true;
                                     completed_count += 1;
+                                    handle_clone.tasks_completed.store(completed_count, Ordering::Relaxed);
                                     break;
                                 }
                             }
                         }
 
-                        // Check if agent said it's done/stuck in the response
+                        // Check if agent explicitly says done/stuck
                         let lower = response.to_lowercase();
-                        if lower.contains("heartbeat_ok") || lower.contains("all tasks completed") {
+                        if lower.contains("all tasks completed") || lower.contains("task completed") {
                             task_completed = true;
                             completed_count += 1;
+                            handle_clone.tasks_completed.store(completed_count, Ordering::Relaxed);
                             break;
                         }
                     }
                     Err(e) => {
-                        tracing::error!("Autopilot: agent error: {}", e);
-                        task_completed = false;
+                        tracing::error!("Autopilot: agent error on '{}': {}", task_desc, e);
                         break;
                     }
                 }
             }
 
             if !task_completed {
-                // Mark as skipped in daily log, continue to next
-                tracing::warn!("Autopilot: skipping task: {}", task.description);
-                // Force-mark done to avoid infinite loop on stuck task
-                if let Err(e) = mark_task_done(&task_file, task.line_number) {
-                    tracing::error!("Autopilot: failed to mark task: {}", e);
+                let reason = if task_turns >= config.max_turns_per_task {
+                    format!("hit max turns ({})", config.max_turns_per_task)
+                } else {
+                    "agent error or stopped".to_string()
+                };
+                notify(&format!("Skipping task: {} ({})", task_desc, reason));
+                if let Err(e) = mark_task_skipped(&task_file, &task_desc, &reason) {
+                    tracing::error!("Autopilot: failed to mark skipped: {}", e);
                 }
-                completed_count += 1; // Count as processed even if skipped
             }
 
             // Brief pause between tasks
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
 
-        tracing::info!(
-            "Autopilot finished: {} tasks processed, {} total turns",
-            completed_count,
-            total_turns,
-        );
+        notify(&format!(
+            "Finished: {} tasks completed, {} total turns",
+            completed_count, total_turns,
+        ));
         Ok(completed_count)
     });
 
@@ -321,20 +389,39 @@ mod tests {
     }
 
     #[test]
-    fn test_next_task() {
+    fn test_parse_skipped() {
+        let content = "- [ ] Normal task\n\
+            - [ ] Stuck task ⚠️ SKIPPED: hit max turns\n";
+        let tasks = parse_tasks(content);
+        assert!(!tasks[0].skipped);
+        assert!(tasks[1].skipped);
+    }
+
+    #[test]
+    fn test_next_task_skips_skipped() {
         let tasks = vec![
-            Task { line_number: 0, line: String::new(), description: "done".into(), completed: true },
-            Task { line_number: 1, line: String::new(), description: "pending".into(), completed: false },
+            Task { line_number: 0, description: "done".into(), completed: true, skipped: false },
+            Task { line_number: 1, description: "skipped".into(), completed: false, skipped: true },
+            Task { line_number: 2, description: "pending".into(), completed: false, skipped: false },
         ];
-        let next = next_task(&tasks);
-        assert_eq!(next.unwrap().description, "pending");
+        assert_eq!(next_task(&tasks).unwrap().description, "pending");
     }
 
     #[test]
     fn test_next_task_all_done() {
         let tasks = vec![
-            Task { line_number: 0, line: String::new(), description: "done".into(), completed: true },
+            Task { line_number: 0, description: "done".into(), completed: true, skipped: false },
         ];
         assert!(next_task(&tasks).is_none());
+    }
+
+    #[test]
+    fn test_find_task_by_description() {
+        let tasks = vec![
+            Task { line_number: 0, description: "T2.3 ISS-009 Cross-Layer".into(), completed: false, skipped: false },
+            Task { line_number: 5, description: "T2.4 ISS-006 Incremental".into(), completed: false, skipped: false },
+        ];
+        assert!(find_task_by_description(&tasks, "T2.3 ISS-009 Cross-Layer").is_some());
+        assert!(find_task_by_description(&tasks, "nonexistent").is_none());
     }
 }
