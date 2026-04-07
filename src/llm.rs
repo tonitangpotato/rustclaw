@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
 use crate::auth_profiles::{AuthProfileCredential, AuthProfileFailureReason, AuthProfileManager};
+use crate::claude_cli::ClaudeCliClient;
 use crate::config::{self, AuthMode, LlmConfig};
 
 /// A content block in a message.
@@ -392,6 +393,9 @@ pub trait LlmClient: Send + Sync {
     /// Return the model name this client is configured to use.
     fn model_name(&self) -> &str;
 
+    /// Clone into a boxed trait object. Shares underlying auth/connection state.
+    fn clone_boxed(&self) -> Box<dyn LlmClient>;
+
     async fn chat(
         &self,
         system: &str,
@@ -419,6 +423,18 @@ pub trait LlmClient: Send + Sync {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> anyhow::Result<mpsc::Receiver<StreamChunk>>;
+
+    /// Stream chat with explicit model override.
+    /// Default delegates to chat_stream (ignoring override).
+    async fn chat_stream_with_model(
+        &self,
+        system: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        _model_override: &str,
+    ) -> anyhow::Result<mpsc::Receiver<StreamChunk>> {
+        self.chat_stream(system, messages, tools).await
+    }
 }
 
 /// Anthropic Claude client (supports both API key and OAuth token).
@@ -476,7 +492,7 @@ impl AnthropicClient {
 
         Ok(Self {
             client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
+                .timeout(std::time::Duration::from_secs(config.request_timeout_secs))
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .build()?,
             auth,
@@ -706,6 +722,18 @@ impl LlmClient for AnthropicClient {
         &self.model
     }
 
+    fn clone_boxed(&self) -> Box<dyn LlmClient> {
+        Box::new(Self {
+            client: self.client.clone(),
+            auth: self.auth.clone(),
+            profile_manager: self.profile_manager.clone(),
+            current_profile_id: self.current_profile_id.clone(),
+            model: self.model.clone(),
+            max_tokens: self.max_tokens,
+            base_url: self.base_url.clone(),
+        })
+    }
+
     async fn chat(
         &self,
         system: &str,
@@ -809,11 +837,24 @@ impl LlmClient for AnthropicClient {
             let resp = match req.json(&body).send().await {
                 Ok(r) => r,
                 Err(e) => {
+                    // On timeout: DON'T retry with the same payload — the request body
+                    // hasn't changed, so it will just timeout again (burning 120s × 5 = 10 min).
+                    // Instead, bail immediately so the caller can compact context and retry.
+                    if e.is_timeout() {
+                        tracing::warn!(
+                            "Request timeout (attempt {}/{}): {}. NOT retrying — caller should compact context.",
+                            attempt, MAX_RETRIES, e
+                        );
+                        return Err(e.into());
+                    }
+                    // For non-timeout errors (connect, body, etc.), retry with backoff
                     if attempt <= MAX_RETRIES {
                         let backoff = (INITIAL_BACKOFF_MS * 2u64.pow(attempt.saturating_sub(1).min(6))).min(MAX_BACKOFF_MS);
                         tracing::warn!(
-                            "Request failed (attempt {}/{}): {}. Retrying in {}ms...",
-                            attempt, MAX_RETRIES, e, backoff
+                            "Request failed (attempt {}/{}): {} [is_timeout={}, is_connect={}, is_body={}]. Retrying in {}ms...",
+                            attempt, MAX_RETRIES, e,
+                            e.is_timeout(), e.is_connect(), e.is_body(),
+                            backoff
                         );
                         tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
                         last_error = Some(e.into());
@@ -825,9 +866,10 @@ impl LlmClient for AnthropicClient {
 
             let status = resp.status();
 
-            // Handle 401 — try refreshing OAuth token and retry once
+            // Handle 401 — try refreshing OAuth token, then profile rotation.
+            // Handle 401 — refresh token once, then try profile rotation.
+            // After 3 consecutive 401s, bail (primary auth + ~2 profiles = exhausted).
             if status.as_u16() == 401 {
-                // Mark current profile as failed if using profile rotation
                 if let Some((ref id, _)) = current_profile {
                     self.mark_profile_failure(id, AuthProfileFailureReason::Auth).await;
                     tried_profiles.push(id.clone());
@@ -847,9 +889,21 @@ impl LlmClient for AnthropicClient {
                         }
                     }
                 }
+
+                // Bail after 3 consecutive auth failures — don't loop endlessly
+                if tried_profiles.len() >= profile_count.max(1) as usize {
+                    let resp_body: serde_json::Value = resp.json().await.unwrap_or_default();
+                    let error_msg = resp_body["error"]["message"]
+                        .as_str()
+                        .unwrap_or("Invalid authentication credentials");
+                    anyhow::bail!(
+                        "Anthropic API error (401 Unauthorized): {}",
+                        error_msg,
+                    );
+                }
             }
 
-            // Check for client errors - don't retry these (except for profile rotation on 401)
+            // Check for client errors — don't retry (except 401 handled above with profile rotation)
             if is_client_error(status) && status.as_u16() != 401 {
                 let resp_body: serde_json::Value = resp.json().await?;
                 tracing::error!("Anthropic API error body: {}", serde_json::to_string_pretty(&resp_body).unwrap_or_default());
@@ -1007,9 +1061,24 @@ impl LlmClient for AnthropicClient {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> anyhow::Result<mpsc::Receiver<StreamChunk>> {
+        self.chat_stream_with_model(system, messages, tools, &self.model).await
+    }
+
+    async fn chat_stream_with_model(
+        &self,
+        system: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        model_override: &str,
+    ) -> anyhow::Result<mpsc::Receiver<StreamChunk>> {
+        let effective_max_tokens = if model_override == self.model {
+            self.max_tokens
+        } else {
+            Self::default_max_tokens(model_override)
+        };
         let mut body = serde_json::json!({
-            "model": self.model,
-            "max_tokens": self.max_tokens,
+            "model": model_override,
+            "max_tokens": effective_max_tokens,
             "system": self.build_system_value(system),
             "messages": serde_json::to_value(messages)?,
             "stream": true,
@@ -1112,9 +1181,9 @@ impl LlmClient for AnthropicClient {
 
             let status = resp.status();
 
-            // Handle 401 — try refreshing OAuth token and retry
+            // Handle 401 — refresh token once, then try profile rotation.
+            // After exhausting profiles, bail immediately.
             if status.as_u16() == 401 {
-                // Mark current profile as failed if using profile rotation
                 if let Some((ref id, _)) = current_profile {
                     self.mark_profile_failure(id, AuthProfileFailureReason::Auth).await;
                     tried_profiles.push(id.clone());
@@ -1126,7 +1195,7 @@ impl LlmClient for AnthropicClient {
                         match manager.refresh().await {
                             Ok(_) => {
                                 tracing::info!("Token refreshed, retrying stream request");
-                                current_profile = None; // Reset to try primary auth again
+                                current_profile = None;
                                 continue;
                             }
                             Err(e) => {
@@ -1135,9 +1204,20 @@ impl LlmClient for AnthropicClient {
                         }
                     }
                 }
+
+                if tried_profiles.len() >= profile_count.max(1) as usize {
+                    let resp_body: serde_json::Value = resp.json().await.unwrap_or_default();
+                    let error_msg = resp_body["error"]["message"]
+                        .as_str()
+                        .unwrap_or("Invalid authentication credentials");
+                    anyhow::bail!(
+                        "Anthropic stream API error (401 Unauthorized): {}",
+                        error_msg,
+                    );
+                }
             }
 
-            // Check for client errors - don't retry these (except for profile rotation on 401)
+            // Check for client errors — don't retry (except 401 handled above)
             if is_client_error(status) && status.as_u16() != 401 {
                 let resp_body: serde_json::Value = resp.json().await?;
                 tracing::error!("Anthropic stream API error body: {}", serde_json::to_string_pretty(&resp_body).unwrap_or_default());
@@ -1381,7 +1461,7 @@ fn extract_sse_event(buffer: &mut String) -> Option<String> {
 
 // ─── OpenAI Client ───────────────────────────────────────────
 
-/// OpenAI API client.
+/// OpenAI API client with proper message format conversion and SSE streaming.
 pub struct OpenAIClient {
     client: reqwest::Client,
     api_key: String,
@@ -1404,7 +1484,10 @@ impl OpenAIClient {
             .unwrap_or_else(|| "https://api.openai.com".to_string());
 
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()?,
             api_key,
             model: config.model.clone(),
             max_tokens: config.max_tokens.unwrap_or_else(|| Self::default_max_tokens(&config.model)),
@@ -1415,16 +1498,25 @@ impl OpenAIClient {
     fn default_max_tokens(model: &str) -> u32 {
         if model.contains("gpt-4o") {
             16384
+        } else if model.contains("gpt-4.1") || model.contains("gpt-4-turbo") {
+            16384
         } else if model.contains("gpt-4") {
             8192
-        } else if model.contains("o1") || model.contains("o3") {
+        } else if model.contains("o1") || model.contains("o3") || model.contains("o4") {
             16384
         } else {
             8192
         }
     }
 
-    /// Convert internal messages to OpenAI format.
+    /// Convert internal messages to OpenAI chat completion format.
+    ///
+    /// OpenAI uses a different message structure than Anthropic:
+    /// - System message: `{ role: "system", content: "..." }`
+    /// - User text: `{ role: "user", content: "..." }`
+    /// - Assistant text: `{ role: "assistant", content: "..." }`
+    /// - Assistant tool calls: `{ role: "assistant", tool_calls: [...] }`
+    /// - Tool results: `{ role: "tool", tool_call_id: "...", content: "..." }`
     fn convert_messages(&self, system: &str, messages: &[Message]) -> Vec<serde_json::Value> {
         let mut result = vec![serde_json::json!({
             "role": "system",
@@ -1432,52 +1524,121 @@ impl OpenAIClient {
         })];
 
         for msg in messages {
-            // Extract text content from content blocks
-            let content: Vec<serde_json::Value> = msg
-                .content
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::Text { text } => Some(serde_json::json!({
-                        "type": "text",
-                        "text": text
-                    })),
-                    ContentBlock::ToolUse { id, name, input } => Some(serde_json::json!({
-                        "type": "function",
-                        "id": id,
-                        "function": {
-                            "name": name,
-                            "arguments": input.to_string()
-                        }
-                    })),
-                    ContentBlock::ToolResult { tool_use_id, content, .. } => Some(serde_json::json!({
-                        "type": "tool_result",
-                        "tool_call_id": tool_use_id,
-                        "content": content
-                    })),
-                })
-                .collect();
+            match msg.role.as_str() {
+                "assistant" => {
+                    // Separate text content from tool_use blocks
+                    let mut text_parts: Vec<String> = Vec::new();
+                    let mut tool_calls_json: Vec<serde_json::Value> = Vec::new();
 
-            // For simple text messages, just use string content
-            if content.len() == 1 {
-                if let Some(text) = content[0].get("text") {
+                    for block in &msg.content {
+                        match block {
+                            ContentBlock::Text { text } => {
+                                text_parts.push(text.clone());
+                            }
+                            ContentBlock::ToolUse { id, name, input } => {
+                                tool_calls_json.push(serde_json::json!({
+                                    "id": id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": name,
+                                        "arguments": input.to_string()
+                                    }
+                                }));
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    let text_content = if text_parts.is_empty() {
+                        None
+                    } else {
+                        Some(text_parts.join("\n"))
+                    };
+
+                    if tool_calls_json.is_empty() {
+                        // Plain assistant message
+                        result.push(serde_json::json!({
+                            "role": "assistant",
+                            "content": text_content.unwrap_or_default()
+                        }));
+                    } else {
+                        // Assistant message with tool calls
+                        let mut msg_json = serde_json::json!({
+                            "role": "assistant",
+                            "tool_calls": tool_calls_json
+                        });
+                        if let Some(text) = text_content {
+                            msg_json["content"] = serde_json::json!(text);
+                        }
+                        result.push(msg_json);
+                    }
+                }
+                "user" => {
+                    // Check if this contains tool results
+                    let tool_results: Vec<&ContentBlock> = msg.content.iter()
+                        .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                        .collect();
+
+                    if !tool_results.is_empty() {
+                        // Each tool result becomes a separate message with role "tool"
+                        for block in &msg.content {
+                            if let ContentBlock::ToolResult { tool_use_id, content, .. } = block {
+                                result.push(serde_json::json!({
+                                    "role": "tool",
+                                    "tool_call_id": tool_use_id,
+                                    "content": content
+                                }));
+                            }
+                        }
+                        // Also include any text blocks as a regular user message
+                        let text_parts: Vec<String> = msg.content.iter()
+                            .filter_map(|b| match b {
+                                ContentBlock::Text { text } => Some(text.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        if !text_parts.is_empty() {
+                            result.push(serde_json::json!({
+                                "role": "user",
+                                "content": text_parts.join("\n")
+                            }));
+                        }
+                    } else {
+                        // Plain user message
+                        let text: String = msg.content.iter()
+                            .filter_map(|b| match b {
+                                ContentBlock::Text { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        result.push(serde_json::json!({
+                            "role": "user",
+                            "content": text
+                        }));
+                    }
+                }
+                other => {
+                    // Pass through any other roles
+                    let text: String = msg.content.iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
                     result.push(serde_json::json!({
-                        "role": msg.role,
+                        "role": other,
                         "content": text
                     }));
-                    continue;
                 }
             }
-
-            result.push(serde_json::json!({
-                "role": msg.role,
-                "content": content
-            }));
         }
 
         result
     }
 
-    /// Convert internal tools to OpenAI format.
+    /// Convert internal tools to OpenAI function calling format.
     fn convert_tools(&self, tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
         tools
             .iter()
@@ -1493,6 +1654,13 @@ impl OpenAIClient {
             })
             .collect()
     }
+
+    /// Check if this is a reasoning model that uses max_completion_tokens instead of max_tokens.
+    fn is_reasoning_model(&self) -> bool {
+        self.model.starts_with("o1")
+            || self.model.starts_with("o3")
+            || self.model.starts_with("o4")
+    }
 }
 
 #[async_trait::async_trait]
@@ -1501,79 +1669,146 @@ impl LlmClient for OpenAIClient {
         &self.model
     }
 
+    fn clone_boxed(&self) -> Box<dyn LlmClient> {
+        Box::new(Self {
+            client: self.client.clone(),
+            api_key: self.api_key.clone(),
+            model: self.model.clone(),
+            max_tokens: self.max_tokens,
+            base_url: self.base_url.clone(),
+        })
+    }
+
     async fn chat(
         &self,
         system: &str,
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> anyhow::Result<LlmResponse> {
+        let converted_messages = self.convert_messages(system, messages);
+
         let mut body = serde_json::json!({
             "model": self.model,
-            "max_tokens": self.max_tokens,
-            "messages": self.convert_messages(system, messages),
+            "messages": converted_messages,
         });
+
+        // Reasoning models (o1, o3, o4) use max_completion_tokens
+        if self.is_reasoning_model() {
+            body["max_completion_tokens"] = serde_json::json!(self.max_tokens);
+        } else {
+            body["max_tokens"] = serde_json::json!(self.max_tokens);
+        }
 
         if !tools.is_empty() {
             body["tools"] = serde_json::json!(self.convert_tools(tools));
         }
 
-        let resp = self
-            .client
-            .post(format!("{}/v1/chat/completions", self.base_url))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+        // Retry loop with exponential backoff
+        let mut attempt = 0u32;
+        let mut last_error: Option<anyhow::Error> = None;
 
-        let status = resp.status();
-        let resp_body: serde_json::Value = resp.json().await?;
+        loop {
+            attempt += 1;
 
-        if !status.is_success() {
-            let error_msg = resp_body["error"]["message"]
-                .as_str()
-                .unwrap_or("Unknown error");
-            anyhow::bail!("OpenAI API error ({}): {}", status, error_msg);
-        }
-
-        // Parse response
-        let choice = &resp_body["choices"][0];
-        let msg = &choice["message"];
-
-        let text = msg["content"].as_str().map(|s| s.to_string());
-
-        let mut tool_calls = Vec::new();
-        if let Some(calls) = msg["tool_calls"].as_array() {
-            for call in calls {
-                let func = &call["function"];
-                tool_calls.push(ToolCall {
-                    id: call["id"].as_str().unwrap_or("").to_string(),
-                    name: func["name"].as_str().unwrap_or("").to_string(),
-                    input: serde_json::from_str(func["arguments"].as_str().unwrap_or("{}"))
-                        .unwrap_or(serde_json::json!({})),
-                });
+            if attempt > MAX_RETRIES + 1 {
+                return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("OpenAI: max retries exceeded")));
             }
+
+            tracing::debug!(
+                "OpenAI request attempt {}/{} → model={} url={}/v1/chat/completions",
+                attempt, MAX_RETRIES + 1, self.model, self.base_url
+            );
+
+            let resp = match self
+                .client
+                .post(format!("{}/v1/chat/completions", self.base_url))
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    if attempt <= MAX_RETRIES {
+                        let backoff = (INITIAL_BACKOFF_MS * 2u64.pow(attempt.saturating_sub(1).min(6))).min(MAX_BACKOFF_MS);
+                        tracing::warn!("OpenAI request failed (attempt {}): {}. Retrying in {}ms...", attempt, e, backoff);
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                        last_error = Some(e.into());
+                        continue;
+                    }
+                    return Err(e.into());
+                }
+            };
+
+            let status = resp.status();
+
+            // Retry on 429 (rate limit) and 5xx
+            if should_retry(status) && attempt <= MAX_RETRIES {
+                let retry_after = resp
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok());
+
+                let backoff = retry_after
+                    .map(|secs| secs * 1000)
+                    .unwrap_or_else(|| (INITIAL_BACKOFF_MS * 2u64.pow(attempt.saturating_sub(1).min(6))).min(MAX_BACKOFF_MS));
+
+                tracing::warn!("OpenAI retryable error {} (attempt {}). Retrying in {}ms...", status, attempt, backoff);
+                tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                last_error = Some(anyhow::anyhow!("HTTP {}", status));
+                continue;
+            }
+
+            let resp_body: serde_json::Value = resp.json().await?;
+
+            if !status.is_success() {
+                let error_msg = resp_body["error"]["message"]
+                    .as_str()
+                    .unwrap_or("Unknown error");
+                anyhow::bail!("OpenAI API error ({}): {}", status, error_msg);
+            }
+
+            // Parse response
+            let choice = &resp_body["choices"][0];
+            let msg = &choice["message"];
+
+            let text = msg["content"].as_str().map(|s| s.to_string());
+
+            let mut tool_calls = Vec::new();
+            if let Some(calls) = msg["tool_calls"].as_array() {
+                for call in calls {
+                    let func = &call["function"];
+                    tool_calls.push(ToolCall {
+                        id: call["id"].as_str().unwrap_or("").to_string(),
+                        name: func["name"].as_str().unwrap_or("").to_string(),
+                        input: serde_json::from_str(func["arguments"].as_str().unwrap_or("{}"))
+                            .unwrap_or(serde_json::json!({})),
+                    });
+                }
+            }
+
+            let usage = Usage {
+                input_tokens: resp_body["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32,
+                output_tokens: resp_body["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32,
+                cache_read: resp_body["usage"]["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0) as u32,
+                cache_write: 0,
+            };
+
+            // Track token usage
+            token_tracker().record(&usage);
+
+            return Ok(LlmResponse {
+                text,
+                tool_calls,
+                stop_reason: choice["finish_reason"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_string(),
+                usage,
+            });
         }
-
-        let usage = Usage {
-            input_tokens: resp_body["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32,
-            output_tokens: resp_body["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32,
-            cache_read: 0,
-            cache_write: 0,
-        };
-
-        // Track token usage
-        token_tracker().record(&usage);
-
-        Ok(LlmResponse {
-            text,
-            tool_calls,
-            stop_reason: choice["finish_reason"]
-                .as_str()
-                .unwrap_or("unknown")
-                .to_string(),
-            usage,
-        })
     }
 
     async fn chat_stream(
@@ -1582,20 +1817,186 @@ impl LlmClient for OpenAIClient {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<StreamChunk>> {
-        // For now, just do non-streaming and convert to stream format
-        // Token tracking is done in chat() call
-        let response = self.chat(system, messages, tools).await?;
+        let converted_messages = self.convert_messages(system, messages);
 
-        let (tx, rx) = tokio::sync::mpsc::channel(10);
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "messages": converted_messages,
+            "stream": true,
+            "stream_options": { "include_usage": true },
+        });
 
+        // Reasoning models use max_completion_tokens
+        if self.is_reasoning_model() {
+            body["max_completion_tokens"] = serde_json::json!(self.max_tokens);
+        } else {
+            body["max_tokens"] = serde_json::json!(self.max_tokens);
+        }
+
+        if !tools.is_empty() {
+            body["tools"] = serde_json::json!(self.convert_tools(tools));
+        }
+
+        // Send request (with retry for connection errors)
+        let mut attempt = 0u32;
+        let resp = loop {
+            attempt += 1;
+            if attempt > MAX_RETRIES + 1 {
+                anyhow::bail!("OpenAI stream: max retries exceeded");
+            }
+
+            let resp = match self
+                .client
+                .post(format!("{}/v1/chat/completions", self.base_url))
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    if attempt <= MAX_RETRIES {
+                        let backoff = (INITIAL_BACKOFF_MS * 2u64.pow(attempt.saturating_sub(1).min(6))).min(MAX_BACKOFF_MS);
+                        tracing::warn!("OpenAI stream request failed (attempt {}): {}. Retrying in {}ms...", attempt, e, backoff);
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                        continue;
+                    }
+                    return Err(e.into());
+                }
+            };
+
+            let status = resp.status();
+            if should_retry(status) && attempt <= MAX_RETRIES {
+                let backoff = (INITIAL_BACKOFF_MS * 2u64.pow(attempt.saturating_sub(1).min(6))).min(MAX_BACKOFF_MS);
+                tracing::warn!("OpenAI stream retryable error {} (attempt {}). Retrying in {}ms...", status, attempt, backoff);
+                tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                continue;
+            }
+
+            if !status.is_success() {
+                let resp_body: serde_json::Value = resp.json().await?;
+                let error_msg = resp_body["error"]["message"]
+                    .as_str()
+                    .unwrap_or("Unknown error");
+                anyhow::bail!("OpenAI stream API error ({}): {}", status, error_msg);
+            }
+
+            break resp;
+        };
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<StreamChunk>(100);
+
+        // Spawn task to process OpenAI SSE stream
+        let byte_stream = resp.bytes_stream();
         tokio::spawn(async move {
-            if let Some(text) = response.text {
-                let _ = tx.send(StreamChunk::Text(text)).await;
+            let mut stream = byte_stream;
+            let mut buffer = String::new();
+            // Track partial tool calls by index
+            let mut tool_calls: std::collections::HashMap<u32, PartialToolUse> = std::collections::HashMap::new();
+            let mut usage = Usage::default();
+            let mut finish_reason = String::new();
+
+            while let Some(chunk_result) = stream.next().await {
+                let chunk = match chunk_result {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::error!("OpenAI stream error: {}", e);
+                        break;
+                    }
+                };
+
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                // Process complete SSE events
+                while let Some(data) = extract_sse_event(&mut buffer) {
+                    // OpenAI sends [DONE] at the end
+                    if data.trim() == "[DONE]" {
+                        continue;
+                    }
+
+                    let parsed: serde_json::Value = match serde_json::from_str(&data) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!("OpenAI stream: failed to parse SSE data: {}", e);
+                            continue;
+                        }
+                    };
+
+                    // Extract usage from the final chunk (when stream_options.include_usage is set)
+                    if let Some(usage_obj) = parsed.get("usage") {
+                        usage = Usage {
+                            input_tokens: usage_obj["prompt_tokens"].as_u64().unwrap_or(0) as u32,
+                            output_tokens: usage_obj["completion_tokens"].as_u64().unwrap_or(0) as u32,
+                            cache_read: usage_obj["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0) as u32,
+                            cache_write: 0,
+                        };
+                    }
+
+                    // Process choices
+                    if let Some(choices) = parsed["choices"].as_array() {
+                        for choice in choices {
+                            if let Some(fr) = choice["finish_reason"].as_str() {
+                                finish_reason = fr.to_string();
+                            }
+
+                            let delta = &choice["delta"];
+
+                            // Text content delta
+                            if let Some(content) = delta["content"].as_str() {
+                                if !content.is_empty() {
+                                    let _ = tx.send(StreamChunk::Text(content.to_string())).await;
+                                }
+                            }
+
+                            // Tool call deltas
+                            if let Some(tc_deltas) = delta["tool_calls"].as_array() {
+                                for tc_delta in tc_deltas {
+                                    let index = tc_delta["index"].as_u64().unwrap_or(0) as u32;
+                                    let entry = tool_calls.entry(index).or_insert_with(|| PartialToolUse {
+                                        id: String::new(),
+                                        name: String::new(),
+                                        input_json: String::new(),
+                                    });
+
+                                    // First chunk contains id and function name
+                                    if let Some(id) = tc_delta["id"].as_str() {
+                                        entry.id = id.to_string();
+                                    }
+                                    if let Some(func) = tc_delta.get("function") {
+                                        if let Some(name) = func["name"].as_str() {
+                                            entry.name = name.to_string();
+                                        }
+                                        if let Some(args) = func["arguments"].as_str() {
+                                            entry.input_json.push_str(args);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
-            for tc in response.tool_calls {
-                let _ = tx.send(StreamChunk::ToolUse(tc)).await;
+
+            // Emit completed tool calls
+            let mut indices: Vec<u32> = tool_calls.keys().copied().collect();
+            indices.sort();
+            for idx in indices {
+                if let Some(tool) = tool_calls.remove(&idx) {
+                    let input: serde_json::Value = serde_json::from_str(&tool.input_json)
+                        .unwrap_or(serde_json::json!({}));
+                    let _ = tx.send(StreamChunk::ToolUse(ToolCall {
+                        id: tool.id,
+                        name: tool.name,
+                        input,
+                    })).await;
+                }
             }
-            let _ = tx.send(StreamChunk::Done(response.usage, response.stop_reason)).await;
+
+            // Track token usage
+            token_tracker().record(&usage);
+
+            let _ = tx.send(StreamChunk::Done(usage, finish_reason)).await;
         });
 
         Ok(rx)
@@ -1604,12 +2005,13 @@ impl LlmClient for OpenAIClient {
 
 // ─── Google Client ───────────────────────────────────────────
 
-/// Google Generative AI client.
+/// Google Generative AI (Gemini) client with SSE streaming and function calling support.
 pub struct GoogleClient {
     client: reqwest::Client,
     api_key: String,
     model: String,
     max_tokens: u32,
+    base_url: String,
 }
 
 impl GoogleClient {
@@ -1620,16 +2022,29 @@ impl GoogleClient {
             .or_else(|| std::env::var("GOOGLE_API_KEY").ok())
             .ok_or_else(|| anyhow::anyhow!("Google API key not found"))?;
 
+        let base_url = config
+            .base_url
+            .clone()
+            .unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_string());
+
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()?,
             api_key,
             model: config.model.clone(),
             max_tokens: config.max_tokens.unwrap_or_else(|| Self::default_max_tokens(&config.model)),
+            base_url,
         })
     }
 
     fn default_max_tokens(model: &str) -> u32 {
-        if model.contains("pro") {
+        if model.contains("2.5-pro") {
+            65536
+        } else if model.contains("2.5-flash") {
+            65536
+        } else if model.contains("pro") {
             8192
         } else if model.contains("flash") {
             8192
@@ -1638,8 +2053,14 @@ impl GoogleClient {
         }
     }
 
-    /// Convert messages to Google format.
-    fn convert_messages(&self, system: &str, messages: &[Message]) -> (String, Vec<serde_json::Value>) {
+    /// Convert messages to Google Gemini format.
+    ///
+    /// Google uses:
+    /// - `{ role: "user", parts: [{ text: "..." }] }` for user messages
+    /// - `{ role: "model", parts: [{ text: "..." }] }` for assistant messages
+    /// - Function calls: `{ role: "model", parts: [{ functionCall: { name, args } }] }`
+    /// - Function results: `{ role: "user", parts: [{ functionResponse: { name, response } }] }`
+    fn convert_messages(&self, _system: &str, messages: &[Message]) -> Vec<serde_json::Value> {
         let mut contents = Vec::new();
 
         for msg in messages {
@@ -1649,14 +2070,42 @@ impl GoogleClient {
                 _ => "user",
             };
 
-            let parts: Vec<serde_json::Value> = msg
-                .content
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::Text { text } => Some(serde_json::json!({ "text": text })),
-                    _ => None,
-                })
-                .collect();
+            let mut parts: Vec<serde_json::Value> = Vec::new();
+
+            for block in &msg.content {
+                match block {
+                    ContentBlock::Text { text } => {
+                        parts.push(serde_json::json!({ "text": text }));
+                    }
+                    ContentBlock::ToolUse { name, input, .. } => {
+                        parts.push(serde_json::json!({
+                            "functionCall": {
+                                "name": name,
+                                "args": input
+                            }
+                        }));
+                    }
+                    ContentBlock::ToolResult { tool_use_id: _, content, is_error } => {
+                        // Google requires functionResponse with name and response object.
+                        // We extract the tool name from context if possible; fallback to generic.
+                        // The tool_use_id doesn't directly map to Google's format, but we need the
+                        // function name. We'll embed it with a generic wrapper.
+                        let response_obj = if *is_error {
+                            serde_json::json!({ "error": content })
+                        } else {
+                            // Try to parse as JSON first, fallback to text
+                            serde_json::from_str::<serde_json::Value>(content)
+                                .unwrap_or_else(|_| serde_json::json!({ "result": content }))
+                        };
+                        parts.push(serde_json::json!({
+                            "functionResponse": {
+                                "name": "_tool_result",
+                                "response": response_obj
+                            }
+                        }));
+                    }
+                }
+            }
 
             if !parts.is_empty() {
                 contents.push(serde_json::json!({
@@ -1666,10 +2115,30 @@ impl GoogleClient {
             }
         }
 
-        (system.to_string(), contents)
+        // Google requires alternating user/model turns. Merge consecutive same-role messages.
+        let mut merged = Vec::new();
+        for content in contents {
+            let role = content["role"].as_str().unwrap_or("user").to_string();
+            if let Some(last) = merged.last_mut() {
+                let last_val: &mut serde_json::Value = last;
+                if last_val["role"].as_str() == Some(&role) {
+                    // Merge parts
+                    if let (Some(existing_parts), Some(new_parts)) = (
+                        last_val["parts"].as_array_mut(),
+                        content["parts"].as_array(),
+                    ) {
+                        existing_parts.extend(new_parts.iter().cloned());
+                        continue;
+                    }
+                }
+            }
+            merged.push(content);
+        }
+
+        merged
     }
 
-    /// Convert tools to Google format.
+    /// Convert tools to Google function declaration format.
     fn convert_tools(&self, tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
         if tools.is_empty() {
             return Vec::new();
@@ -1690,25 +2159,14 @@ impl GoogleClient {
             "function_declarations": function_declarations
         })]
     }
-}
 
-#[async_trait::async_trait]
-impl LlmClient for GoogleClient {
-    fn model_name(&self) -> &str {
-        &self.model
-    }
-
-    async fn chat(
-        &self,
-        system: &str,
-        messages: &[Message],
-        tools: &[ToolDefinition],
-    ) -> anyhow::Result<LlmResponse> {
-        let (system_instruction, contents) = self.convert_messages(system, messages);
+    /// Build the request body for Google API.
+    fn build_body(&self, system: &str, messages: &[Message], tools: &[ToolDefinition]) -> serde_json::Value {
+        let contents = self.convert_messages(system, messages);
 
         let mut body = serde_json::json!({
             "system_instruction": {
-                "parts": [{ "text": system_instruction }]
+                "parts": [{ "text": system }]
             },
             "contents": contents,
             "generationConfig": {
@@ -1721,40 +2179,19 @@ impl LlmClient for GoogleClient {
             body["tools"] = serde_json::json!(converted_tools);
         }
 
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            self.model, self.api_key
-        );
+        body
+    }
 
-        let resp = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
-
-        let status = resp.status();
-        let resp_body: serde_json::Value = resp.json().await?;
-
-        if !status.is_success() {
-            let error_msg = resp_body["error"]["message"]
-                .as_str()
-                .unwrap_or("Unknown error");
-            anyhow::bail!("Google API error ({}): {}", status, error_msg);
-        }
-
-        // Parse response
-        let candidate = &resp_body["candidates"][0];
+    /// Parse a Google response candidate into text and tool calls.
+    fn parse_candidate(candidate: &serde_json::Value) -> (Option<String>, Vec<ToolCall>) {
         let content = &candidate["content"];
-
-        let mut text = None;
+        let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
 
         if let Some(parts) = content["parts"].as_array() {
             for part in parts {
                 if let Some(t) = part["text"].as_str() {
-                    text = Some(t.to_string());
+                    text_parts.push(t.to_string());
                 }
                 if let Some(fc) = part.get("functionCall") {
                     tool_calls.push(ToolCall {
@@ -1766,29 +2203,135 @@ impl LlmClient for GoogleClient {
             }
         }
 
-        let usage = Usage {
+        let text = if text_parts.is_empty() {
+            None
+        } else {
+            Some(text_parts.join(""))
+        };
+
+        (text, tool_calls)
+    }
+
+    /// Parse usage metadata from Google response.
+    fn parse_usage(resp_body: &serde_json::Value) -> Usage {
+        Usage {
             input_tokens: resp_body["usageMetadata"]["promptTokenCount"]
                 .as_u64()
                 .unwrap_or(0) as u32,
             output_tokens: resp_body["usageMetadata"]["candidatesTokenCount"]
                 .as_u64()
                 .unwrap_or(0) as u32,
-            cache_read: 0,
+            cache_read: resp_body["usageMetadata"]["cachedContentTokenCount"]
+                .as_u64()
+                .unwrap_or(0) as u32,
             cache_write: 0,
-        };
+        }
+    }
+}
 
-        // Track token usage
-        token_tracker().record(&usage);
+#[async_trait::async_trait]
+impl LlmClient for GoogleClient {
+    fn model_name(&self) -> &str {
+        &self.model
+    }
 
-        Ok(LlmResponse {
-            text,
-            tool_calls,
-            stop_reason: candidate["finishReason"]
-                .as_str()
-                .unwrap_or("unknown")
-                .to_string(),
-            usage,
+    fn clone_boxed(&self) -> Box<dyn LlmClient> {
+        Box::new(Self {
+            client: self.client.clone(),
+            api_key: self.api_key.clone(),
+            model: self.model.clone(),
+            max_tokens: self.max_tokens,
+            base_url: self.base_url.clone(),
         })
+    }
+
+    async fn chat(
+        &self,
+        system: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> anyhow::Result<LlmResponse> {
+        let body = self.build_body(system, messages, tools);
+
+        let url = format!(
+            "{}/v1beta/models/{}:generateContent?key={}",
+            self.base_url, self.model, self.api_key
+        );
+
+        // Retry loop with exponential backoff
+        let mut attempt = 0u32;
+        let mut last_error: Option<anyhow::Error> = None;
+
+        loop {
+            attempt += 1;
+
+            if attempt > MAX_RETRIES + 1 {
+                return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Google: max retries exceeded")));
+            }
+
+            tracing::debug!(
+                "Google API request attempt {}/{} → model={}",
+                attempt, MAX_RETRIES + 1, self.model
+            );
+
+            let resp = match self
+                .client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    if attempt <= MAX_RETRIES {
+                        let backoff = (INITIAL_BACKOFF_MS * 2u64.pow(attempt.saturating_sub(1).min(6))).min(MAX_BACKOFF_MS);
+                        tracing::warn!("Google request failed (attempt {}): {}. Retrying in {}ms...", attempt, e, backoff);
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                        last_error = Some(e.into());
+                        continue;
+                    }
+                    return Err(e.into());
+                }
+            };
+
+            let status = resp.status();
+
+            if should_retry(status) && attempt <= MAX_RETRIES {
+                let backoff = (INITIAL_BACKOFF_MS * 2u64.pow(attempt.saturating_sub(1).min(6))).min(MAX_BACKOFF_MS);
+                tracing::warn!("Google retryable error {} (attempt {}). Retrying in {}ms...", status, attempt, backoff);
+                tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                last_error = Some(anyhow::anyhow!("HTTP {}", status));
+                continue;
+            }
+
+            let resp_body: serde_json::Value = resp.json().await?;
+
+            if !status.is_success() {
+                let error_msg = resp_body["error"]["message"]
+                    .as_str()
+                    .unwrap_or("Unknown error");
+                anyhow::bail!("Google API error ({}): {}", status, error_msg);
+            }
+
+            // Parse response
+            let candidate = &resp_body["candidates"][0];
+            let (text, tool_calls) = Self::parse_candidate(candidate);
+            let usage = Self::parse_usage(&resp_body);
+
+            // Track token usage
+            token_tracker().record(&usage);
+
+            return Ok(LlmResponse {
+                text,
+                tool_calls,
+                stop_reason: candidate["finishReason"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_string(),
+                usage,
+            });
+        }
     }
 
     async fn chat_stream(
@@ -1797,24 +2340,181 @@ impl LlmClient for GoogleClient {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<StreamChunk>> {
-        // For now, just do non-streaming
-        // Token tracking is done in chat() call
-        let response = self.chat(system, messages, tools).await?;
+        let body = self.build_body(system, messages, tools);
 
-        let (tx, rx) = tokio::sync::mpsc::channel(10);
+        // Google streaming uses streamGenerateContent endpoint
+        let url = format!(
+            "{}/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
+            self.base_url, self.model, self.api_key
+        );
 
+        // Send request with retry
+        let mut attempt = 0u32;
+        let resp = loop {
+            attempt += 1;
+            if attempt > MAX_RETRIES + 1 {
+                anyhow::bail!("Google stream: max retries exceeded");
+            }
+
+            let resp = match self
+                .client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    if attempt <= MAX_RETRIES {
+                        let backoff = (INITIAL_BACKOFF_MS * 2u64.pow(attempt.saturating_sub(1).min(6))).min(MAX_BACKOFF_MS);
+                        tracing::warn!("Google stream request failed (attempt {}): {}. Retrying in {}ms...", attempt, e, backoff);
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                        continue;
+                    }
+                    return Err(e.into());
+                }
+            };
+
+            let status = resp.status();
+            if should_retry(status) && attempt <= MAX_RETRIES {
+                let backoff = (INITIAL_BACKOFF_MS * 2u64.pow(attempt.saturating_sub(1).min(6))).min(MAX_BACKOFF_MS);
+                tracing::warn!("Google stream retryable error {} (attempt {}). Retrying in {}ms...", status, attempt, backoff);
+                tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                continue;
+            }
+
+            if !status.is_success() {
+                let resp_body: serde_json::Value = resp.json().await?;
+                let error_msg = resp_body["error"]["message"]
+                    .as_str()
+                    .unwrap_or("Unknown error");
+                anyhow::bail!("Google stream API error ({}): {}", status, error_msg);
+            }
+
+            break resp;
+        };
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<StreamChunk>(100);
+
+        // Spawn task to process Google SSE stream
+        // Google streams JSON objects separated by SSE data: lines
+        let byte_stream = resp.bytes_stream();
         tokio::spawn(async move {
-            if let Some(text) = response.text {
-                let _ = tx.send(StreamChunk::Text(text)).await;
+            let mut stream = byte_stream;
+            let mut buffer = String::new();
+            let mut usage = Usage::default();
+            let mut finish_reason = String::new();
+
+            while let Some(chunk_result) = stream.next().await {
+                let chunk = match chunk_result {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::error!("Google stream error: {}", e);
+                        break;
+                    }
+                };
+
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                // Process complete SSE events
+                while let Some(data) = extract_sse_event(&mut buffer) {
+                    let parsed: serde_json::Value = match serde_json::from_str(&data) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!("Google stream: failed to parse SSE data: {}", e);
+                            continue;
+                        }
+                    };
+
+                    // Each SSE event is a partial response with candidates
+                    if let Some(candidates) = parsed["candidates"].as_array() {
+                        for candidate in candidates {
+                            if let Some(fr) = candidate["finishReason"].as_str() {
+                                finish_reason = fr.to_string();
+                            }
+
+                            if let Some(content) = candidate.get("content") {
+                                if let Some(parts) = content["parts"].as_array() {
+                                    for part in parts {
+                                        // Text chunks
+                                        if let Some(text) = part["text"].as_str() {
+                                            if !text.is_empty() {
+                                                let _ = tx.send(StreamChunk::Text(text.to_string())).await;
+                                            }
+                                        }
+                                        // Function calls
+                                        if let Some(fc) = part.get("functionCall") {
+                                            let _ = tx.send(StreamChunk::ToolUse(ToolCall {
+                                                id: uuid::Uuid::new_v4().to_string(),
+                                                name: fc["name"].as_str().unwrap_or("").to_string(),
+                                                input: fc["args"].clone(),
+                                            })).await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Extract usage metadata
+                    if let Some(usage_meta) = parsed.get("usageMetadata") {
+                        usage = Usage {
+                            input_tokens: usage_meta["promptTokenCount"].as_u64().unwrap_or(0) as u32,
+                            output_tokens: usage_meta["candidatesTokenCount"].as_u64().unwrap_or(0) as u32,
+                            cache_read: usage_meta["cachedContentTokenCount"].as_u64().unwrap_or(0) as u32,
+                            cache_write: 0,
+                        };
+                    }
+                }
             }
-            for tc in response.tool_calls {
-                let _ = tx.send(StreamChunk::ToolUse(tc)).await;
-            }
-            let _ = tx.send(StreamChunk::Done(response.usage, response.stop_reason)).await;
+
+            // Track token usage
+            token_tracker().record(&usage);
+
+            let _ = tx.send(StreamChunk::Done(usage, finish_reason)).await;
         });
 
         Ok(rx)
     }
+}
+
+/// Collect a streaming response into an LlmResponse.
+/// Uses streaming to avoid HTTP timeout on large contexts — the connection stays alive
+/// as chunks arrive, so there's no 120s deadline for the full response.
+/// This is the same result as `chat()` but immune to generation-time timeouts.
+pub async fn collect_stream(
+    mut rx: mpsc::Receiver<StreamChunk>,
+) -> anyhow::Result<LlmResponse> {
+    let mut text_parts: Vec<String> = Vec::new();
+    let mut tool_calls: Vec<ToolCall> = Vec::new();
+    let mut usage = Usage::default();
+    let mut stop_reason = String::new();
+
+    while let Some(chunk) = rx.recv().await {
+        match chunk {
+            StreamChunk::Text(t) => text_parts.push(t),
+            StreamChunk::ToolUse(tc) => tool_calls.push(tc),
+            StreamChunk::Done(u, sr) => {
+                usage = u;
+                stop_reason = sr;
+                break;
+            }
+        }
+    }
+
+    let text = if text_parts.is_empty() {
+        None
+    } else {
+        Some(text_parts.join(""))
+    };
+
+    Ok(LlmResponse {
+        text,
+        tool_calls,
+        usage,
+        stop_reason,
+    })
 }
 
 /// Check if an error indicates the prompt is too long (413 / overloaded context).
@@ -1826,6 +2526,9 @@ pub fn is_prompt_too_long(err: &anyhow::Error) -> bool {
         || (msg.contains("413") && msg.contains("token"))
         || msg.contains("context length exceeded")
         || msg.contains("maximum context length")
+        // Google-specific error
+        || msg.contains("exceeds the maximum number of tokens")
+        || msg.contains("resource_exhausted")
         // "error sending request" after retries often means request body too large
         || msg.contains("error sending request")
 }
@@ -1833,12 +2536,25 @@ pub fn is_prompt_too_long(err: &anyhow::Error) -> bool {
 /// Get the context window size (in tokens) for a given model name.
 pub fn model_context_limit(model: &str) -> usize {
     let m = model.to_lowercase();
+    // Anthropic Claude models
     if m.contains("opus") || m.contains("sonnet") || m.contains("claude-4") || m.contains("claude-3-5") {
         200_000
     } else if m.contains("haiku") {
         200_000
+    }
+    // OpenAI models
+    else if m.contains("gpt-4.1") {
+        1_047_576
     } else if m.contains("gpt-4o") || m.contains("gpt-4-turbo") {
         128_000
+    } else if m.contains("o1") || m.contains("o3") || m.contains("o4") {
+        200_000
+    }
+    // Google Gemini models
+    else if m.contains("gemini-2.5") || m.contains("gemini-2.0") {
+        1_048_576
+    } else if m.contains("gemini-1.5-pro") {
+        2_097_152
     } else if m.contains("gemini") {
         1_000_000
     } else {
@@ -1853,6 +2569,7 @@ pub fn create_client(config: &LlmConfig) -> anyhow::Result<Box<dyn LlmClient>> {
         "anthropic" => Ok(Box::new(AnthropicClient::new(config)?)),
         "openai" => Ok(Box::new(OpenAIClient::new(config)?)),
         "google" => Ok(Box::new(GoogleClient::new(config)?)),
-        other => anyhow::bail!("Unsupported LLM provider: {}. Supported: anthropic, openai, google", other),
+        "claude-cli" => Ok(Box::new(ClaudeCliClient::new(config.model.clone(), &config.claude_cli))),
+        other => anyhow::bail!("Unsupported LLM provider: {}. Supported: anthropic, openai, google, claude-cli", other),
     }
 }

@@ -37,6 +37,313 @@ pub struct SubAgent {
     pub tools: ToolRegistry,
     /// Maximum iterations for the agentic loop.
     pub max_iterations: u32,
+    /// Optional override system prompt. If set, used instead of build_subagent_system_prompt.
+    /// Agent types set this to their constant prompt for cache sharing.
+    pub system_prompt: Option<String>,
+    /// Model override for this sub-agent. When sharing parent's LLM client,
+    /// this is passed to chat_with_model/chat_stream_with_model.
+    pub model_override: Option<String>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Agent Types — typed sub-agent definitions with constant system prompts
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Defines a sub-agent type with constant behavior: system prompt, tools, model, iterations.
+/// System prompt is constant per type (no task/time/workspace interpolation) → prompt cache sharing.
+pub struct AgentType {
+    pub name: &'static str,
+    pub system_prompt: &'static str,
+    pub tools: &'static [&'static str],
+    pub default_model: &'static str,
+    pub default_max_iterations: u32,
+}
+
+impl AgentType {
+    pub const EXPLORER: AgentType = AgentType {
+        name: "explorer",
+        system_prompt: "You are an explorer agent — a read-only specialist for codebase analysis.\n\
+            \n\
+            ## Rules\n\
+            1. Stay focused — do your assigned task, nothing else.\n\
+            2. Read selectively — use list_dir to understand structure, then read only what you need. Use offset/limit for large files.\n\
+            3. Use exec for read-only commands: git log, git blame, find, wc, grep. Do NOT modify any files.\n\
+            4. Don't initiate — no proactive actions, no side quests.\n\
+            5. Be ephemeral — you may be terminated after completion.\n\
+            6. Recover from truncated output — re-read in smaller chunks if output was compacted.\n\
+            \n\
+            ## Output\n\
+            Summarize what you found. Include file paths, line numbers, and code snippets.\n\
+            Keep it concise but informative.\n\
+            \n\
+            ## What You DON'T Do\n\
+            - NO writing or editing files\n\
+            - NO user conversations\n\
+            - NO reading SOUL.md, AGENTS.md, USER.md, TOOLS.md, MEMORY.md",
+        tools: &["read_file", "list_dir", "search_files", "exec"],
+        default_model: "claude-sonnet-4-5-20250929",
+        default_max_iterations: 20,
+    };
+
+    pub const CODER: AgentType = AgentType {
+        name: "coder",
+        system_prompt: "You are a coder agent — an implementation specialist.\n\
+            \n\
+            ## Rules\n\
+            1. Stay focused — do your assigned task, nothing else.\n\
+            2. Plan first — understand the goal, read relevant files, then implement.\n\
+            3. Be efficient — write multiple files per turn when possible.\n\
+            4. Read selectively — use list_dir and search_files to find what you need. Don't read every file.\n\
+            5. Use edit_file for surgical changes to existing files. Use write_file only for new files or full rewrites.\n\
+            6. Run tests after changes — use exec to verify your work compiles and passes.\n\
+            7. Follow existing patterns — match the codebase's style, naming, and structure.\n\
+            8. Don't initiate — no proactive actions, no side quests.\n\
+            9. Be ephemeral — you may be terminated after completion.\n\
+            10. Recover from truncated output — re-read in smaller chunks if output was compacted.\n\
+            \n\
+            ## Output\n\
+            When complete: what you changed, which files, and any caveats.\n\
+            Keep it concise.\n\
+            \n\
+            ## What You DON'T Do\n\
+            - NO user conversations\n\
+            - NO external messages unless explicitly tasked\n\
+            - NO reading SOUL.md, AGENTS.md, USER.md, TOOLS.md, MEMORY.md",
+        tools: &["read_file", "write_file", "edit_file", "list_dir", "search_files", "exec"],
+        default_model: "claude-opus-4-6",
+        default_max_iterations: 40,
+    };
+
+    pub const REVIEWER: AgentType = AgentType {
+        name: "reviewer",
+        system_prompt: "You are a reviewer agent — a document and code review specialist.\n\
+            \n\
+            ## Rules\n\
+            1. Stay focused — review the specified documents, nothing else.\n\
+            2. If document content is provided in your task (labeled ALREADY LOADED), review it directly. Do NOT re-read files that are already in your context.\n\
+            3. Read thoroughly — read each document completely before writing findings.\n\
+            4. Write findings to review files — use write_file or edit_file to save your review.\n\
+            5. Be specific — cite line numbers, quote the problematic text, suggest concrete fixes.\n\
+            6. Use FINDING-N format for each finding (e.g., FINDING-1, FINDING-2) so they can be selectively applied.\n\
+            7. Don't initiate — no proactive actions, no side quests.\n\
+            8. Be ephemeral — you may be terminated after completion.\n\
+            9. Recover from truncated output — re-read in smaller chunks if output was compacted.\n\
+            \n\
+            ## Output\n\
+            Summary of findings count and severity. Key issues first.\n\
+            \n\
+            ## What You DON'T Do\n\
+            - NO running shell commands\n\
+            - NO user conversations\n\
+            - NO reading SOUL.md, AGENTS.md, USER.md, TOOLS.md, MEMORY.md",
+        tools: &["read_file", "write_file", "edit_file", "list_dir", "search_files"],
+        default_model: "claude-sonnet-4-5-20250929",
+        default_max_iterations: 20,
+    };
+
+    pub const PLANNER: AgentType = AgentType {
+        name: "planner",
+        system_prompt: "You are a planner agent — a design and architecture specialist.\n\
+            \n\
+            ## Rules\n\
+            1. Stay focused — analyze the codebase and produce design/planning documents.\n\
+            2. Read selectively — use list_dir and search_files to understand structure, then read key files.\n\
+            3. Think before writing — outline your design approach before producing documents.\n\
+            4. Be concrete — include file paths, function signatures, data structures in your designs.\n\
+            5. Don't initiate — no proactive actions, no side quests.\n\
+            6. Be ephemeral — you may be terminated after completion.\n\
+            7. Recover from truncated output — re-read in smaller chunks if output was compacted.\n\
+            \n\
+            ## Output\n\
+            Structured design document with clear sections. Include trade-offs and alternatives considered.\n\
+            \n\
+            ## What You DON'T Do\n\
+            - NO writing code or modifying source files\n\
+            - NO running shell commands\n\
+            - NO user conversations\n\
+            - NO reading SOUL.md, AGENTS.md, USER.md, TOOLS.md, MEMORY.md",
+        tools: &["read_file", "list_dir", "search_files"],
+        default_model: "claude-sonnet-4-5-20250929",
+        default_max_iterations: 15,
+    };
+}
+
+/// Options for run_subagent. All optional — defaults come from AgentType.
+pub struct SubAgentOptions {
+    pub model: Option<String>,
+    pub max_iterations: Option<u32>,
+    pub workspace: Option<std::path::PathBuf>,
+    pub context: Vec<ContextBlock>,
+}
+
+impl Default for SubAgentOptions {
+    fn default() -> Self {
+        Self { model: None, max_iterations: None, workspace: None, context: vec![] }
+    }
+}
+
+/// A labeled block of context appended to the user message.
+#[derive(Clone)]
+pub struct ContextBlock {
+    pub label: String,
+    pub content: String,
+}
+
+/// Result from a sub-agent run. Always returned — never Err.
+/// Contains structured outcome + partial progress even on failure.
+pub struct SubAgentResult {
+    pub agent_id: String,
+    pub output: String,
+    pub tokens: u64,
+    pub turns: u32,
+    pub transcript_path: std::path::PathBuf,
+    pub files_modified: Vec<String>,
+    pub outcome: SubAgentOutcome,
+}
+
+/// What happened to the sub-agent.
+pub enum SubAgentOutcome {
+    /// Completed normally.
+    Completed,
+    /// Auth failure — all tokens/profiles exhausted.
+    AuthFailed(String),
+    /// Rate limited (429/529).
+    RateLimited(String),
+    /// Request too large for API.
+    ContextTooLarge,
+    /// Hit max iterations without finishing.
+    MaxIterations,
+    /// Wall-clock or HTTP timeout.
+    Timeout(String),
+    /// User or system cancelled.
+    Cancelled,
+    /// Pre-execution failure or other error.
+    Error(String),
+}
+
+impl SubAgentOutcome {
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Completed)
+    }
+
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::RateLimited(_))
+    }
+
+    pub fn should_escalate(&self) -> bool {
+        matches!(self, Self::AuthFailed(_) | Self::Timeout(_) | Self::Error(_))
+    }
+
+    pub fn display(&self) -> String {
+        match self {
+            Self::Completed => "Completed".into(),
+            Self::AuthFailed(msg) => format!("Auth failed: {}", msg),
+            Self::RateLimited(msg) => format!("Rate limited: {}", msg),
+            Self::ContextTooLarge => "Context too large for API".into(),
+            Self::MaxIterations => "Hit max iterations without completing".into(),
+            Self::Timeout(msg) => format!("Timeout: {}", msg),
+            Self::Cancelled => "Cancelled".into(),
+            Self::Error(msg) => format!("Error: {}", msg),
+        }
+    }
+}
+
+/// Internal result from the agentic loop.
+pub(crate) struct LoopResult {
+    pub output: String,
+    pub turns: u32,
+    pub files_modified: Vec<String>,
+    pub exit_reason: LoopExit,
+}
+
+/// Why the agentic loop exited.
+pub(crate) enum LoopExit {
+    /// LLM returned end_turn with no tool calls — normal completion.
+    Completed,
+    /// Hit max_iterations without a final response.
+    MaxIterations,
+    /// Wall-clock timeout exceeded.
+    Timeout { elapsed_secs: u64 },
+    /// Cancellation token fired.
+    Cancelled,
+}
+
+/// Classify an anyhow::Error into a SubAgentOutcome.
+/// Uses Anthropic API error format: "Anthropic API error (STATUS): message"
+/// and reqwest error traits (is_timeout, is_connect) for precise matching.
+fn classify_error(e: &anyhow::Error) -> SubAgentOutcome {
+    let msg = e.to_string();
+
+    // Check reqwest error traits first (most precise)
+    if let Some(reqwest_err) = e.downcast_ref::<reqwest::Error>() {
+        if reqwest_err.is_timeout() {
+            return SubAgentOutcome::Timeout(msg);
+        }
+    }
+
+    // Match on Anthropic API error format: "Anthropic ... error (STATUS ...): ..."
+    if msg.contains("(401 Unauthorized)") || msg.contains("(401)") {
+        return SubAgentOutcome::AuthFailed(msg);
+    }
+    if msg.contains("(429") || msg.contains("(529") || msg.contains("overloaded") {
+        return SubAgentOutcome::RateLimited(msg);
+    }
+
+    // Context size errors
+    if crate::llm::is_prompt_too_long(e) {
+        return SubAgentOutcome::ContextTooLarge;
+    }
+
+    // Cancellation
+    if msg.contains("Cancelled") || msg.contains("cancelled") {
+        return SubAgentOutcome::Cancelled;
+    }
+
+    SubAgentOutcome::Error(msg)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// TranscriptWriter — append-only JSONL audit log for sub-agent runs
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Append-only JSONL writer for sub-agent transcripts.
+/// Records assistant text + tool call names per turn. Debug/audit only, not for resume.
+pub struct TranscriptWriter {
+    file: std::io::BufWriter<std::fs::File>,
+    pub path: std::path::PathBuf,
+}
+
+impl TranscriptWriter {
+    /// Open (or create) a transcript file for the given agent ID.
+    pub fn open(agent_id: &str) -> anyhow::Result<Self> {
+        let dir = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".rustclaw/transcripts");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{}.jsonl", agent_id));
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        Ok(Self {
+            file: std::io::BufWriter::new(file),
+            path,
+        })
+    }
+
+    /// Append a turn summary. Content should be brief — text + tool names, not full tool results.
+    pub fn append(&mut self, role: &str, content: &str) -> anyhow::Result<()> {
+        use std::io::Write;
+        let entry = serde_json::json!({
+            "role": role,
+            "content": content,
+            "ts": chrono::Utc::now().to_rfc3339(),
+        });
+        serde_json::to_writer(&mut self.file, &entry)?;
+        self.file.write_all(b"\n")?;
+        self.file.flush()?;
+        Ok(())
+    }
 }
 
 /// The core agent runner.
@@ -335,8 +642,8 @@ impl AgentRunner {
         &self,
         session_key: &str,
         question: &str,
-        user_id: Option<&str>,
-        channel: Option<&str>,
+        _user_id: Option<&str>,
+        _channel: Option<&str>,
     ) -> anyhow::Result<String> {
         tracing::info!("Processing BTW question for session {}", session_key);
 
@@ -565,12 +872,18 @@ CRITICAL CONSTRAINTS:
         );
         drop(caps);
         if !memory_context.is_empty() {
-            system_prompt.push_str("\n\n## Relevant Memories\n");
+            // memory_context already contains ⚠️ header from engram_hooks
+            system_prompt.push_str("\n");
             system_prompt.push_str(&memory_context);
         }
 
         // 5. Add user message to session
         session.messages.push(Message::text("user", user_message));
+
+        // 5b. Persist session immediately after user message is added.
+        // This ensures that if the process crashes during the agentic loop,
+        // at least the user message (and all prior context) is preserved.
+        self.sessions.update(session.clone()).await;
 
         // 6. Token-based auto-compact (replaces message-count summarization)
         {
@@ -613,6 +926,10 @@ CRITICAL CONSTRAINTS:
                 }
             }
         }
+
+        // 6b. Persist after compaction — the compacted/summarized session is valuable state.
+        // If process crashes during the agentic loop, we keep the compacted context.
+        self.sessions.update(session.clone()).await;
 
         // 7. Microcompact old tool results
         crate::session::microcompact_messages(&mut session.messages, &self.config.context);
@@ -660,7 +977,15 @@ CRITICAL CONSTRAINTS:
                     }
                     // Re-microcompact after compaction
                     crate::session::microcompact_messages(&mut session.messages, &self.config.context);
+
+                    // Persist after mid-loop compact to preserve compacted state
+                    self.sessions.update(session.clone()).await;
                 }
+            }
+
+            // Incremental session persistence every 10 turns to prevent data loss on crash
+            if turn > 0 && turn % 10 == 0 {
+                self.sessions.update(session.clone()).await;
             }
 
             // Race LLM call against cancellation token
@@ -838,6 +1163,9 @@ CRITICAL CONSTRAINTS:
             }
             let _ = tx.send(AgentEvent::Response(response_text.clone())).await;
         }
+
+        // Persist session immediately after loop exit — before hooks, to prevent data loss on crash
+        self.sessions.update(session.clone()).await;
 
         // Clean up cancellation token
         {
@@ -1139,6 +1467,129 @@ CRITICAL CONSTRAINTS:
     }
 
     /// Spawn a sub-agent with custom max_iterations.
+    /// Run a typed sub-agent to completion. The single entry point for all sub-agent execution.
+    /// System prompt is constant per agent type (prompt cache sharing). Task + context go in user message.
+    pub async fn run_subagent(
+        &self,
+        agent_type: &AgentType,
+        task: &str,
+        options: SubAgentOptions,
+    ) -> SubAgentResult {
+        let agent_id = format!("{}_{}", agent_type.name, chrono::Utc::now().format("%H%M%S%3f"));
+        let workspace_dir = options.workspace
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| self.config.workspace.clone().unwrap_or_else(|| ".".to_string()));
+        let model = options.model.as_deref()
+            .unwrap_or(agent_type.default_model);
+        let max_iterations = options.max_iterations
+            .unwrap_or(agent_type.default_max_iterations);
+
+        // Helper for pre-execution failures
+        let fail = |msg: String| -> SubAgentResult {
+            SubAgentResult {
+                agent_id: agent_id.clone(),
+                output: String::new(),
+                tokens: 0,
+                turns: 0,
+                transcript_path: std::path::PathBuf::new(),
+                files_modified: vec![],
+                outcome: SubAgentOutcome::Error(msg),
+            }
+        };
+
+        // Share the parent's LLM client — same OAuth token manager, same connection pool.
+        let llm_client = {
+            let guard = self.llm_client.read().await;
+            guard.clone_boxed()
+        };
+
+        // Create typed tool registry + workspace (pre-execution, may fail)
+        let tools = ToolRegistry::for_agent_type(agent_type.tools, &workspace_dir);
+        let workspace = match Workspace::load(&workspace_dir) {
+            Ok(w) => w,
+            Err(e) => return fail(format!("Failed to load workspace '{}': {}", workspace_dir, e)),
+        };
+
+        let subagent = SubAgent {
+            id: agent_id.clone(),
+            name: format!("{}:{}", agent_type.name, agent_id),
+            workspace,
+            session_prefix: format!("agent:{}:", agent_id),
+            llm_client,
+            tools,
+            max_iterations,
+            system_prompt: Some(agent_type.system_prompt.to_string()),
+            model_override: Some(model.to_string()),
+        };
+
+        // Build user message
+        let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
+        let mut user_message = format!(
+            "Time: {}\nWorkspace: {}\n\n## Task\n{}",
+            time, workspace_dir, task
+        );
+        for block in &options.context {
+            user_message.push_str(&format!("\n\n## {}\n{}", block.label, block.content));
+        }
+
+        // Open transcript
+        let mut transcript = match TranscriptWriter::open(&agent_id) {
+            Ok(tw) => Some(tw),
+            Err(e) => {
+                tracing::warn!("Failed to open transcript for {}: {}", agent_id, e);
+                None
+            }
+        };
+
+        tracing::info!(
+            "run_subagent '{}' type={} model={} workspace={} max_iterations={}",
+            agent_id, agent_type.name, model, workspace_dir, max_iterations
+        );
+
+        // Execute the agentic loop — classify errors on failure
+        let (outcome, output, turns, files_modified) = match self.process_with_subagent(
+            &subagent,
+            &user_message,
+            Some(&agent_id),
+            transcript.as_mut(),
+        ).await {
+            Ok(loop_result) => {
+                let outcome = match loop_result.exit_reason {
+                    LoopExit::Completed => SubAgentOutcome::Completed,
+                    LoopExit::MaxIterations => SubAgentOutcome::MaxIterations,
+                    LoopExit::Timeout { elapsed_secs } => SubAgentOutcome::Timeout(format!("{}s", elapsed_secs)),
+                    LoopExit::Cancelled => SubAgentOutcome::Cancelled,
+                };
+                (outcome, loop_result.output, loop_result.turns, loop_result.files_modified)
+            }
+            Err(e) => {
+                tracing::error!("Sub-agent '{}' failed: {}", agent_id, e);
+                (classify_error(&e), String::new(), 0, vec![])
+            }
+        };
+
+        // Extract token count from session
+        let session_key = format!("agent:{}:{}", agent_id, agent_id);
+        let tokens = self.sessions.get_session(&session_key).await
+            .map(|s| s.total_tokens)
+            .unwrap_or(0);
+
+        let transcript_path = transcript
+            .map(|tw| tw.path.clone())
+            .unwrap_or_default();
+
+        SubAgentResult {
+            agent_id,
+            output,
+            tokens,
+            turns,
+            transcript_path,
+            files_modified,
+            outcome,
+        }
+    }
+
     pub fn spawn_agent_with_options(
         &self,
         agent_config: &AgentConfig,
@@ -1158,8 +1609,12 @@ CRITICAL CONSTRAINTS:
         if let Some(model) = &agent_config.model {
             llm_config.model = model.clone();
         }
-        // Sub-agent inherits parent's LLM config as-is (including max_tokens).
-        // With None (default), provider auto-resolves to model max.
+        // Sub-agents need a longer HTTP timeout than the main agent because:
+        // 1. Non-streaming API calls block until full response is generated
+        // 2. Large accumulated context (tool results) makes API processing slower
+        // 3. Opus model can take 2-4 minutes per response on complex tasks
+        // The default 120s causes "error sending request" failures at ~turn 13-15.
+        llm_config.request_timeout_secs = llm_config.request_timeout_secs.max(300);
         let llm_client = llm::create_client(&llm_config)?;
 
         // Create sub-agent's own tool registry scoped to its workspace
@@ -1187,6 +1642,8 @@ CRITICAL CONSTRAINTS:
             llm_client,
             tools,
             max_iterations,
+            system_prompt: None,
+            model_override: None,
         })
     }
 
@@ -1196,7 +1653,8 @@ CRITICAL CONSTRAINTS:
         subagent: &SubAgent,
         user_message: &str,
         session_suffix: Option<&str>,
-    ) -> anyhow::Result<String> {
+        mut transcript: Option<&mut TranscriptWriter>,
+    ) -> anyhow::Result<LoopResult> {
         let session_key = format!(
             "{}{}",
             subagent.session_prefix,
@@ -1214,7 +1672,11 @@ CRITICAL CONSTRAINTS:
         let mut session = self.sessions.get_or_create(&session_key).await;
 
         // Build focused subagent system prompt (no workspace files, task-focused)
-        let system_prompt = subagent.workspace.build_subagent_system_prompt(user_message);
+        // Use agent type's constant prompt if set (cache-friendly), else generic fallback
+        let system_prompt = match &subagent.system_prompt {
+            Some(sp) => sp.clone(),
+            None => subagent.workspace.build_subagent_system_prompt(user_message),
+        };
 
         // Add user message
         session.messages.push(Message::text("user", user_message));
@@ -1231,6 +1693,9 @@ CRITICAL CONSTRAINTS:
         // Full agentic loop (same pattern as main agent, with auto-compact)
         let max_turns = subagent.max_iterations as usize;
         let mut response_text = String::new();
+        let mut completed_turns: u32 = 0;
+        let mut files_modified: Vec<String> = Vec::new();
+        let mut loop_exit = LoopExit::Completed;
 
         // Register cancellation token for sub-agent so it can be cancelled externally
         let cancel_token = self.get_cancellation_token(&session_key).await;
@@ -1245,9 +1710,11 @@ CRITICAL CONSTRAINTS:
             children.entry(parent_key).or_default().push(session_key.clone());
         }
 
-        // Wall-clock timeout: sub-agents get 10 minutes max
+        // Wall-clock timeout: sub-agents get 20 minutes max.
+        // 10 min was too tight — a single LLM call can take 5 min (300s timeout),
+        // and retries add more dead time. With 15-turn loops, need enough headroom.
         let wall_clock_start = std::time::Instant::now();
-        let wall_clock_limit = std::time::Duration::from_secs(600); // 10 minutes
+        let wall_clock_limit = std::time::Duration::from_secs(1200); // 20 minutes
 
         for turn in 0..max_turns {
             // Check wall-clock timeout
@@ -1257,26 +1724,33 @@ CRITICAL CONSTRAINTS:
                     subagent.name, wall_clock_start.elapsed().as_secs_f64(), wall_clock_limit.as_secs(), turn
                 );
                 response_text = format!("(Sub-agent timed out after {:.0}s at turn {})", wall_clock_start.elapsed().as_secs_f64(), turn);
+                loop_exit = LoopExit::Timeout { elapsed_secs: wall_clock_start.elapsed().as_secs() };
                 break;
             }
             // Check if cancelled
             if cancel_token.is_cancelled() {
                 tracing::info!("Sub-agent '{}' cancelled at turn {}", subagent.name, turn);
                 response_text = format!("(Sub-agent cancelled at turn {})", turn);
+                loop_exit = LoopExit::Cancelled;
                 break;
             }
-            // Token-based auto-compact check before each LLM call
-            // Sub-agents use a lower threshold (60%) than main agent (80%) because:
-            // 1. They accumulate tool results fast (read_file, design docs)
-            // 2. Their output goes back to parent as tool_result (double memory pressure)
-            // 3. "error sending request" means the HTTP body is already too large
+            // Token-based auto-compact check before each LLM call.
+            //
+            // IMPORTANT: session.estimate_tokens() only counts message content chars/4.
+            // The actual API request includes system prompt + tool schemas + JSON overhead,
+            // which can add 5-10K tokens. We add a fixed overhead to the estimate so
+            // compact triggers before the request actually fails.
             {
                 let model_limit = crate::llm::model_context_limit(
                     subagent.llm_client.model_name()
                 );
                 let subagent_compact_pct = self.config.context.compact_threshold_pct.min(0.60);
                 let threshold = (model_limit as f64 * subagent_compact_pct) as usize;
-                let estimated = session.estimate_tokens();
+                // Add estimated overhead: system prompt (~200 tokens) + tool schemas
+                // (~150 tokens per tool × ~10 tools) + JSON structure overhead (~500 tokens)
+                let tool_overhead = tool_defs.len() * 150;
+                let fixed_overhead = 200 + tool_overhead + 500 + system_prompt.len() / 4;
+                let estimated = session.estimate_tokens() + fixed_overhead;
                 if estimated > threshold {
                     tracing::info!(
                         "Sub-agent '{}' turn {}: auto-compact triggered ({} tokens > {} threshold)",
@@ -1296,18 +1770,43 @@ CRITICAL CONSTRAINTS:
                 }
             }
 
+            // Use streaming + collect to avoid HTTP timeout on large contexts.
+            // Non-streaming `chat()` has a fixed timeout for the entire response,
+            // which fails when the model takes long to generate (common with opus or
+            // large accumulated context). Streaming keeps the connection alive as chunks
+            // arrive, so there's no generation-time timeout.
+            //
+            // Streaming refusal risk: Claude 4 triggers refusal on specific system prompt
+            // strings ("You are OpenCode", "You are a personal assistant running inside
+            // OpenClaw."). Sub-agent prompt ("You are a **subagent** spawned by the main
+            // agent") does NOT match any trigger — safe to stream.
+            // Use model override if set (sub-agents sharing parent's client use different models)
+            let effective_model = subagent.model_override.as_deref()
+                .unwrap_or(subagent.llm_client.model_name());
+
             let response = match subagent
                 .llm_client
-                .chat(&system_prompt, &session.messages, &tool_defs)
+                .chat_stream_with_model(&system_prompt, &session.messages, &tool_defs, effective_model)
                 .await
             {
-                Ok(r) => r,
+                Ok(rx) => {
+                    let resp = crate::llm::collect_stream(rx).await?;
+                    if resp.stop_reason == "refusal" {
+                        tracing::error!(
+                            "Sub-agent '{}' turn {}: streaming refusal detected! Falling back to non-streaming.",
+                            subagent.name, turn
+                        );
+                        subagent.llm_client.chat_with_model(&system_prompt, &session.messages, &tool_defs, effective_model).await?
+                    } else {
+                        resp
+                    }
+                }
                 Err(e) if self.config.context.reactive_compact && crate::llm::is_prompt_too_long(&e) => {
-                    tracing::warn!("Sub-agent '{}' turn {}: send error — reactive compact", subagent.name, turn);
+                    tracing::warn!("Sub-agent '{}' turn {}: stream send error — reactive compact", subagent.name, turn);
                     match Self::compact_session_with_llm(subagent.llm_client.as_ref(), &mut session, &self.config.context).await {
                         Ok(true) => {
-                            // Retry after compact
-                            subagent.llm_client.chat(&system_prompt, &session.messages, &tool_defs).await?
+                            let rx = subagent.llm_client.chat_stream_with_model(&system_prompt, &session.messages, &tool_defs, effective_model).await?;
+                            crate::llm::collect_stream(rx).await?
                         }
                         _ => return Err(e),
                     }
@@ -1398,6 +1897,14 @@ CRITICAL CONSTRAINTS:
                             tool_result.output.len(),
                             tool_result.is_error
                         );
+                        // Track successfully modified files
+                        if !tool_result.is_error && (tc.name == "write_file" || tc.name == "edit_file") {
+                            if let Some(path) = tc.input.get("path").and_then(|v| v.as_str()) {
+                                if !files_modified.contains(&path.to_string()) {
+                                    files_modified.push(path.to_string());
+                                }
+                            }
+                        }
                         tool_results.push((tc.id.clone(), tool_result.output, tool_result.is_error));
                     }
                     Err(e) => {
@@ -1421,10 +1928,23 @@ CRITICAL CONSTRAINTS:
 
             // Add tool results as user message
             session.messages.push(Message::tool_results(tool_results));
+
+            // Transcript: log assistant text + tool call names (not full results)
+            if let Some(tw) = transcript.as_mut() {
+                let tool_names: Vec<&str> = response.tool_calls.iter().map(|tc| tc.name.as_str()).collect();
+                let summary = format!("tools: [{}]", tool_names.join(", "));
+                if let Some(ref text) = response.text {
+                    let _ = tw.append("assistant", &format!("{}\n{}", text, summary));
+                } else {
+                    let _ = tw.append("assistant", &summary);
+                }
+            }
+
+            completed_turns += 1;
         }
 
         // If we hit max iterations without a final response, note it
-        if response_text.is_empty() {
+        if response_text.is_empty() && matches!(loop_exit, LoopExit::Completed) {
             tracing::warn!(
                 "Sub-agent '{}' reached max iterations ({}) without final response",
                 subagent.name,
@@ -1435,6 +1955,7 @@ CRITICAL CONSTRAINTS:
                 subagent.name,
                 max_turns
             );
+            loop_exit = LoopExit::MaxIterations;
         }
 
         // Update session
@@ -1456,7 +1977,12 @@ CRITICAL CONSTRAINTS:
             children.retain(|_, v| !v.is_empty());
         }
 
-        Ok(response_text)
+        Ok(LoopResult {
+            output: response_text,
+            turns: completed_turns,
+            files_modified,
+            exit_reason: loop_exit,
+        })
     }
 
     /// Get the current ritual ToolScope, if any ritual is active.

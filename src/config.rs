@@ -296,9 +296,70 @@ pub struct LlmConfig {
     /// Only set this if you want to explicitly limit output length.
     pub max_tokens: Option<u32>,
 
+    /// HTTP request timeout in seconds. Default: 120.
+    /// Sub-agents may need longer (300s) because non-streaming API calls
+    /// on large contexts can exceed 120s, especially for opus.
+    #[serde(default = "default_request_timeout")]
+    pub request_timeout_secs: u64,
+
     /// Temperature
     #[serde(default = "default_temperature")]
     pub temperature: f32,
+
+    /// Claude CLI proxy configuration (for provider = "claude-cli").
+    #[serde(default)]
+    pub claude_cli: ClaudeCliConfig,
+}
+
+/// Configuration for the Claude CLI proxy backend (`claude -p`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeCliConfig {
+    /// Path to the `claude` binary.
+    #[serde(default = "default_claude_binary")]
+    pub binary: String,
+
+    /// Per-request timeout in seconds.
+    #[serde(default = "default_claude_timeout")]
+    pub timeout_secs: u64,
+
+    /// Max agent loop iterations for ritual phases.
+    #[serde(default = "default_claude_max_turns")]
+    pub max_turns: u32,
+
+    /// Expire CC sessions after this many hours.
+    #[serde(default = "default_claude_session_ttl")]
+    pub session_ttl_hours: u64,
+}
+
+impl Default for ClaudeCliConfig {
+    fn default() -> Self {
+        Self {
+            binary: default_claude_binary(),
+            timeout_secs: default_claude_timeout(),
+            max_turns: default_claude_max_turns(),
+            session_ttl_hours: default_claude_session_ttl(),
+        }
+    }
+}
+
+fn default_claude_binary() -> String {
+    "claude".to_string()
+}
+
+fn default_claude_timeout() -> u64 {
+    600
+}
+
+fn default_claude_max_turns() -> u32 {
+    50
+}
+
+fn default_claude_session_ttl() -> u64 {
+    24
+}
+
+fn default_request_timeout() -> u64 {
+    120
 }
 
 fn default_temperature() -> f32 {
@@ -617,6 +678,7 @@ fn expand_env_vars(input: &str) -> String {
 }
 
 /// Auth mode for the LLM client.
+#[derive(Clone)]
 pub enum AuthMode {
     /// Static API key (x-api-key header).
     ApiKey(String),

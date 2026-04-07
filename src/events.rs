@@ -15,6 +15,7 @@ pub enum SubAgentEvent {
         parent_session_key: String,
         task_summary: String,
         result_preview: String,
+        files_modified: Vec<String>,
         duration_secs: f64,
     },
     /// A fire-and-forget sub-agent failed.
@@ -23,6 +24,7 @@ pub enum SubAgentEvent {
         parent_session_key: String,
         task_summary: String,
         error: String,
+        files_modified: Vec<String>,
         duration_secs: f64,
     },
 }
