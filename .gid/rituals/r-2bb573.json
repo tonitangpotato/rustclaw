@@ -1,0 +1,53 @@
+{
+  "id": "r-2bb573",
+  "phase": "Cancelled",
+  "task": "apply all",
+  "project": {
+    "has_requirements": true,
+    "has_design": true,
+    "has_graph": true,
+    "has_source": true,
+    "has_tests": false,
+    "language": "rust",
+    "source_file_count": 57,
+    "verify_command": "cargo build 2>&1 && cargo test 2>&1"
+  },
+  "strategy": null,
+  "verify_retries": 0,
+  "phase_retries": {},
+  "failed_phase": "WaitingClarification",
+  "error_context": null,
+  "review_target": null,
+  "triage_size": null,
+  "phase_tokens": {
+    "triage": 502
+  },
+  "transitions": [
+    {
+      "from": "Idle",
+      "to": "Initializing",
+      "event": "Idle \u2192 Initializing",
+      "timestamp": "2026-04-06T14:21:42.131154Z"
+    },
+    {
+      "from": "Initializing",
+      "to": "Triaging",
+      "event": "Initializing \u2192 Triaging",
+      "timestamp": "2026-04-06T14:21:42.132523Z"
+    },
+    {
+      "from": "Triaging",
+      "to": "WaitingClarification",
+      "event": "Triaging \u2192 WaitingClarification",
+      "timestamp": "2026-04-06T14:21:43.688261Z"
+    },
+    {
+      "from": "WaitingClarification",
+      "to": "Escalated",
+      "event": "WaitingClarification \u2192 Escalated",
+      "timestamp": "2026-04-06T14:26:43.692872Z"
+    }
+  ],
+  "started_at": "2026-04-06T14:21:42.131137Z",
+  "updated_at": "2026-04-06T14:26:43.692875Z"
+}

@@ -1,0 +1,100 @@
+{
+  "id": "r-1554a4",
+  "phase": "Done",
+  "task": "Implement ISS-006: Incremental Updates for `gid extract` in the gid-rs project at /Users/potato/clawd/projects/gid-rs/. The design document is at .gid/features/incremental-extract/DESIGN.md. Key changes:\n\n1. Add ExtractMetadata and FileState structs (with version field, content_hash via xxHash64, mtime, node_ids, edge_count)\n2. Add extract-meta.json persistence (.gid/extract-meta.json)\n3. Implement 5-phase incremental pipeline: scan files \u2192 remove stale \u2192 parse changed \u2192 resolve refs \u2192 save metadata\n4. Dangling edge cleanup: after removing stale nodes, scan ALL edges and remove any where source or target node_id no longer exists\n5. Edge removal uses node_ids (not edge_count) to find edges belonging to a file\n6. Version mismatch or corrupted metadata \u2192 full rebuild fallback\n7. Add --full flag to force full rebuild\n8. Performance target: <100ms for no-change case, <1s for 1-5 changed files\n\nSource files to modify: crates/gid-core/src/code_graph/extract.rs (main), types.rs, mod.rs. New file for metadata types if needed.",
+  "project": {
+    "has_requirements": true,
+    "has_design": true,
+    "has_graph": true,
+    "has_source": true,
+    "has_tests": false,
+    "language": "rust",
+    "source_file_count": 57,
+    "verify_command": "cargo check --features full -p gid-core 2>&1 && cargo test --features full -p gid-core 2>&1"
+  },
+  "strategy": "SingleLlm",
+  "verify_retries": 0,
+  "phase_retries": {},
+  "failed_phase": null,
+  "error_context": null,
+  "review_target": "tasks",
+  "triage_size": "large",
+  "phase_tokens": {
+    "reviewing": 14240,
+    "planning": 282,
+    "graph": 10643,
+    "design": 36986,
+    "triage": 732
+  },
+  "transitions": [
+    {
+      "from": "Idle",
+      "to": "Initializing",
+      "event": "Idle \u2192 Initializing",
+      "timestamp": "2026-04-06T13:57:15.557286Z"
+    },
+    {
+      "from": "Initializing",
+      "to": "Triaging",
+      "event": "Initializing \u2192 Triaging",
+      "timestamp": "2026-04-06T13:57:15.560989Z"
+    },
+    {
+      "from": "Triaging",
+      "to": "Designing",
+      "event": "Triaging \u2192 Designing",
+      "timestamp": "2026-04-06T13:57:16.887985Z"
+    },
+    {
+      "from": "Designing",
+      "to": "Reviewing",
+      "event": "Designing \u2192 Reviewing",
+      "timestamp": "2026-04-06T14:07:47.074105Z"
+    },
+    {
+      "from": "Reviewing",
+      "to": "WaitingApproval",
+      "event": "Reviewing \u2192 WaitingApproval",
+      "timestamp": "2026-04-06T14:17:47.341508Z"
+    },
+    {
+      "from": "WaitingApproval",
+      "to": "Planning",
+      "event": "WaitingApproval \u2192 Planning",
+      "timestamp": "2026-04-06T14:22:47.350850Z"
+    },
+    {
+      "from": "Planning",
+      "to": "Graphing",
+      "event": "Planning \u2192 Graphing",
+      "timestamp": "2026-04-06T14:22:54.674596Z"
+    },
+    {
+      "from": "Graphing",
+      "to": "Reviewing",
+      "event": "Graphing \u2192 Reviewing",
+      "timestamp": "2026-04-06T14:26:23.320737Z"
+    },
+    {
+      "from": "Reviewing",
+      "to": "WaitingApproval",
+      "event": "Reviewing \u2192 WaitingApproval",
+      "timestamp": "2026-04-06T14:27:51.836293Z"
+    },
+    {
+      "from": "WaitingApproval",
+      "to": "Implementing",
+      "event": "WaitingApproval \u2192 Implementing",
+      "timestamp": "2026-04-06T14:58:16.245075Z"
+    },
+    {
+      "from": "Implementing",
+      "to": "Done",
+      "event": "Build + tests pass, committed b25d61e",
+      "timestamp": "2026-04-06T15:28:08.212862Z"
+    }
+  ],
+  "started_at": "2026-04-06T13:57:15.556429Z",
+  "updated_at": "2026-04-06T15:28:08.212862Z",
+  "target_root": "/Users/potato/clawd/projects/gid-rs"
+}

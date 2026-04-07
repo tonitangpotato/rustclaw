@@ -1,6 +1,6 @@
 ritual:
   gating:
-    enabled: true
+    enabled: false
     gated_paths:
       - "src/**"
       - "tests/**"

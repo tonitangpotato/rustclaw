@@ -1,0 +1,125 @@
+{
+  "id": "r-e3bc2c",
+  "phase": "Done",
+  "task": "Refactor gid-core code_graph LSP refinement pipeline with 5 fixes:\n\n1. **call_site data preservation** — tree-sitter `node.start_position()` already has exact (row, col) but all `extract_calls_*` functions discard it, creating `call_site_line: None`. Fix all 3 languages (rust_lang.rs, python.rs, typescript.rs) to pass call site position through to CodeEdge.\n\n2. **Single LSP session with 3 phases** — `refine_with_lsp` in build.rs currently only does `definition` queries. `get_references()` and `get_implementations()` are already implemented in lsp_client.rs but never called. Restructure into one session: Phase 1 definition (verify/delete edges), Phase 2 references (discover cross-module callers for public symbols only), Phase 3 implementations (resolve trait→concrete impl).\n\n3. **Add visibility to CodeNode** — Add `visibility: Visibility` field (Public/Private/Crate/Protected) to CodeNode in types.rs. Extract from tree-sitter in all 3 language extractors. Use in LSP refinement to skip references queries for private symbols.\n\n4. **Add is_abstract/is_trait to CodeNode** — Add `is_abstract: bool` field to CodeNode. Extract trait/abstract class markers in tree-sitter. Use in LSP refinement to target implementations queries only at trait/abstract methods.\n\n5. **ResolutionContext struct** — Replace the 12-parameter `resolve_rust_call_edge` function signature with a `ResolutionContext` struct that bundles all the lookup maps.\n\nProject location: /Users/potato/clawd/projects/gid-rs/crates/gid-core/\nKey files:\n- src/code_graph/types.rs — CodeNode, CodeEdge, EdgeRelation types\n- src/code_graph/build.rs — refine_with_lsp, graph building\n- src/code_graph/lang/rust_lang.rs — Rust extractor (~1646 lines)\n- src/code_graph/lang/python.rs — Python extractor\n- src/code_graph/lang/typescript.rs — TypeScript extractor\n- src/code_graph/lang/mod.rs — find_call_position helper\n- src/lsp_client.rs — LSP client with get_definition, get_references, get_implementations\n- src/code_graph/tests.rs — existing tests (338 pass)",
+  "project": {
+    "has_requirements": true,
+    "has_design": true,
+    "has_graph": true,
+    "has_source": true,
+    "has_tests": false,
+    "language": "rust",
+    "source_file_count": 57,
+    "verify_command": "cargo build 2>&1 && cargo test 2>&1"
+  },
+  "strategy": {
+    "MultiAgent": {
+      "tasks": [
+        "Core agent infrastructure: AgentRunner, ToolRegistry, event system, agentic loop",
+        "Memory & cognitive system: Engram integration, memory hooks, emotion bus",
+        "Channel adapters: Telegram, Discord, Slack, Signal, WhatsApp, Matrix",
+        "LLM client abstraction: Anthropic, OpenAI, Google support with streaming",
+        "GID integration: LSP client (ISS-002), refinement pipeline (ISS-004), modular refactoring (ISS-003)",
+        "Security layer: Sandbox (WASM/Docker), safety checks, prompt injection detection",
+        "Skills system: Markdown-based workflows, capture-idea, social-intake",
+        "Session management: SQLite persistence, summarization, microcompact context",
+        "CLI & configuration: Main entry point, YAML config, workspace files",
+        "Auth & token management: Multi-token rotation, OAuth, macOS Keychain",
+        "Voice capabilities: Whisper STT, edge-tts TTS, voice mode toggle",
+        "Dashboard & monitoring: Web UI (Axum), metrics, agent status",
+        "Orchestrator: Multi-agent CEO/specialist coordination, sub-agent spawning",
+        "Hot-reload system: FSEvents watcher, SIGHUP handler, config updates"
+      ]
+    }
+  },
+  "verify_retries": 0,
+  "phase_retries": {},
+  "failed_phase": null,
+  "error_context": "triage: size=large, skip_design=false, skip_graph=false",
+  "review_target": "tasks",
+  "triage_size": "large",
+  "phase_tokens": {
+    "reviewing": 5736,
+    "triage": 1025,
+    "design": 23782,
+    "planning": 803,
+    "graph": 2925,
+    "implement": 64078
+  },
+  "transitions": [
+    {
+      "from": "Idle",
+      "to": "Initializing",
+      "event": "Idle → Initializing",
+      "timestamp": "2026-04-05T23:04:13.613423Z"
+    },
+    {
+      "from": "Initializing",
+      "to": "Triaging",
+      "event": "Initializing → Triaging",
+      "timestamp": "2026-04-05T23:04:13.622012Z"
+    },
+    {
+      "from": "Triaging",
+      "to": "Designing",
+      "event": "Triaging → Designing",
+      "timestamp": "2026-04-05T23:04:14.364359Z"
+    },
+    {
+      "from": "Designing",
+      "to": "Reviewing",
+      "event": "Designing → Reviewing",
+      "timestamp": "2026-04-05T23:12:04.413529Z"
+    },
+    {
+      "from": "Reviewing",
+      "to": "WaitingApproval",
+      "event": "Reviewing → WaitingApproval",
+      "timestamp": "2026-04-05T23:14:57.686029Z"
+    },
+    {
+      "from": "WaitingApproval",
+      "to": "Planning",
+      "event": "WaitingApproval → Planning",
+      "timestamp": "2026-04-05T23:19:57.713184Z"
+    },
+    {
+      "from": "Planning",
+      "to": "Graphing",
+      "event": "Planning → Graphing",
+      "timestamp": "2026-04-05T23:20:16.974222Z"
+    },
+    {
+      "from": "Graphing",
+      "to": "Reviewing",
+      "event": "Graphing → Reviewing",
+      "timestamp": "2026-04-05T23:21:28.221646Z"
+    },
+    {
+      "from": "Reviewing",
+      "to": "WaitingApproval",
+      "event": "Reviewing → WaitingApproval",
+      "timestamp": "2026-04-05T23:22:40.184505Z"
+    },
+    {
+      "from": "WaitingApproval",
+      "to": "Implementing",
+      "event": "WaitingApproval → Implementing",
+      "timestamp": "2026-04-05T23:23:25.607784Z"
+    },
+    {
+      "from": "Implementing",
+      "to": "Verifying",
+      "event": "Implementing → Verifying",
+      "timestamp": "2026-04-05T23:44:14.541861Z"
+    },
+    {
+      "from": "Verifying",
+      "to": "Done",
+      "event": "Verifying → Done",
+      "timestamp": "2026-04-05T23:44:40.112995Z"
+    }
+  ],
+  "started_at": "2026-04-05T23:04:13.612637Z",
+  "updated_at": "2026-04-05T23:44:40.112995Z"
+}

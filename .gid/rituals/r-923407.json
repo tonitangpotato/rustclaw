@@ -1,0 +1,113 @@
+{
+  "id": "r-923407",
+  "phase": "Done",
+  "task": "Refactor gid-core's code_graph.rs (7,501 lines, 127 functions) into a modular architecture.\n\n## Current Problems\n1. **Single mega-file**: code_graph.rs has 7,501 lines with 127 functions — types, extraction, analysis, LSP, tests all in one file\n2. **Repeated LSP connections**: definition, references, implementations each start a separate LSP session — should be one session\n3. **Duplicated language logic**: Python/Rust/TypeScript each have near-identical patterns for extraction, scope maps, call resolution, and builtin checks\n4. **No caching**: `extract_cached` exists but CLI commands all call `extract_from_dir` from scratch every time\n5. **Verbose CodeEdge construction**: lots of redundant default parameters\n6. **Parser waste**: tree-sitter Parser::new() + set_language called repeatedly\n\n## Proposed Architecture\nSplit code_graph.rs into a `code_graph/` module directory:\n```\nsrc/code_graph/\n├── mod.rs          — re-exports, CodeGraph struct, public API\n├── types.rs        — CodeNode, CodeEdge, NodeKind, EdgeRelation, ImpactReport\n├── extract.rs      — main extract_from_dir, language dispatch, file walking\n├── lang/\n│   ├── mod.rs      — LanguageExtractor trait\n│   ├── python.rs   — Python-specific extraction + resolution\n│   ├── rust.rs     — Rust-specific extraction + resolution\n│   └── typescript.rs — TypeScript-specific extraction + resolution\n├── analysis.rs     — impact analysis, causal chains, keyword search, schema\n├── lsp.rs          — LSP session management (single session, multiple queries)\n├── resolve.rs      — shared resolution logic (common patterns across languages)\n└── cache.rs        — extraction caching (use the existing extract_cached properly)\n```\n\n## Key Design Principles\n- LanguageExtractor trait: `extract_nodes()`, `extract_calls()`, `resolve_call()`, `is_builtin()`, `build_scope_map()`\n- Single LSP session: connect once, run definition + references + implementations queries, disconnect\n- CodeEdge builder: `CodeEdge::call(\"from\", \"to\").with_line(42).with_confidence(0.9)`\n- Shared resolve logic: the pattern of \"search same file → same class → imports → project-wide\" is identical across languages\n\n## Project Location\n/Users/potato/clawd/projects/gid-rs/crates/gid-core/\n\n## Constraints\n- Must pass all existing tests (cargo test)\n- Public API (CodeGraph, CodeNode, CodeEdge, etc.) must remain backward compatible\n- No new dependencies unless absolutely necessary",
+  "project": {
+    "has_requirements": true,
+    "has_design": true,
+    "has_graph": true,
+    "has_source": true,
+    "has_tests": false,
+    "language": "rust",
+    "source_file_count": 57,
+    "verify_command": "cargo build 2>&1 && cargo test 2>&1"
+  },
+  "strategy": {
+    "MultiAgent": {
+      "tasks": [
+        "ISS-002: Implement GID LSP client for TypeScript call edge resolution",
+        "ISS-003: Refactor gid-core code_graph.rs into modular architecture with language extractors"
+      ]
+    }
+  },
+  "verify_retries": 0,
+  "phase_retries": {},
+  "failed_phase": null,
+  "error_context": "triage: size=large, skip_design=false, skip_graph=false",
+  "review_target": "tasks",
+  "triage_size": "large",
+  "phase_tokens": {
+    "design": 24712,
+    "implement": 56424,
+    "graph": 2427,
+    "planning": 515,
+    "triage": 1090,
+    "reviewing": 10060
+  },
+  "transitions": [
+    {
+      "from": "Idle",
+      "to": "Initializing",
+      "event": "Idle → Initializing",
+      "timestamp": "2026-04-05T21:35:10.344252Z"
+    },
+    {
+      "from": "Initializing",
+      "to": "Triaging",
+      "event": "Initializing → Triaging",
+      "timestamp": "2026-04-05T21:35:10.349282Z"
+    },
+    {
+      "from": "Triaging",
+      "to": "Designing",
+      "event": "Triaging → Designing",
+      "timestamp": "2026-04-05T21:35:11.264872Z"
+    },
+    {
+      "from": "Designing",
+      "to": "Reviewing",
+      "event": "Designing → Reviewing",
+      "timestamp": "2026-04-05T21:42:41.929718Z"
+    },
+    {
+      "from": "Reviewing",
+      "to": "WaitingApproval",
+      "event": "Reviewing → WaitingApproval",
+      "timestamp": "2026-04-05T21:44:49.901081Z"
+    },
+    {
+      "from": "WaitingApproval",
+      "to": "Planning",
+      "event": "WaitingApproval → Planning",
+      "timestamp": "2026-04-05T21:49:49.904740Z"
+    },
+    {
+      "from": "Planning",
+      "to": "Graphing",
+      "event": "Planning → Graphing",
+      "timestamp": "2026-04-05T21:50:01.635702Z"
+    },
+    {
+      "from": "Graphing",
+      "to": "Reviewing",
+      "event": "Graphing → Reviewing",
+      "timestamp": "2026-04-05T21:51:08.318095Z"
+    },
+    {
+      "from": "Reviewing",
+      "to": "WaitingApproval",
+      "event": "Reviewing → WaitingApproval",
+      "timestamp": "2026-04-05T21:51:59.493234Z"
+    },
+    {
+      "from": "WaitingApproval",
+      "to": "Implementing",
+      "event": "WaitingApproval → Implementing",
+      "timestamp": "2026-04-05T21:56:59.495864Z"
+    },
+    {
+      "from": "Implementing",
+      "to": "Verifying",
+      "event": "Implementing → Verifying",
+      "timestamp": "2026-04-05T22:10:19.581939Z"
+    },
+    {
+      "from": "Verifying",
+      "to": "Done",
+      "event": "Verifying → Done",
+      "timestamp": "2026-04-05T22:10:21.404597Z"
+    }
+  ],
+  "started_at": "2026-04-05T21:35:10.343001Z",
+  "updated_at": "2026-04-05T22:10:21.404601Z"
+}

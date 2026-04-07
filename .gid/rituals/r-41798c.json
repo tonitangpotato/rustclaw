@@ -1,0 +1,90 @@
+{
+  "id": "r-41798c",
+  "phase": "Cancelled",
+  "task": "ISS-002: 在 gid-core 实现 LSP client 模块，用 tsserver 精确解析 TypeScript call edges，替换现有 name-matching heuristics。\n\n范围：\n• 新建 lsp_client.rs — LSP 协议 client（stdio transport）\n• 修改 code_graph.rs — tree-sitter 建完结构后，用 LSP textDocument/definition 精化 call edges\n• 修改 CLI — gid extract --lsp flag\n• 测试 — 对 claude-code-source 跑一遍验证精度提升\n\n项目路径：/Users/potato/clawd/projects/gid-rs/",
+  "project": {
+    "has_requirements": true,
+    "has_design": true,
+    "has_graph": true,
+    "has_source": true,
+    "has_tests": false,
+    "language": "rust",
+    "source_file_count": 57,
+    "verify_command": "cargo build 2>&1 && cargo test 2>&1"
+  },
+  "strategy": {
+    "MultiAgent": {
+      "tasks": [
+        "Core agent framework (agent.rs, tools.rs, session.rs, hooks system, event streaming)",
+        "Memory integration (memory.rs, engram_hooks.rs, EmotionBus, ACT-R/Hebbian/Ebbinghaus)",
+        "Channel adapters (telegram, discord, slack, signal, whatsapp, matrix)",
+        "GID LSP integration (lsp_client.rs, code_graph.rs modifications, error handling)",
+        "Incremental extraction (CachedCodeGraph, change detection, merge algorithms)",
+        "Social intake skill (Python engine, platform scrapers, archival system)",
+        "Authentication system (auth_profiles.rs, oauth.rs, keychain, token rotation)",
+        "Security layer (safety.rs, sandbox.rs, prompt injection detection)",
+        "Infrastructure (cron.rs, dashboard.rs, reload.rs, workspace.rs)",
+        "Voice systems (stt.rs, tts.rs, voice_mode.rs, Whisper integration)"
+      ]
+    }
+  },
+  "verify_retries": 0,
+  "phase_retries": {},
+  "failed_phase": null,
+  "error_context": "triage: size=large, skip_design=false, skip_graph=true",
+  "review_target": "design",
+  "triage_size": null,
+  "phase_tokens": {
+    "triage": 565,
+    "design": 14351,
+    "cancelled": 5077,
+    "reviewing": 2953,
+    "planning": 568
+  },
+  "transitions": [
+    {
+      "from": "Idle",
+      "to": "Initializing",
+      "event": "Idle → Initializing",
+      "timestamp": "2026-04-05T20:06:59.724621Z"
+    },
+    {
+      "from": "Initializing",
+      "to": "Triaging",
+      "event": "Initializing → Triaging",
+      "timestamp": "2026-04-05T20:06:59.727990Z"
+    },
+    {
+      "from": "Triaging",
+      "to": "Designing",
+      "event": "Triaging → Designing",
+      "timestamp": "2026-04-05T20:07:00.720607Z"
+    },
+    {
+      "from": "Designing",
+      "to": "Reviewing",
+      "event": "Designing → Reviewing",
+      "timestamp": "2026-04-05T20:12:17.732630Z"
+    },
+    {
+      "from": "Reviewing",
+      "to": "WaitingApproval",
+      "event": "Reviewing → WaitingApproval",
+      "timestamp": "2026-04-05T20:13:51.255798Z"
+    },
+    {
+      "from": "WaitingApproval",
+      "to": "Planning",
+      "event": "WaitingApproval → Planning",
+      "timestamp": "2026-04-06T15:01:35.175046Z"
+    },
+    {
+      "from": "Planning",
+      "to": "Graphing",
+      "event": "Planning → Graphing",
+      "timestamp": "2026-04-06T15:02:36.619441Z"
+    }
+  ],
+  "started_at": "2026-04-05T20:06:59.724525Z",
+  "updated_at": "2026-04-06T15:02:36.619442Z"
+}

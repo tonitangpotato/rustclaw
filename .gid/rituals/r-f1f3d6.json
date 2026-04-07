@@ -1,6 +1,6 @@
 {
   "id": "r-f1f3d6",
-  "phase": "Escalated",
+  "phase": "Done",
   "task": "Write the GEPA (Generalized Evolutionary Prompt Augmentation) design document based on the completed requirements. Requirements are at:\n- Master: .gid/features/gepa-core/requirements-master.md\n- Features 01-09: .gid/features/gepa-core/requirements-01-core-engine.md through requirements-09-events.md\n\nThis is a Rust crate (gepa-core) implementing an evolutionary optimization engine for LLM prompt engineering. The design should cover all 9 features: core engine loop, Pareto front, adapter trait, proposers, candidates, state management, configuration, data loading, and events/callbacks.\n\nFollow the draft-design skill: numbered sections, HOW not WHAT, trace every design decision to GOALs/GUARDs. Split into feature-level design docs if total components exceed 8.",
   "project": {
     "has_requirements": true,
@@ -17,42 +17,48 @@
   "phase_retries": {
     "designing": 1
   },
-  "failed_phase": "Designing",
-  "error_context": "Anthropic API error (400 Bad Request): The long context beta is not yet available for this subscription.",
+  "failed_phase": null,
+  "error_context": null,
   "review_target": null,
   "phase_tokens": {},
   "transitions": [
     {
       "from": "Idle",
       "to": "Initializing",
-      "event": "Idle → Initializing",
+      "event": "Idle \u2192 Initializing",
       "timestamp": "2026-04-04T19:22:02.070178Z"
     },
     {
       "from": "Initializing",
       "to": "Triaging",
-      "event": "Initializing → Triaging",
+      "event": "Initializing \u2192 Triaging",
       "timestamp": "2026-04-04T19:22:02.071980Z"
     },
     {
       "from": "Triaging",
       "to": "Designing",
-      "event": "Triaging → Designing",
+      "event": "Triaging \u2192 Designing",
       "timestamp": "2026-04-04T19:22:02.166330Z"
     },
     {
       "from": "Designing",
       "to": "Designing",
-      "event": "Designing → Designing",
+      "event": "Designing \u2192 Designing",
       "timestamp": "2026-04-04T19:22:02.295901Z"
     },
     {
       "from": "Designing",
       "to": "Escalated",
-      "event": "Designing → Escalated",
+      "event": "Designing \u2192 Escalated",
       "timestamp": "2026-04-04T19:22:02.362762Z"
+    },
+    {
+      "from": "Cancelled",
+      "to": "Done",
+      "event": "Manually marked done \u2014 design + implementation completed outside ritual",
+      "timestamp": "2026-04-06T15:24:42.378958Z"
     }
   ],
   "started_at": "2026-04-04T19:22:02.070130Z",
-  "updated_at": "2026-04-04T19:22:02.362764Z"
+  "updated_at": "2026-04-06T15:24:42.378958Z"
 }

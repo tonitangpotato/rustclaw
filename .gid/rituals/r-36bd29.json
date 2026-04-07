@@ -1,0 +1,38 @@
+{
+  "id": "r-36bd29",
+  "phase": "Cancelled",
+  "task": "ISS-002: Implement LSP client for precise call-edge detection in gid-core code_graph module.\n\nContext:\n- Current code_graph.rs (7039 lines) uses tree-sitter for structure extraction + name-matching heuristics for call edges\n- Name-matching produces ~28K call edges with many false positives (e.g., different types with same method name get linked)\n- Need to add LSP client that starts language servers (typescript-language-server, rust-analyzer, pyright) via stdio\n- LSP client sends textDocument/definition requests for each call site found by tree-sitter\n- Results replace/augment the name-matched call edges with compiler-precise edges (confidence 1.0)\n\nArchitecture decided:\n- New file: crates/gid-core/src/lsp_client.rs \u2014 lightweight LSP client (initialize, definition queries, shutdown)\n- Modify code_graph.rs: after tree-sitter pass, optionally run LSP pass to refine call edges\n- CLI flag: `gid extract --lsp` to enable LSP-enhanced extraction\n- tree-sitter provides structure (files, classes, functions, imports), LSP provides precise call edges + type info\n- Start with TypeScript support (typescript-language-server --stdio), then Rust (rust-analyzer) and Python (pyright)\n\nTarget codebase for testing: /Users/potato/clawd/projects/claude-code-source-code (1902 files, 512K lines TypeScript)\nProject source: /Users/potato/clawd/projects/gid-rs/\nMain crate: crates/gid-core/\n\nKey files:\n- crates/gid-core/src/code_graph.rs \u2014 current extraction logic\n- crates/gid-core/src/lib.rs \u2014 module declarations\n- ISSUES.md \u2014 ISS-002 description\n- docs/DESIGN.md, docs/PRODUCT-ROADMAP.md \u2014 architecture docs",
+  "project": {
+    "has_requirements": true,
+    "has_design": true,
+    "has_graph": true,
+    "has_source": true,
+    "has_tests": false,
+    "language": "rust",
+    "source_file_count": 57,
+    "verify_command": "cargo build 2>&1 && cargo test 2>&1"
+  },
+  "strategy": null,
+  "verify_retries": 0,
+  "phase_retries": {},
+  "failed_phase": null,
+  "error_context": null,
+  "review_target": null,
+  "phase_tokens": {},
+  "transitions": [
+    {
+      "from": "Idle",
+      "to": "Initializing",
+      "event": "Idle \u2192 Initializing",
+      "timestamp": "2026-04-05T19:55:16.137224Z"
+    },
+    {
+      "from": "Initializing",
+      "to": "Triaging",
+      "event": "Initializing \u2192 Triaging",
+      "timestamp": "2026-04-05T19:55:16.142417Z"
+    }
+  ],
+  "started_at": "2026-04-05T19:55:16.137167Z",
+  "updated_at": "2026-04-05T19:55:16.142418Z"
+}
