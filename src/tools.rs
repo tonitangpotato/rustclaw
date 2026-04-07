@@ -22,7 +22,7 @@ use gid_core::{
     history::HistoryManager,
     refactor,
     CodeGraph,
-    unified::build_unified_graph,
+    unify::{codegraph_to_graph_nodes, merge_code_layer},
     semantify,
     complexity,
     working_mem,
@@ -227,7 +227,7 @@ impl ToolRegistry {
 
         // Code graph extraction tools
         self.register(Box::new(GidExtractTool::new(graph.clone(), path.clone())));
-        self.register(Box::new(GidSchemaTool));
+        self.register(Box::new(GidSchemaTool::new(graph.clone())));
         // Design, planning, ritual, and execution tools
         // path is graph_path (e.g. ".gid/graph.yml"), we need the .gid/ directory
         let gid_pathbuf = PathBuf::from(path.as_str())
@@ -2918,6 +2918,44 @@ impl Tool for GidAddEdgeTool {
     }
 }
 
+// ── Layer filter helper ──
+
+/// Build a filtered sub-graph containing only nodes/edges matching the given layer.
+/// - "project": project nodes + project edges (default for most commands)
+/// - "code": code nodes + code edges
+/// - "all" or None: everything (no filtering)
+fn filter_graph_by_layer(graph: &Graph, layer: Option<&str>) -> Graph {
+    match layer {
+        Some("project") => {
+            let node_ids: std::collections::HashSet<String> = graph.project_nodes().iter().map(|n| n.id.clone()).collect();
+            let mut filtered = Graph::new();
+            for n in graph.project_nodes() {
+                filtered.add_node(n.clone());
+            }
+            for e in graph.project_edges() {
+                if node_ids.contains(&e.from) && node_ids.contains(&e.to) {
+                    filtered.add_edge(e.clone());
+                }
+            }
+            filtered
+        }
+        Some("code") => {
+            let node_ids: std::collections::HashSet<String> = graph.code_nodes().iter().map(|n| n.id.clone()).collect();
+            let mut filtered = Graph::new();
+            for n in graph.code_nodes() {
+                filtered.add_node(n.clone());
+            }
+            for e in graph.code_edges() {
+                if node_ids.contains(&e.from) && node_ids.contains(&e.to) {
+                    filtered.add_edge(e.clone());
+                }
+            }
+            filtered
+        }
+        _ => graph.clone(), // "all" or unspecified
+    }
+}
+
 // ── gid_read: read full graph as YAML ──
 
 struct GidReadTool {
@@ -2943,13 +2981,21 @@ impl Tool for GidReadTool {
     fn input_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
-            "properties": {}
+            "properties": {
+                "layer": {
+                    "type": "string",
+                    "enum": ["project", "code", "all"],
+                    "description": "Filter by layer: project (tasks/features), code (extracted code nodes), all (default: all)"
+                }
+            }
         })
     }
 
-    async fn execute(&self, _input: Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
         let graph = self.graph.read().await;
-        let yaml = serde_yaml::to_string(&*graph)?;
+        let layer = input["layer"].as_str();
+        let filtered = filter_graph_by_layer(&graph, layer);
+        let yaml = serde_yaml::to_string(&filtered)?;
         Ok(ToolResult { output: yaml, is_error: false })
     }
 }
@@ -3277,6 +3323,11 @@ impl Tool for GidVisualTool {
                     "type": "string",
                     "enum": ["ascii", "dot", "mermaid"],
                     "description": "Output format (default: ascii)"
+                },
+                "layer": {
+                    "type": "string",
+                    "enum": ["project", "code", "all"],
+                    "description": "Filter by layer: project (default — tasks/features only), code (extracted code nodes), all (everything)"
                 }
             }
         })
@@ -3290,7 +3341,9 @@ impl Tool for GidVisualTool {
         };
 
         let graph = self.graph.read().await;
-        let output = render(&graph, format);
+        let layer = input["layer"].as_str().or(Some("project")); // default: project
+        let filtered = filter_graph_by_layer(&graph, layer);
+        let output = render(&filtered, format);
 
         Ok(ToolResult { output, is_error: false })
     }
@@ -3602,7 +3655,9 @@ impl Tool for GidExtractTool {
             let existing_edges = existing.edges.len();
 
             // Build unified graph
-            let unified = build_unified_graph(&code_graph, &existing);
+            let (code_nodes_vec, code_edges_vec) = codegraph_to_graph_nodes(&code_graph, &project_root);
+            let mut unified = existing;
+            merge_code_layer(&mut unified, code_nodes_vec, code_edges_vec);
             let total_nodes = unified.nodes.len();
             let total_edges = unified.edges.len();
 
@@ -3625,8 +3680,8 @@ impl Tool for GidExtractTool {
             let existing_nodes = graph.nodes.len();
             let existing_edges = graph.edges.len();
 
-            let unified = build_unified_graph(&code_graph, &graph);
-            *graph = unified;
+            let (code_nodes_vec, code_edges_vec) = codegraph_to_graph_nodes(&code_graph, workspace_dir);
+            merge_code_layer(&mut graph, code_nodes_vec, code_edges_vec);
             save_gid_graph(&graph, &self.path)?;
 
             let new_nodes = graph.nodes.len() - existing_nodes;
@@ -3647,29 +3702,83 @@ impl Tool for GidExtractTool {
 }
 
 /// Walk up from `dir` to find the project root (directory containing .git, Cargo.toml, package.json, etc.)
+///
+/// For Rust workspaces: keeps walking up past sub-crate Cargo.toml files to find the
+/// workspace root (the one with `[workspace]`). For monorepos: prefers `.git` over
+/// individual package markers.
 fn find_project_root(dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    let markers = [".git", "Cargo.toml", "package.json", "pyproject.toml", "go.mod", ".gid"];
     let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     let mut current = if canonical.is_file() {
         canonical.parent()?.to_path_buf()
     } else {
         canonical
     };
+
+    // Strong markers that definitively identify a project root.
+    let strong_markers = [".git"];
+    // Weak markers that might appear in sub-directories of a larger project.
+    let weak_markers = ["Cargo.toml", "package.json", "pyproject.toml", "go.mod", ".gid"];
+
+    let mut first_weak_match: Option<std::path::PathBuf> = None;
+
     loop {
-        for marker in &markers {
+        // Strong marker = definitive root, return immediately.
+        for marker in &strong_markers {
             if current.join(marker).exists() {
                 return Some(current);
             }
         }
+
+        // Weak marker = candidate, but keep looking for a strong marker or workspace root.
+        if first_weak_match.is_none() {
+            for marker in &weak_markers {
+                if current.join(marker).exists() {
+                    first_weak_match = Some(current.clone());
+                    break;
+                }
+            }
+        }
+
+        // Check if this is a Rust workspace root (Cargo.toml with [workspace]).
+        let cargo_path = current.join("Cargo.toml");
+        if cargo_path.exists() {
+            if let Ok(contents) = std::fs::read_to_string(&cargo_path) {
+                if contents.contains("[workspace]") {
+                    return Some(current);
+                }
+            }
+        }
+
+        // Check if this is a Node.js monorepo root (package.json with "workspaces").
+        let pkg_path = current.join("package.json");
+        if pkg_path.exists() {
+            if let Ok(contents) = std::fs::read_to_string(&pkg_path) {
+                if contents.contains("\"workspaces\"") {
+                    return Some(current);
+                }
+            }
+        }
+
         if !current.pop() {
-            return None;
+            break;
         }
     }
+
+    // No strong marker found — return first weak match.
+    first_weak_match
 }
 
 // ── gid_schema: get code schema (classes, functions, signatures) ──
 
-struct GidSchemaTool;
+struct GidSchemaTool {
+    graph: SharedGraph,
+}
+
+impl GidSchemaTool {
+    fn new(graph: SharedGraph) -> Self {
+        Self { graph }
+    }
+}
 
 #[async_trait]
 impl Tool for GidSchemaTool {
@@ -3706,10 +3815,34 @@ impl Tool for GidSchemaTool {
             });
         }
 
-        // Extract code graph from directory
-        let code_graph = CodeGraph::extract_from_dir(dir_path);
+        // Try graph.yml code nodes first
+        let graph = self.graph.read().await;
+        let code_nodes = graph.code_nodes();
+        if !code_nodes.is_empty() {
+            // Build schema from graph code nodes
+            let mut output = String::new();
+            let mut files: std::collections::BTreeMap<String, Vec<&Node>> = std::collections::BTreeMap::new();
+            for node in &code_nodes {
+                let file = node.file_path.as_deref().unwrap_or("unknown");
+                files.entry(file.to_string()).or_default().push(node);
+            }
+            for (file, nodes) in &files {
+                output.push_str(&format!("## {}\n", file));
+                for n in nodes {
+                    let kind = n.node_type.as_deref().unwrap_or("item");
+                    output.push_str(&format!("  {} {} {}\n", kind, n.id, n.title));
+                }
+                output.push('\n');
+            }
+            return Ok(ToolResult {
+                output: format!("(from graph.yml code nodes — {} nodes, {} files)\n\n{}", code_nodes.len(), files.len(), output),
+                is_error: false,
+            });
+        }
+        drop(graph);
 
-        // Get schema (formatted string of classes, functions, signatures)
+        // Fallback: extract from source
+        let code_graph = CodeGraph::extract_from_dir(dir_path);
         let schema = code_graph.get_schema();
 
         if schema.is_empty() {
@@ -4200,8 +4333,13 @@ impl Tool for GidWorkingMemoryTool {
             CodeGraph::default()
         };
         
+        // Convert CodeGraph to Graph for analyze_impact
+        let (code_nodes_vec, code_edges_vec) = codegraph_to_graph_nodes(&code_graph, dir_path);
+        let mut unified = Graph::default();
+        merge_code_layer(&mut unified, code_nodes_vec, code_edges_vec);
+        
         // Analyze impact
-        let analysis = working_mem::analyze_impact(&files, &code_graph);
+        let analysis = working_mem::analyze_impact(&files, &unified);
         
         let mut output = format!(
             "Impact Analysis\n\
