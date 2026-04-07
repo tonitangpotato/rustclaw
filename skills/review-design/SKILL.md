@@ -36,7 +36,25 @@ Design docs reviewed by LLMs tend to need 5-6 iterative rounds because each pass
 
 ## Review Process
 
-Read the design document completely, then run ALL checks below. Do not stop after finding the first issue.
+### Review Depth (Triage-Driven)
+
+Check the beginning of your prompt for a `[REVIEW_DEPTH: quick|standard|full]` directive. This is injected by the ritual system based on triage size.
+
+| Depth | Triage Size | Phases to Run | Checks |
+|---|---|---|---|
+| **quick** | small | Phase 0 + Phase 1 + Phase 4 | 0-4, 13-16 (9 checks) |
+| **standard** | medium | Phase 0-5 | 0-20 (21 checks) |
+| **full** | large (default) | Phase 0-7 | All 28 checks |
+
+**If no `[REVIEW_DEPTH]` directive is present, default to `full`.**
+
+For `quick` reviews: skip logic correctness, type safety edge cases, doc quality, implementability, and code alignment checks. Focus on structure and architecture only — the goal is fast validation that the design is internally consistent.
+
+For `standard` reviews: skip Phase 6 (Implementability) and Phase 7 (Existing Code Alignment). These are expensive checks that require codebase knowledge and are best reserved for large/complex designs.
+
+---
+
+Read the design document completely, then run the checks applicable to your review depth. Do not stop after finding the first issue.
 
 ### Phase 0: Document Size Check
 

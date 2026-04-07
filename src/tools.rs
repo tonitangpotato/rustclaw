@@ -2261,22 +2261,9 @@ impl Tool for SpawnSpecialistTool {
             None
         });
 
-        // If skill resolved, inject its prompt content into task
-        let task: String = if let Some(ref skill) = effective_skill {
-            if let Some(parsed) = skill_registry.get(skill) {
-                let content: &str = parsed.prompt_content();
-                tracing::info!("Injecting skill '{}' ({} chars) into sub-agent task", skill, content.len());
-                format!(
-                    "# Skill Instructions\n\n{}\n\n---\n\n# Your Task\n\n{}",
-                    content, raw_task
-                )
-            } else {
-                tracing::warn!("Skill '{}' not found in SkillRegistry", skill);
-                raw_task.to_string()
-            }
-        } else {
-            raw_task.to_string()
-        };
+        // Skill injection is now handled by run_subagent() via SubAgentOptions.skill
+        // We just pass the raw task + skill name through.
+        let task: String = raw_task.to_string();
         let max_iterations = input["max_iterations"].as_u64().unwrap_or(0) as u32; // 0 = use AgentType default
 
         // Pre-load files into context blocks
@@ -2436,6 +2423,7 @@ impl Tool for SpawnSpecialistTool {
                         max_iterations: if effective_max_iterations > 0 { Some(effective_max_iterations) } else { None },
                         workspace: final_config_clone.workspace.as_ref().map(std::path::PathBuf::from),
                         context: preload_context.clone(),
+                        skill: effective_skill.clone(),
                     };
                     let sub_result = runner_clone.run_subagent(agent_type, &task_owned, options).await;
                     ping_handle.abort(); // Stop progress pings
@@ -2524,6 +2512,7 @@ impl Tool for SpawnSpecialistTool {
             max_iterations: if effective_max_iterations > 0 { Some(effective_max_iterations) } else { None },
             workspace: final_config.workspace.as_ref().map(std::path::PathBuf::from),
             context: preload_context,
+            skill: effective_skill,
         };
         let sub_result = runner.run_subagent(agent_type, &task, options).await;
         tracing::info!("Sub-agent {} — {} ({} tokens, {} turns, {} files)",

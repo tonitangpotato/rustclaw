@@ -1,6 +1,6 @@
 {
   "id": "r-52d400",
-  "phase": "WaitingApproval",
+  "phase": "Done",
   "task": "Implement Layer 1 foundation tasks for the SQLite migration feature in gid-rs (/Users/potato/clawd/projects/gid-rs/).\n\n5 tasks (no inter-dependencies, all are root tasks):\n\n1. **storage-error**: Define StorageError enum and StorageOp variants per design-storage.md §4\n2. **node-struct-extend**: Extend Node struct with 14 new fields (file_path, lang, signature, node_type, description, priority, assigned_to, line_start, line_end, body, parent_id, depth, complexity, is_public) per design-storage.md §12\n3. **edge-struct-extend**: Add `metadata: Option<serde_json::Value>` to Edge struct per design-storage.md §12\n4. **graphstorage-trait**: Define GraphStorage trait with all method signatures from design-storage.md §3\n5. **sqlite-schema**: Create SQLite schema DDL (nodes, edges, node_metadata, node_tags, knowledge, config, change_log tables + FTS5 virtual table + triggers)\n\nDesign docs are at: /Users/potato/clawd/projects/gid-rs/.gid/features/sqlite-migration/\n- design.md (master overview)\n- design-storage.md (primary reference for all 5 tasks)\n\nExisting source code is at: /Users/potato/clawd/projects/gid-rs/crates/gid-core/src/\nThe current Node and Edge types are in the graph types module — find and extend them.\n\nAll new code should go in: /Users/potato/clawd/projects/gid-rs/crates/gid-core/src/storage/ (create this module)\nExcept Node/Edge extensions which modify existing type definitions.\n\nAfter implementation, run `cargo check` and `cargo test` to verify.",
   "target_root": "/Users/potato/rustclaw",
   "project": {
@@ -21,11 +21,12 @@
   "review_target": "tasks",
   "triage_size": "large",
   "phase_tokens": {
-    "reviewing": 12533,
     "design": 35090,
+    "graph": 18218,
+    "reviewing": 12533,
     "planning": 318,
-    "triage": 867,
-    "graph": 18218
+    "implement": 4440,
+    "triage": 867
   },
   "transitions": [
     {
@@ -81,8 +82,26 @@
       "to": "WaitingApproval",
       "event": "Reviewing → WaitingApproval",
       "timestamp": "2026-04-07T00:51:33.880669Z"
+    },
+    {
+      "from": "WaitingApproval",
+      "to": "Implementing",
+      "event": "WaitingApproval → Implementing",
+      "timestamp": "2026-04-07T01:05:42.703148Z"
+    },
+    {
+      "from": "Implementing",
+      "to": "Verifying",
+      "event": "Implementing → Verifying",
+      "timestamp": "2026-04-07T01:08:52.549581Z"
+    },
+    {
+      "from": "Verifying",
+      "to": "Done",
+      "event": "Verifying → Done",
+      "timestamp": "2026-04-07T01:09:08.475459Z"
     }
   ],
   "started_at": "2026-04-07T00:23:40.288221Z",
-  "updated_at": "2026-04-07T00:51:33.880670Z"
+  "updated_at": "2026-04-07T01:09:08.475460Z"
 }

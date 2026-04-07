@@ -37,7 +37,25 @@ Requirements docs are the contract between design and implementation. Vague requ
 
 ## Review Process
 
-Read the entire requirements document, then run ALL checks below. Do not stop after finding the first issue.
+### Review Depth (Triage-Driven)
+
+Check the beginning of your prompt for a `[REVIEW_DEPTH: quick|standard|full]` directive. This is injected by the ritual system based on triage size.
+
+| Depth | Triage Size | Phases to Run | Checks |
+|---|---|---|---|
+| **quick** | small | Phase 0 + Phase 1 + Phase 4 | 0-5, 16-20 (11 checks) |
+| **standard** | medium | Phase 0-5 | 0-24 (25 checks) |
+| **full** | large (default) | Phase 0-6 | All 27 checks |
+
+**If no `[REVIEW_DEPTH]` directive is present, default to `full`.**
+
+For `quick` reviews: skip coverage & gaps, consistency checks, traceability, and stakeholder alignment. Focus on individual requirement quality and implementability only — the goal is fast validation that each requirement is specific and testable.
+
+For `standard` reviews: skip Phase 6 (Stakeholder Alignment). These checks are valuable but less critical for incremental requirement updates.
+
+---
+
+Read the entire requirements document, then run the checks applicable to your review depth. Do not stop after finding the first issue.
 
 ### Phase 0: Document Size Check
 

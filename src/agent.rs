@@ -169,16 +169,20 @@ impl AgentType {
 }
 
 /// Options for run_subagent. All optional — defaults come from AgentType.
+#[derive(Clone)]
 pub struct SubAgentOptions {
     pub model: Option<String>,
     pub max_iterations: Option<u32>,
     pub workspace: Option<std::path::PathBuf>,
     pub context: Vec<ContextBlock>,
+    /// Skill name to inject via SkillRegistry. When set, the skill's prompt content
+    /// is prepended to the task before sending to the sub-agent.
+    pub skill: Option<String>,
 }
 
 impl Default for SubAgentOptions {
     fn default() -> Self {
-        Self { model: None, max_iterations: None, workspace: None, context: vec![] }
+        Self { model: None, max_iterations: None, workspace: None, context: vec![], skill: None }
     }
 }
 
@@ -1523,11 +1527,24 @@ CRITICAL CONSTRAINTS:
             model_override: Some(model.to_string()),
         };
 
+        // Inject skill prompt if requested — look up via SkillRegistry and prepend to task
+        let effective_task = if let Some(ref skill_name) = options.skill {
+            if let Some(skill) = self.workspace.skill_registry.get(skill_name) {
+                tracing::info!("Injecting skill '{}' ({} chars) into sub-agent task", skill_name, skill.prompt_content().len());
+                format!("# Skill Instructions\n\n{}\n\n---\n\n# Your Task\n\n{}", skill.prompt_content(), task)
+            } else {
+                tracing::warn!("Skill '{}' not found in SkillRegistry", skill_name);
+                task.to_string()
+            }
+        } else {
+            task.to_string()
+        };
+
         // Build user message
         let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
         let mut user_message = format!(
             "Time: {}\nWorkspace: {}\n\n## Task\n{}",
-            time, workspace_dir, task
+            time, workspace_dir, effective_task
         );
         for block in &options.context {
             user_message.push_str(&format!("\n\n## {}\n{}", block.label, block.content));

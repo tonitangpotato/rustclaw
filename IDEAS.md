@@ -3,6 +3,84 @@
 > All ideas captured by RustClaw's Idea Intake pipeline.
 > Format: newest first. Each idea has a unique ID for cross-referencing.
 
+## IDEA-20260406-06: AI Agent IAM — Identity & Access Management for Agent Ecosystems
+- **Date**: 2026-04-06
+- **Source**: potato insight (Telegram)
+- **Category**: product / infrastructure
+- **Tags**: agent, permissions, IAM, security, MCP, multi-agent, RBAC
+
+### The Idea
+给 AI Agent 生态做一个 IAM（类似 AWS IAM 给云服务做的事）。四层架构：
+
+1. **Permission Schema（标准协议层）** — 跨框架的统一权限声明格式，类似 OAuth scopes 但给 agent 用。不管底层是 Claude/GPT/本地模型，权限描述一致
+2. **Identity & Scope（身份+角色层）** — 多 agent 场景下每个 agent 的身份、能访问的资源边界。Agent identity token（类似 JWT，带 scope）
+3. **Tool-level Gating（执行层）** — Agent 能调哪些 tool、哪些路径可写、哪些 API 可访问。声明式 policy 配置
+4. **Approval Gateway（审批层）** — 敏感操作（发邮件/发推/调外部 API）触发人工审批 webhook
+
+### Why This Matters
+- MCP 生态爆发，agent-to-tool 连接激增，但权限管理几乎空白
+- 企业用 agent 最大顾虑 = 安全和可控性 → 这是 adoption blocker
+- 每个框架各自搞一套（RustClaw tool gating、OpenAI function allow list），不兼容
+- 多 agent 协作时没有标准方式限制 sub-agent 权限
+- 没有 audit trail — agent 做了什么事后查不到
+- 这是基础设施层 — 所有 agent 框架都需要，不跟任何一家竞争
+
+### Product Shape
+- 轻量 SDK/sidecar，嵌入任何 agent 框架
+- 声明式 policy（类似 AWS IAM policy JSON）
+- Agent identity token + scope
+- 审批 webhook
+- Audit log（who/when/what permission/what action）
+- 自己的 RustClaw 是第一个 dogfood 场景
+
+### Connections
+- RustClaw ritual tool gating（src/ritual_runner.rs）= 这个产品的早期原型
+- SOUL.md "external vs internal" 规则 = 手写版的 approval gateway
+- 关联 IDEA-20260405-02 (Multi-LLM Stack) — 多模型场景下权限更复杂
+- MCP 生态是最佳切入点
+
+### Market Timing
+- MCP 刚起步，权限标准尚未形成
+- 企业 agent adoption 正在加速
+- 先发优势：谁先定标准谁就是基础设施
+
+### 场景分层（2026-04-06 讨论）
+涉及多个场景，能作为同一产品但需分层：
+
+**统一底层 = Permission Schema**
+所有场景的本质：`谁(identity) → 能做什么(action) → 在什么范围内(scope) → 需不需要审批(policy)`
+
+**四个场景，由简到复杂：**
+1. **单 agent + 单用户** — "不让 agent 未经我同意发推"
+   → 一个 policy file 就够，类似 SOUL.md safety rules 的机器可执行版
+2. **多 agent 协作** — "coder 只能写 src/，researcher 只能读"
+   → 需要 identity + role + path scoping，RustClaw specialist 体系就是这个
+3. **企业多人多 agent** — "10 个 agent 不同权限 + audit log"
+   → RBAC + audit trail + admin dashboard，**这是赚钱的场景**
+4. **跨框架互操作** — "RustClaw 和 AutoGen 权限统一"
+   → 标准协议，类似 OAuth for agents，终极形态也最难
+
+### 产品化路径（2026-04-06 讨论）
+**类比：OAuth 是标准，Auth0 是产品化。我们做 agent 世界的 "OAuth + Auth0"**
+
+先不做平台，做 SDK/library + schema 标准：
+- 一个 YAML/JSON permission schema（开源）→ 争取成为事实标准
+- 一个 Rust crate 做 runtime enforcement（开源）→ 生态采纳
+- 一个 approval gateway service（收费）→ 商业化
+- 一个 audit dashboard（收费）→ 企业场景
+
+**切入路径：** RustClaw dogfood → MCP extension → 生态采纳 → 企业产品
+标准需要生态采纳，单推不动，所以先做出事实标准让别人跟。
+
+### Next Steps
+- [ ] 调研现有 agent 权限方案（Anthropic MCP permissions, OpenAI function calling, LangChain permissions）
+- [ ] 定义 v0.1 permission schema（从 RustClaw 现有 tool gating 抽象）
+- [ ] 写 DESIGN.md
+- [ ] RustClaw dogfood: 把现有 tool gating 重构为 schema-driven
+
+### Status: 💡 New
+---
+
 ## IDEA-20260406-04: Context Partitioning — Pinned + Swap Zone 省 Token 架构
 - **Date**: 2026-04-06
 - **Source**: potato insight (Telegram)
@@ -907,3 +985,89 @@ $ rustclaw skills generate market-research "Research crypto market trends"
 
 ---
 
+
+## IDEA-20260406-05: GID Shared Function Detection
+- **Date**: 2026-04-06
+- **Source**: potato insight — triggered by ritual refactor (run_skill vs spawn_specialist 70% duplication)
+- **Category**: dev-tooling, gid
+- **Tags**: gid, code-analysis, refactoring, dedup, semantic-similarity
+
+### The Idea
+GID 应该能检测"该合并成共享函数的重复实现"——不是语法级 clone detection，而是**语义级功能重叠检测**。
+
+两个层面：
+1. **Design-time (规划层)**: graph 里两个 component 描述相似 behavior → 建议抽共享模块，在写代码之前就解决
+2. **Code-time (检测层)**: 分析已有代码，找出功能重叠但实现不同的函数对
+
+### 技术路线
+GID 已有 call graph + dependency edges，在此基础上加：
+- **Import similarity**: 两个函数引用相似的依赖集合 → 高概率做类似的事
+- **Type overlap**: 参数/返回类型高度重叠
+- **Caller domain**: 被相似 domain 的 callers 调用
+- **Optional LLM**: 对候选对做 summary 比较（expensive 但高精度）
+
+### 和现有工具的区别
+- PMD CPD / jscpd = 语法克隆（代码长一样才报）
+- SonarQube = 也是语法 + 一些 pattern
+- **这个 = 语义级**（代码长得不像，但功能重叠）→ 没有现成工具
+
+### Connections
+- GID 产品路线图里的 code intelligence 功能之一
+- 关联 IDEA-20260405-gid-lsp：LSP client 能提供精确类型信息，让 type overlap 检测更准
+
+### Status: 💡 New
+---
+
+## IDEA-20260407-01: Agent 间/Session 间协作 — File-First + Engram Namespace
+- **Date**: 2026-04-07
+- **Source**: potato insight（Telegram）
+- **Category**: architecture/infrastructure
+- **Tags**: #agent #collaboration #inter-session #file-based #engram #namespace #multi-agent
+- **Effort**: Medium
+- **Domain**: 🏗️ architecture
+
+### 核心洞察
+Agent 之间、session 之间的协作通信，应该基于**文件**（而非消息传递/RPC/shared memory），辅以 **engram namespace** 做语义层共享。
+
+### 为什么 File-First
+
+1. **天然持久化** — 文件不会因为 session 结束而消失。Agent 醒来就能读前一个 session 留下的东西，零协议开销。
+2. **人可读可审计** — potato 随时能 `cat` 查看 agent 之间在交流什么。消息队列/RPC 做不到这点。
+3. **无协调成本** — 不需要 agent 同时在线。Agent A 写文件，Agent B 下次启动时读。完全异步，零耦合。
+4. **已验证** — RustClaw 的 MEMORY.md、daily logs、.gid/graph.yml、SOUL.md 已经是 file-based inter-session 协作的活例子。Sub-agent 通过 `.gid/reviews/` 文件交接 review findings 也是这个模式。
+5. **Git-friendly** — 文件变更自然进 git，有版本历史，能 diff、能 blame、能 revert。
+
+### Engram Namespace 补充
+
+File 解决"结构化交接"，但语义级的快速查询需要 engram：
+- **Namespace 隔离** — 每个 agent/project 一个 namespace（或一个独立 DB），避免记忆污染
+- **跨 namespace 查询** — Agent A 可以 `engram recall --namespace=agent-b "relevant query"` 查另一个 agent 的经验
+- **共享 namespace** — 多个 agent 协作同一项目时，用同一个 project namespace（当前 RustClaw + OpenClaw 共享 engram-memory.db 已经是原型）
+- **Namespace 层级**：personal（agent 私有）→ project（项目级共享）→ org（组织级知识库）
+
+### 具体协作模式
+
+- **Session 间续接**：File=daily log/MEMORY.md，Engram=recall 上次 context
+- **Sub-agent 交接**：File=.gid/reviews/*.md/design docs，Engram=共享 project namespace
+- **Agent A→B 委托**：File=task spec 文件，Engram=store context to shared namespace
+- **跨项目知识共享**：File=IDEAS.md/docs/，Engram=cross-namespace recall
+- **长期经验传承**：File=SOUL.md/AGENTS.md，Engram=high-importance memories persist
+
+### 和现有 Ideas 的关系
+- **IDEA-20260405-01**（Engram 认知协议）— namespace 是认知协议在多 agent 场景的具体实现
+- **IDEA-20260406-02**（Sharable Memories）— 跨 agent 共享是 sharable memories 的内部版本（同一 org 内而非公开市场）
+- **IDEA-20260406-04**（Context Partitioning）— pinned zone 可以放 cross-namespace engram results
+
+### 关键设计问题（待解决）
+1. **冲突解决** — 两个 agent 同时写同一文件？（append-only log 或 .lock）
+2. **Namespace 粒度** — 一个 DB 多 namespace（表级隔离）vs 多 DB（文件级隔离）？后者更简单更安全
+3. **权限模型** — agent 能读哪些 namespace？SOUL.md 的隐私边界如何在 namespace 层面表达？
+4. **GC** — 共享 namespace 里谁负责 consolidation / forget？
+
+### Next Steps
+- [ ] 提炼 RustClaw 现有原型（共享 engram DB + file handoff）为显式 pattern [P1]
+- [ ] engramai 加 namespace 字段或 tag-based 隔离 [P1]
+- [ ] 定义标准 handoff 文件格式（比 .gid/reviews/ 更通用的约定）[P2]
+
+### Status: 💡 New
+---

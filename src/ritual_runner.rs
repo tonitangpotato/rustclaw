@@ -27,7 +27,7 @@ pub type CancelRegistry = Arc<std::sync::Mutex<std::collections::HashMap<String,
 pub type EventRegistry = Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::Sender<RitualEvent>>>>;
 
 /// Default timeout (seconds) before auto-approving a paused ritual.
-const AUTO_APPROVE_TIMEOUT_SECS: u64 = 1800; // 30 minutes — user needs time to read review findings
+const AUTO_APPROVE_TIMEOUT_SECS: u64 = 180; // 3 minutes — auto-apply all findings if no user response
 
 /// Create a new empty cancel registry.
 pub fn new_cancel_registry() -> CancelRegistry {
@@ -315,9 +315,15 @@ impl RitualRunner {
         }
 
         // Paused (WaitingApproval, WaitingClarification): save and return.
-        // User will call advance() again when they respond.
+        // For WaitingApproval: spawn auto-approve timer (applies "all" after timeout).
         if new_state.phase.is_paused() {
             self.execute_fire_and_forget_with_state(&actions, &new_state).await;
+
+            // Auto-approve timer for WaitingApproval
+            if new_state.phase == RitualPhase::WaitingApproval {
+                self.spawn_auto_approve_timer(ritual_id, &new_state);
+            }
+
             tracing::info!(
                 ritual_id = %ritual_id,
                 phase = %new_state.phase.display_name(),
@@ -427,7 +433,67 @@ impl RitualRunner {
         });
     }
 
-    /// Execute a single event-producing action. Returns (event, tokens_used).
+    /// Spawn a background timer that auto-approves with "all" after AUTO_APPROVE_TIMEOUT_SECS.
+    /// If the user responds before timeout, the state will have moved past WaitingApproval
+    /// and the timer's advance() call will be a no-op (catch-all escalation is guarded).
+    fn spawn_auto_approve_timer(&self, ritual_id: &str, _state: &RitualState) {
+        let ritual_id = ritual_id.to_string();
+        let project_root = self.project_root.clone();
+        let rituals_dir = self.rituals_dir.clone();
+        let legacy_state_path = self.legacy_state_path.clone();
+        let llm_client = self.llm_client.clone();
+        let notify = self.notify.clone();
+        let cancel_registry = self.cancel_registry.clone();
+        let event_registry = self.event_registry.clone();
+        let agent_runner = self.agent_runner.clone();
+        let timeout = std::time::Duration::from_secs(AUTO_APPROVE_TIMEOUT_SECS);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(timeout).await;
+
+            let runner = RitualRunner {
+                project_root,
+                rituals_dir,
+                legacy_state_path,
+                llm_client,
+                notify: notify.clone(),
+                cancel_registry,
+                event_registry,
+                agent_runner,
+            };
+
+            // Re-check state from disk — user may have responded already
+            match runner.load_state_by_id(&ritual_id) {
+                Ok(current_state) => {
+                    if current_state.phase == RitualPhase::WaitingApproval {
+                        tracing::info!(
+                            ritual_id = %ritual_id,
+                            review_round = current_state.review_round,
+                            "Auto-approve timer fired — applying all findings"
+                        );
+                        // Send notification
+                        notify("⏰ Auto-applying all review findings (no response within 3 min)...".to_string()).await;
+                        // Advance with apply all
+                        if let Err(e) = runner.advance(
+                            &ritual_id,
+                            RitualEvent::UserApproval { approved: "all".into() },
+                        ).await {
+                            tracing::error!(ritual_id = %ritual_id, "Auto-approve advance failed: {}", e);
+                        }
+                    } else {
+                        tracing::debug!(
+                            ritual_id = %ritual_id,
+                            phase = %current_state.phase.display_name(),
+                            "Auto-approve timer fired but ritual already moved past WaitingApproval"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(ritual_id = %ritual_id, "Auto-approve timer: couldn't load state: {}", e);
+                }
+            }
+        });
+    }
     async fn execute_event_producing_single(
         &self,
         action: &RitualAction,
@@ -742,9 +808,7 @@ impl RitualRunner {
         let has_package_json = root.join("package.json").exists();
         let has_pyproject = root.join("pyproject.toml").exists();
 
-        let has_source = root.join("src").exists()
-            || root.join("lib").exists()
-            || root.join("app").exists();
+        let has_source = has_source_in_project(root);
 
         let has_tests = root.join("tests").exists()
             || root.join("test").exists()
@@ -761,12 +825,8 @@ impl RitualRunner {
             None
         };
 
-        // Count source files (basic scan)
-        let source_file_count = if root.join("src").exists() {
-            count_files_recursive(&root.join("src")).await
-        } else {
-            0
-        };
+        // Count source files — uses workspace members from Cargo.toml/package.json
+        let source_file_count = count_source_files_in_project(root).await;
 
         // Detect verify command — prefer .gid/config.yml, fallback to language default
         let gating_config = gid_core::ritual::load_gating_config(root);
@@ -918,37 +978,113 @@ impl RitualRunner {
                 _ => vec![],
             };
 
+            // Map phase name → skill name for SkillRegistry injection
+            let skill_name = match name {
+                "implement" | "execute-tasks" => Some("implement"),
+                n if n.starts_with("review-") => Some(n),
+                "draft-design" | "update-design" => Some(name),
+                _ => None,
+            };
+
+            // implement/execute-tasks benefit from stronger model; others use sonnet
+            let model = match name {
+                "implement" | "execute-tasks" => Some("claude-opus-4-6".to_string()),
+                _ => Some("claude-sonnet-4-5-20250929".to_string()),
+            };
+
             let options = crate::agent::SubAgentOptions {
                 workspace: Some(self.project_root.clone()),
                 context: phase_context,
+                skill: skill_name.map(String::from),
+                model,
                 ..Default::default()
             };
 
-            let result = tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    return Ok((RitualEvent::SkillFailed {
-                        phase: name.to_string(),
-                        error: "Cancelled".to_string(),
-                    }, 0));
-                }
-                r = runner.run_subagent(agent_type, context, options) => r,
-            };
+            const MAX_RATE_LIMIT_RETRIES: u32 = 3;
+            let mut rate_limit_attempts = 0u32;
 
-            return if result.outcome.is_success() {
-                tracing::info!(
-                    "Ritual phase '{}' completed via sub-agent ({} tokens, {} files)",
-                    name, result.tokens, result.files_modified.len()
-                );
-                Ok((RitualEvent::SkillCompleted {
-                    phase: name.to_string(),
-                    artifacts: result.files_modified,
-                }, result.tokens))
-            } else {
-                tracing::error!("Ritual phase '{}' failed: {}", name, result.outcome.display());
-                Ok((RitualEvent::SkillFailed {
-                    phase: name.to_string(),
-                    error: result.outcome.display(),
-                }, result.tokens))
+            let _sub_result = loop {
+                let attempt_result = tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        return Ok((RitualEvent::SkillFailed {
+                            phase: name.to_string(),
+                            error: "Cancelled".to_string(),
+                        }, 0));
+                    }
+                    r = runner.run_subagent(agent_type, context, options.clone()) => r,
+                };
+
+                use crate::agent::SubAgentOutcome;
+                match &attempt_result.outcome {
+                    // Success → return immediately
+                    SubAgentOutcome::Completed => {
+                        tracing::info!(
+                            "Ritual phase '{}' completed via sub-agent ({} tokens, {} files)",
+                            name, attempt_result.tokens, attempt_result.files_modified.len()
+                        );
+                        return Ok((RitualEvent::SkillCompleted {
+                            phase: name.to_string(),
+                            artifacts: attempt_result.files_modified,
+                        }, attempt_result.tokens));
+                    }
+
+                    // Cancelled → propagate, don't fallback
+                    SubAgentOutcome::Cancelled => {
+                        return Ok((RitualEvent::SkillFailed {
+                            phase: name.to_string(),
+                            error: "Cancelled by user".to_string(),
+                        }, attempt_result.tokens));
+                    }
+
+                    // Auth failed → bail out, fallback would hit the same auth wall
+                    SubAgentOutcome::AuthFailed(msg) => {
+                        tracing::error!("Ritual phase '{}' auth failed: {}", name, msg);
+                        return Ok((RitualEvent::SkillFailed {
+                            phase: name.to_string(),
+                            error: format!("Authentication failed: {}", msg),
+                        }, attempt_result.tokens));
+                    }
+
+                    // Rate limited → retry with exponential backoff (max 3 attempts)
+                    SubAgentOutcome::RateLimited(msg) => {
+                        rate_limit_attempts += 1;
+                        if rate_limit_attempts > MAX_RATE_LIMIT_RETRIES {
+                            tracing::warn!(
+                                "Ritual phase '{}' rate limited {} times, falling back to direct execution",
+                                name, rate_limit_attempts
+                            );
+                            (self.notify)(format!(
+                                "⚠️ Rate limited {}x for '{}', falling back to direct execution...",
+                                rate_limit_attempts, name
+                            )).await;
+                            break attempt_result;
+                        }
+                        let backoff_secs = 2u64.pow(rate_limit_attempts); // 2s, 4s, 8s
+                        tracing::warn!(
+                            "Ritual phase '{}' rate limited ({}), retry {}/{} in {}s",
+                            name, msg, rate_limit_attempts, MAX_RATE_LIMIT_RETRIES, backoff_secs
+                        );
+                        (self.notify)(format!(
+                            "⏳ Rate limited for '{}', retrying in {}s ({}/{})...",
+                            name, backoff_secs, rate_limit_attempts, MAX_RATE_LIMIT_RETRIES
+                        )).await;
+                        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                        continue;
+                    }
+
+                    // MaxIterations, ContextTooLarge, Timeout, Error → fall through to direct LLM
+                    outcome => {
+                        tracing::warn!(
+                            "Ritual phase '{}' sub-agent failed ({}), falling back to direct LLM execution",
+                            name, outcome.display()
+                        );
+                        (self.notify)(format!(
+                            "⚠️ Sub-agent failed for '{}' ({}), falling back to direct execution...",
+                            name, outcome.display()
+                        )).await;
+                        break attempt_result;
+                    }
+                }
             };
         }
 
@@ -1043,6 +1179,7 @@ impl RitualRunner {
             tools.clone(),
             model,
             &self.project_root,
+            25,
         ).await;
 
         match result {
@@ -1100,6 +1237,7 @@ impl RitualRunner {
                             tools.clone(),
                             model,
                             &self.project_root,
+                            25,
                         ).await;
 
                         match review_result {
@@ -1139,6 +1277,267 @@ impl RitualRunner {
                 }, 0))
             }
         }
+    }
+
+    /// Resume a ritual from a specific phase, creating a new ritual with prerequisites check.
+    /// Detects project state first, then validates that prerequisites for the target phase exist.
+    pub async fn resume_from_phase(&self, task: String, phase: RitualPhase, target_root: Option<PathBuf>) -> Result<RitualState> {
+        let root = target_root.unwrap_or_else(|| self.project_root.clone());
+
+        // Check prerequisites for the target phase
+        let missing = Self::check_prerequisites(&phase, &root);
+        if !missing.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Cannot resume from {} — missing prerequisites:\n• {}",
+                phase.display_name(),
+                missing.join("\n• ")
+            ));
+        }
+
+        // Detect project state (needed for state machine decisions)
+        let detect_event = self.detect_project().await?;
+        let project_state = match &detect_event {
+            RitualEvent::ProjectDetected(ps) => ps.clone(),
+            _ => return Err(anyhow::anyhow!("Unexpected detect result")),
+        };
+
+        // Build the state at the PRECEDING phase, then send the event that transitions INTO the target.
+        // This ensures the transition function matches correctly.
+        let (preceding_phase, entry_event) = Self::build_phase_entry(&phase, &task, &project_state);
+
+        let mut state = RitualState::new()
+            .with_task(task.clone())
+            .with_target_root(root.to_string_lossy().to_string())
+            .with_project(project_state)
+            .with_phase(preceding_phase);
+
+        // Special state setup for phases that depend on review context
+        if phase == RitualPhase::Planning {
+            // Planning is entered after design review round 2 completes
+            state = state.with_review_target("design").with_review_round(2);
+        } else if phase == RitualPhase::Implementing {
+            // When resuming to implement, we want to skip graph review
+            // Set triage_size to medium so (graph_was_updated && !is_large) → skip review
+            state.triage_size = Some("medium".into());
+        }
+
+        // Save the state
+        self.save_state(&state)?;
+
+        tracing::info!(
+            ritual_id = %state.id,
+            target_phase = %phase.display_name(),
+            preceding_phase = %state.phase.display_name(),
+            target_root = %root.display(),
+            "Resuming ritual from phase"
+        );
+
+        // Advance with the entry event — this will transition into the target phase
+        self.advance(&state.id, entry_event).await
+    }
+
+    /// Build the preceding phase and entry event for entering a target phase.
+    /// Returns (preceding_phase, event) such that transition(preceding_phase, event) → target_phase.
+    fn build_phase_entry(target: &RitualPhase, task: &str, project: &ProjectState) -> (RitualPhase, RitualEvent) {
+        match target {
+            RitualPhase::Initializing => (
+                RitualPhase::Idle,
+                RitualEvent::Start { task: task.to_string() },
+            ),
+            RitualPhase::Triaging => (
+                RitualPhase::Initializing,
+                RitualEvent::ProjectDetected(project.clone()),
+            ),
+            RitualPhase::WritingRequirements => (
+                RitualPhase::Triaging,
+                RitualEvent::TriageCompleted(gid_core::ritual::TriageResult {
+                    clarity: "clear".into(),
+                    clarify_questions: vec![],
+                    size: "large".into(),
+                    skip_design: false,
+                    skip_graph: false,
+                }),
+            ),
+            RitualPhase::Designing => (
+                RitualPhase::Triaging,
+                RitualEvent::TriageCompleted(gid_core::ritual::TriageResult {
+                    clarity: "clear".into(),
+                    clarify_questions: vec![],
+                    size: "large".into(),
+                    skip_design: false,
+                    skip_graph: false,
+                }),
+            ),
+            RitualPhase::Reviewing => (
+                RitualPhase::Designing,
+                RitualEvent::SkillCompleted {
+                    phase: "draft-design".into(),
+                    artifacts: vec![],
+                },
+            ),
+            RitualPhase::Planning => (
+                // Simulate round-2 approval completing → Planning
+                // Need review_round >= 2 and review_target = "design" for the transition to go to Planning
+                RitualPhase::WaitingApproval,
+                RitualEvent::UserApproval { approved: "all".into() },
+            ),
+            RitualPhase::Graphing => (
+                RitualPhase::Planning,
+                RitualEvent::PlanDecided(ImplementStrategy::SingleLlm),
+            ),
+            RitualPhase::Implementing => (
+                RitualPhase::Graphing,
+                RitualEvent::SkillCompleted {
+                    phase: "generate-graph".into(),
+                    artifacts: vec![],
+                },
+            ),
+            RitualPhase::Verifying => (
+                RitualPhase::Implementing,
+                RitualEvent::SkillCompleted {
+                    phase: "implement".into(),
+                    artifacts: vec![],
+                },
+            ),
+            _ => (
+                RitualPhase::Idle,
+                RitualEvent::Start { task: task.to_string() },
+            ),
+        }
+    }
+
+    /// Check prerequisites for resuming from a given phase.
+    /// Returns a list of missing prerequisites (empty = all good).
+    fn check_prerequisites(phase: &RitualPhase, root: &Path) -> Vec<String> {
+        let mut missing = Vec::new();
+
+        let has_requirements = root.join("REQUIREMENTS.md").exists()
+            || root.join(".gid/requirements.md").exists()
+            || root.join(".gid/features").is_dir() && std::fs::read_dir(root.join(".gid/features"))
+                .map(|entries| entries
+                    .filter_map(|e| e.ok())
+                    .any(|e| e.path().join("requirements.md").exists()))
+                .unwrap_or(false);
+
+        let has_design = root.join("DESIGN.md").exists()
+            || root.join(".gid/DESIGN.md").exists()
+            || root.join(".gid/design.md").exists()
+            || root.join(".gid/features").is_dir() && std::fs::read_dir(root.join(".gid/features"))
+                .map(|entries| entries
+                    .filter_map(|e| e.ok())
+                    .any(|e| e.path().join("design.md").exists()))
+                .unwrap_or(false);
+
+        let has_graph = root.join(".gid/graph.yml").exists();
+
+        let has_reviews = root.join(".gid/reviews").is_dir()
+            && std::fs::read_dir(root.join(".gid/reviews"))
+                .map(|entries| entries.filter_map(|e| e.ok()).count() > 0)
+                .unwrap_or(false);
+
+        match phase {
+            // No prerequisites for early phases
+            RitualPhase::Idle | RitualPhase::Initializing | RitualPhase::Triaging
+            | RitualPhase::WritingRequirements => {},
+
+            RitualPhase::Designing => {
+                // Requirements should exist (or we're doing design-first)
+                // Soft check — don't block, just warn
+            }
+            RitualPhase::Reviewing => {
+                if !has_design && !has_requirements {
+                    missing.push("No design or requirements document found".into());
+                }
+            }
+            RitualPhase::WaitingApproval => {
+                if !has_reviews {
+                    missing.push("No review files found in .gid/reviews/".into());
+                }
+            }
+            RitualPhase::Planning => {
+                if !has_design {
+                    missing.push("No design document found (DESIGN.md or .gid/design.md)".into());
+                }
+            }
+            RitualPhase::Graphing => {
+                if !has_design {
+                    missing.push("No design document found".into());
+                }
+            }
+            RitualPhase::Implementing => {
+                if !has_graph {
+                    // Not a hard block — single-file impl doesn't need graph
+                    // But warn
+                }
+                if !has_design {
+                    missing.push("No design document found".into());
+                }
+            }
+            RitualPhase::Verifying => {
+                // Source code should exist — uses Cargo.toml/package.json workspace members
+                if !has_source_in_project(root) {
+                    missing.push("No source directory found (checked src/, lib/, and workspace members from Cargo.toml/package.json)".into());
+                }
+            }
+            _ => {} // Terminal states
+        }
+
+        missing
+    }
+
+    /// Mark the current phase as done and advance to the next phase.
+    /// Used when the user manually completed a phase outside the ritual.
+    pub async fn mark_phase_done(&self, ritual_id: &str) -> Result<RitualState> {
+        let state = self.load_state_by_id(ritual_id)?;
+
+        if state.phase.is_terminal() || state.phase == RitualPhase::Idle {
+            return Err(anyhow::anyhow!("No active phase to mark as done (current: {})", state.phase.display_name()));
+        }
+
+        // Build a SkillCompleted event to advance the state machine naturally
+        let event = match &state.phase {
+            RitualPhase::Designing => RitualEvent::SkillCompleted {
+                phase: "draft-design".into(),
+                artifacts: vec![],
+            },
+            RitualPhase::WritingRequirements => RitualEvent::SkillCompleted {
+                phase: "draft-requirements".into(),
+                artifacts: vec![],
+            },
+            RitualPhase::Reviewing => RitualEvent::SkillCompleted {
+                phase: "review-design".into(),
+                artifacts: vec![],
+            },
+            RitualPhase::WaitingApproval => RitualEvent::UserApproval {
+                approved: "all".into(),
+            },
+            RitualPhase::Planning => RitualEvent::PlanDecided(
+                state.strategy.clone().unwrap_or(ImplementStrategy::SingleLlm)
+            ),
+            RitualPhase::Graphing => RitualEvent::SkillCompleted {
+                phase: "generate-graph".into(),
+                artifacts: vec![],
+            },
+            RitualPhase::Implementing => RitualEvent::SkillCompleted {
+                phase: "implement".into(),
+                artifacts: vec![],
+            },
+            RitualPhase::Verifying => RitualEvent::ShellCompleted {
+                stdout: "Manually verified".into(),
+                exit_code: 0,
+            },
+            phase => {
+                return Err(anyhow::anyhow!("Cannot mark {} as done — use skip instead", phase.display_name()));
+            }
+        };
+
+        // Notify
+        (self.notify)(format!(
+            "✅ Phase '{}' marked as manually completed. Advancing...",
+            state.phase.display_name()
+        )).await;
+
+        self.advance(ritual_id, event).await
     }
 
         /// Load skill prompt from file or built-in fallback.
@@ -1374,6 +1773,7 @@ impl RitualRunner {
             tools,
             "sonnet",
             &self.project_root,
+            25,
         ).await;
 
         match result {
@@ -1904,4 +2304,114 @@ async fn count_files_recursive(dir: &Path) -> usize {
         }
     }
     count
+}
+
+/// Discover workspace member directories by reading the project's manifest file.
+///
+/// Supports:
+/// - Cargo.toml `[workspace] members = ["crates/foo", "crates/bar"]` (with glob patterns)
+/// - package.json `"workspaces": ["packages/*"]` (with glob patterns)
+///
+/// Returns absolute paths of member directories that actually exist on disk.
+fn discover_workspace_member_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut members = Vec::new();
+
+    // Try Cargo.toml
+    let cargo_toml = root.join("Cargo.toml");
+    if cargo_toml.exists() {
+        if let Ok(content) = std::fs::read_to_string(&cargo_toml) {
+            if let Ok(parsed) = content.parse::<toml::Table>() {
+                if let Some(workspace) = parsed.get("workspace").and_then(|v| v.as_table()) {
+                    if let Some(member_list) = workspace.get("members").and_then(|v| v.as_array()) {
+                        for m in member_list {
+                            if let Some(pattern) = m.as_str() {
+                                // Expand glob patterns (e.g., "crates/*")
+                                let full_pattern = root.join(pattern);
+                                if let Ok(paths) = glob::glob(full_pattern.to_string_lossy().as_ref()) {
+                                    for path in paths.flatten() {
+                                        if path.is_dir() {
+                                            members.push(path);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Try package.json (Node.js workspaces)
+    let package_json = root.join("package.json");
+    if members.is_empty() && package_json.exists() {
+        if let Ok(content) = std::fs::read_to_string(&package_json) {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(workspaces) = parsed.get("workspaces").and_then(|v| v.as_array()) {
+                    for ws in workspaces {
+                        if let Some(pattern) = ws.as_str() {
+                            let full_pattern = root.join(pattern);
+                            if let Ok(paths) = glob::glob(full_pattern.to_string_lossy().as_ref()) {
+                                for path in paths.flatten() {
+                                    if path.is_dir() {
+                                        members.push(path);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    members
+}
+
+/// Check if a project has source files — either at root level or in workspace members.
+fn has_source_in_project(root: &Path) -> bool {
+    // Direct source directories
+    if root.join("src").exists() || root.join("lib").exists() || root.join("app").exists() {
+        return true;
+    }
+    // Workspace members from manifest
+    let members = discover_workspace_member_dirs(root);
+    members.iter().any(|m| m.join("src").exists() || m.join("lib").exists())
+}
+
+/// Count source files across the project — root src/ or all workspace member src/ dirs.
+async fn count_source_files_in_project(root: &Path) -> usize {
+    // Direct source directory takes precedence
+    if root.join("src").exists() {
+        return count_files_recursive(&root.join("src")).await;
+    }
+    // Otherwise sum across workspace members
+    let members = discover_workspace_member_dirs(root);
+    let mut total = 0;
+    for member in &members {
+        let src = member.join("src");
+        if src.exists() {
+            total += count_files_recursive(&src).await;
+        }
+    }
+    total
+}
+
+/// Parse a phase name string into a RitualPhase.
+/// Accepts display names, short names, and aliases.
+pub fn parse_phase_name(name: &str) -> Option<RitualPhase> {
+    match name.to_lowercase().trim() {
+        "idle" => Some(RitualPhase::Idle),
+        "init" | "initializing" | "initialize" => Some(RitualPhase::Initializing),
+        "triage" | "triaging" => Some(RitualPhase::Triaging),
+        "requirements" | "req" | "writing-requirements" | "writingrequirements" => Some(RitualPhase::WritingRequirements),
+        "design" | "designing" => Some(RitualPhase::Designing),
+        "review" | "reviewing" => Some(RitualPhase::Reviewing),
+        "plan" | "planning" => Some(RitualPhase::Planning),
+        "graph" | "graphing" => Some(RitualPhase::Graphing),
+        "implement" | "implementing" | "impl" => Some(RitualPhase::Implementing),
+        "verify" | "verifying" | "test" | "testing" => Some(RitualPhase::Verifying),
+        "done" => Some(RitualPhase::Done),
+        _ => None,
+    }
 }

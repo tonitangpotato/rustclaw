@@ -33,6 +33,7 @@ impl GidLlmClient for RitualLlmAdapter {
         tools: Vec<ToolDefinition>,
         model: &str,
         working_dir: &Path,
+        _max_iterations: usize,
     ) -> Result<SkillResult> {
         // Resolve model aliases to full model names
         let resolved_model: &str = match model {

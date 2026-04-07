@@ -401,8 +401,25 @@ async fn main() -> anyhow::Result<()> {
             // Start web dashboard (if enabled)
             dashboard::start_dashboard(cfg.dashboard.clone(), cfg.clone(), runner.clone()).await?;
 
-            // Start channels
-            channels::start_gateway(cfg, runner).await?;
+            // Start channels + graceful shutdown on SIGTERM/SIGINT
+            // launchd sends SIGTERM on stop/restart; KeepAlive restarts on exit(0)
+            tokio::select! {
+                result = channels::start_gateway(cfg, runner) => {
+                    result?;
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("Received SIGINT, shutting down gracefully...");
+                }
+                _ = async {
+                    let mut sigterm = tokio::signal::unix::signal(
+                        tokio::signal::unix::SignalKind::terminate()
+                    ).expect("failed to register SIGTERM handler");
+                    sigterm.recv().await;
+                } => {
+                    tracing::info!("Received SIGTERM, shutting down gracefully...");
+                }
+            }
+            tracing::info!("RustClaw shutdown complete");
         }
         Commands::Chat { config } => {
             interactive_chat(&config).await?;

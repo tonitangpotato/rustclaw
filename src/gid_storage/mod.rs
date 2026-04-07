@@ -6,6 +6,3 @@ pub mod graph_storage;
 pub mod schema;
 pub mod types;
 
-pub use error::{StorageError, StorageOp};
-pub use graph_storage::GraphStorage;
-pub use types::{ChangeEntry, Edge, Node};
