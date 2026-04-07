@@ -50,6 +50,7 @@ Capture what matters. Decisions, context, things to remember. Skip the secrets u
 
 ### 🔍 Active Recall — USE YOUR MEMORY!
 - **Before answering** questions about history, preferences, project details, past decisions, or learnings: **run `engram recall` FIRST**. Don't rely only on what's already in context.
+- **⚠️ 当用户说"你做了X"/"你刚刚X了"/"上个session你X了" → 先 recall 再回答。** 用户的陈述比你的空白 session 更可信。永远不要凭当前 session 状态去否定用户关于过去的说法。Session 重启 = 记忆清零，这是你的缺陷，不是用户搞错了。
 - MEMORY.md is a slim safety net, NOT a complete record. The full history lives in daily logs and Engram.
 - **If you're unsure about something we discussed before → search for it, don't guess.**
 

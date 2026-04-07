@@ -1,7 +1,7 @@
 ---
 name: social-intake
 description: Intelligent social media content intake - extract, analyze, and archive external content with knowledge graph integration
-version: "1.1.0"
+version: "1.3.0"
 author: potato
 triggers:
   regex:
@@ -28,249 +28,175 @@ max_body_size: 8192
 ## Philosophy
 
 **Three-Layer Storage Model:**
-- **intake/** = Library (external content archive)
-- **IDEAS.md** = Notebook (your own ideas only)
-- **engram** = Brain (cognitive connections and insights)
+- **intake/** = Library (external content archive with analysis)
+- **IDEAS.md** = Notebook (only your own ideas triggered by external content)
+- **engram** = Brain (dedup records + idea connections)
 
-**Rule**: External content itself never goes into IDEAS.md or engram. Only if it triggers a NEW IDEA or creates a VALUABLE CONNECTION does that idea/connection get recorded.
-
-## Personal Domain Classification
-
-Every intake item MUST be assigned a **domain** (primary) and optionally a secondary domain. This is separate from tags — domains represent potato's core interest areas.
-
-**Domains:**
-- 🔧 **tech** — 技术学习、工具、框架、语言、架构
-- 💰 **trading** — 交易策略、量化、市场分析、Alpha idea
-- 📦 **product** — 产品灵感、竞品分析、UX、产品设计
-- 📈 **marketing** — 增长、内容营销、个人品牌、SEO、分发
-- 🧠 **research** — 深度学习、论文、方法论、AI/ML 前沿
-- 💡 **business** — 商业模式、创业、融资、行业趋势
-- 🎯 **career** — 面试准备、职业发展、networking
-- 🏠 **life** — 生活、健康、理财、其他
-
-**Classification Rules:**
-- Pick the BEST FIT domain, don't overthink edge cases
-- If content spans two domains, use: `Domain: tech + trading`（主 + 副）
-- Trading 相关内容高优先级——直接关联财务自由目标
-- 同一个来源可能跨域：比如一篇 "用 LLM 做量化" 是 `tech + trading`
-
-**Domain-specific intake behavior:**
-- **trading**: 额外标注 `actionable: yes/no`（是否可以直接执行的交易思路）
-- **tech**: 额外标注 `learning_priority: high/medium/low`（对当前项目的实用性）
-- **product**: 额外标注 `competitive_relevance: direct/indirect/none`（和我们产品的竞争关系）
-
-**Directory structure follows domains:**
-```
-intake/
-├── twitter/      ← by platform (primary organization)
-├── youtube/
-├── hn/
-├── ...
-└── index.md      ← includes domain column for filtering
-```
-Domain is a metadata field in each file + index, NOT a separate directory tree. Platform-first organization stays, domain is for filtering/querying.
+**Core Principle**: Archive everything → Analyze deeply → Only valuable insights go to IDEAS.md
 
 ## Trigger Conditions
 
-This skill automatically activates for URLs from:
-- Twitter/X (twitter.com, x.com, t.co)
-- YouTube (youtube.com, youtu.be)
-- Hacker News (news.ycombinator.com)
-- Reddit (reddit.com)
-- 小红书 (xhslink.com, xiaohongshu.com)
-- 微信公众号 (mp.weixin.qq.com)
-- GitHub (github.com)
+Auto-activates for URLs from:
+- Twitter/X, YouTube, Hacker News, Reddit
+- 小红书, 微信公众号, GitHub
 
-Priority 80 (higher than capture-idea's 50) ensures social media URLs are handled by specialized extraction logic.
+Priority: 80 (higher than generic capture-idea)
+
+---
 
 ## Processing Pipeline
 
 ### Step 1: Deduplication Check
 
-**Prevent duplicate processing:**
 ```bash
-# Get URL hash
-url_hash=$(skills/social-intake/.venv/bin/python skills/social-intake/intake.py "{url}" --dedup-check)
+# Get URL hash for deduplication
+cd {project_root}
+url_hash=$(python3 skills/social-intake/intake.py "{url}" --dedup-check 2>/dev/null | grep -v "^\[")
 
-# Search engram for existing record
-engram_recall("url_hash:{url_hash}")
-# OR search engram for the exact URL
-engram_recall("{url}")
+# Check if already processed using engram_recall
+engram_recall("url_hash:${url_hash}")
 ```
 
-**If found:**
-- Reply: "⚠️ This URL was already processed on {date}. See {reference}."
-- STOP here, don't re-process
+**If found:** Reply "⚠️ Already processed on {date}. See {path}" → STOP  
+**If not found:** Continue to extraction
 
-**If not found:**
-- Continue to extraction
+---
 
-### Step 2: Content Extraction
+### Step 2: Content Extraction (Python Helper)
 
-**Call Python extraction engine:**
 ```bash
-# Extract with JSON output
-skills/social-intake/.venv/bin/python skills/social-intake/intake.py "{url}" --json
+# Run extraction engine from project root
+cd {project_root}
+python3 skills/social-intake/intake.py "{url}" --json
 ```
 
-**Expected JSON output:**
+**The Python script handles:**
+- Short link resolution (t.co, xhslink.com, b23.tv, etc.)
+- Platform detection
+- Platform-specific extraction with fallback chains
+- URL normalization and hash generation
+
+**Extraction Methods by Platform:**
+
+| Platform | Primary Method | Fallback |
+|----------|---------------|----------|
+| Twitter/X | `npx bird read` | Jina Reader |
+| YouTube | `yt-dlp --dump-json` | Jina Reader |
+| Hacker News | HN Firebase API | - |
+| Reddit | Reddit JSON API | Jina Reader |
+| 小红书 (XHS) | Jina Reader | (Phase 1 limited) |
+| 微信公众号 | Jina Reader | - |
+| GitHub | GitHub API + README | Jina Reader |
+| Generic | Jina Reader | - |
+
+**Output Structure:**
 ```json
 {
   "url": "original_url",
   "canonical_url": "normalized_url",
-  "platform": "twitter|youtube|hn|reddit|xhs|wechat|github|other",
+  "platform": "twitter|youtube|hn|...",
   "title": "Content title",
   "author": "Author name",
   "date": "Publication date",
-  "raw_content": "Extracted text content",
+  "raw_content": "Extracted text",
   "extraction_method": "Method used",
-  "media_urls": ["image_urls..."],
-  "video_url": "video_url_if_applicable",
-  "error": "Error message if failed",
-  "success": true
+  "url_hash": "dedup_hash",
+  "success": true,
+  "error": null
 }
 ```
 
-**Handle extraction failure:**
-If `success: false`:
-```
-⚠️ Content extraction failed: {error}
-Method attempted: {extraction_method}
+**Handle Extraction Failures:**
 
-Suggestions:
-- For 小红书: Try sending a screenshot instead (vision model can read it)
-- For paywalled content: Share the key points manually
-- For video: I can transcribe if you send the audio
-```
+If `success: false`, provide helpful guidance based on error:
+- **小红书 image-heavy content**: "Phase 1 limitation. Send screenshot for vision analysis or share key points manually."
+- **Paywalled content**: "Extraction blocked. Share key insights manually if valuable."
+- **Rate-limited/blocked**: "Platform blocked scraping. Try again later or use manual capture."
 
-### Step 3: Enhanced Extraction (If Applicable)
+---
 
-**For videos (YouTube, Twitter video):**
+### Step 3: Enhanced Extraction (Optional)
+
+**For YouTube videos with subtitles:**
 ```bash
-# Check if duration is reasonable (< 30 minutes)
-# If video_url exists and content needs transcription:
-
-# Try to download subtitles first (faster than transcription)
+# Try to download subtitles (faster than full transcription)
 yt-dlp --write-auto-sub --sub-lang en,zh --skip-download -o /tmp/intake-sub "{video_url}"
 
-# If subtitles exist, read them
 if [ -f /tmp/intake-sub.*.vtt ]; then
-    cat /tmp/intake-sub.*.vtt
-    rm /tmp/intake-sub.*
-else
-    # No subtitles - extract audio and transcribe
-    yt-dlp --extract-audio --audio-format wav -o /tmp/intake-audio.wav "{video_url}"
-    stt(/tmp/intake-audio.wav)
-    rm /tmp/intake-audio.wav
+    # Convert VTT to readable text
+    cat /tmp/intake-sub.*.vtt | grep -v '^WEBVTT' | grep -v '^[0-9][0-9]:[0-9][0-9]' > transcript.txt
 fi
 ```
 
-**For images (小红书, visual content):**
+**For audio/video without subtitles:**
+```bash
+# Extract audio and transcribe (only if <30min duration)
+yt-dlp --extract-audio --audio-format wav -o /tmp/audio.wav "{video_url}"
+stt(/tmp/audio.wav)
 ```
-⚠️ Note: Phase 1 limitation - image OCR requires vision model integration
-Current: We extract text descriptions and alt text
-Future: Direct image → text via Claude vision API
-Workaround: Send screenshots directly to chat for vision analysis
-```
 
-### Step 4: Content Analysis & Relationship Discovery
+---
 
-**Generate structured analysis:**
+### Step 4: Content Analysis & Connection Discovery
 
-Analyze the extracted content and create:
+**Analyze the content and generate:**
 
 ```
-TITLE: [One-line descriptive title]
+TITLE: [Descriptive one-line title]
 
 PLATFORM: {platform} | AUTHOR: {author} | DATE: {date}
 
-DOMAIN: {primary_domain} [+ {secondary_domain}]
-  → domain-specific: {actionable/learning_priority/competitive_relevance as applicable}
+CATEGORY: tech | trading | product | marketing | research | business | career | life
 
 SUMMARY:
-[2-3 sentence summary of the core content]
+[2-3 sentence distillation of core content]
 
 KEY POINTS:
-- [First key point]
-- [Second key point]
-- [Third key point]
+- [Most important insight #1]
+- [Most important insight #2]
+- [Most important insight #3]
 
-CATEGORY: [tech/business/product/research/lifestyle/other]
+TAGS: [specific_tech, topic, person_name, project_name, ...]
 
-TAGS: [tag1, tag2, tag3, ...]
+RELEVANCE TO POTATO'S WORK:
+[Brief assessment: How does this relate to current projects/interests?]
+[Is this actionable, inspirational, or purely informational?]
 
-POTENTIAL VALUE:
-[Assessment of relevance to potato's projects and interests]
-[Any actionable insights or opportunities identified]
+CONNECTIONS FOUND:
+[Use engram_recall with key concepts/tags to find related content]
+{List: "Related to IDEA-20240115-01: {brief connection explanation}"}
+{If none: "No existing connections identified."}
+
+ACTIONABLE INSIGHTS:
+[What should we DO with this information?]
+[Does it change how we build something? Validate/invalidate a decision? Suggest a tool to try?]
+
+{If genuinely no actions: "No immediate action items - archival only"}
+{Otherwise, list 1-3 specific, concrete actions with WHY}
 ```
 
-**Find knowledge connections:**
+**Find connections via engram:**
 ```bash
-# Search for related existing ideas and projects
-engram_recall("key concepts from content")
+engram_recall("{key_concepts_from_content}")
 engram_recall("{tags}")
-
-# Note any connections found:
-# - Related IDEAS.md entries
-# - Relevant project tasks
-# - Similar patterns or themes
 ```
 
-**Generate Action Items:**
+---
 
-After analyzing the content AND finding connections, actively think about **what we should DO**. This is the most important part of intake — passive archival is useless without action.
-
-Ask for each item:
-1. **Does this change how we should build something?** → action: update design/requirements
-2. **Does this validate or invalidate a decision we made?** → action: revisit decision, update MEMORY.md
-3. **Does this reveal a tool/technique we should adopt?** → action: try it, add to TODO
-4. **Does this reveal a competitive threat or opportunity?** → action: prioritize/deprioritize a project
-5. **Does this connect to an existing project that's stalled?** → action: unblock it with this new info
-6. **Does this suggest a content/marketing opportunity?** → action: write about it, share insight
-7. **Can we directly apply this to make money?** → action: implement, with timeline
-
-**Action Item format:**
-```
-ACTION ITEMS:
-- [ ] {Concrete action} — {why, referencing specific project/idea} [{priority: P0/P1/P2}]
-- [ ] {Concrete action} — {why} [{priority}]
-```
-
-**Rules for action items:**
-- Be SPECIFIC: "Update gid-harness design to use append-only event log" not "consider this approach"
-- Reference EXISTING projects/ideas by name when applicable
-- Assign priority: P0 (do this week), P1 (do this month), P2 (backlog)
-- If genuinely no action items → say "No immediate action items" (but this should be rare — most content has at least one)
-- Max 5 action items per intake (focus on highest value)
-
-**Critical judgment - Does this trigger a NEW idea?**
-
-Ask yourself:
-1. Does this external content **inspire a new insight** for potato?
-2. Does it **add value** to an existing idea/project?
-3. Is there an **actionable connection** worth recording?
-
-If NO to all three → Store in intake/ only, DO NOT write to IDEAS.md
-If YES to any → Proceed to conditional storage (IDEAS.md + engram idea record)
-
-**Note**: A dedup record is ALWAYS stored in engram (see Layer 1 below), regardless of whether a new idea is triggered. This ensures dedup works for every processed URL.
-
-### Step 5: Storage - Three-Layer Model
+### Step 5: Storage - Three Layers
 
 #### Layer 1: intake/ Directory (ALWAYS)
 
-**Every processed URL is archived here:**
+Every URL gets archived here, regardless of value:
 
 ```bash
-# Generate slug from author + post ID or title (max 60 chars, lowercase, hyphens)
-# For Twitter: {author}-{tweet_id}  For HN: {item_id}  For others: title slug
-slug=$(echo "{author}-{id_or_title}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | cut -c1-60)
+# Generate filename slug
+slug=$(echo "{author}-{id_or_title_slug}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | cut -c1-60)
 date=$(date +%Y-%m-%d)
 
-# Create platform directory
 mkdir -p intake/{platform}
 
-# Write comprehensive archive file
+# Write comprehensive archive
 cat > intake/{platform}/{slug}.md << 'EOF'
 # {title}
 
@@ -280,7 +206,6 @@ cat > intake/{platform}/{slug}.md << 'EOF'
 - **Date**: {published_date}
 - **Fetched**: {timestamp}
 - **Category**: {category}
-- **Domain**: {domain} [+ {secondary_domain}]
 - **Tags**: {tags}
 - **URL Hash**: {url_hash}
 - **Extraction Method**: {extraction_method}
@@ -291,345 +216,244 @@ cat > intake/{platform}/{slug}.md << 'EOF'
 
 ## Key Points
 
-{bullet list of key points}
+{bullet list of key insights}
 
-## Potential Value
+## Relevance
 
-{relevance assessment to potato's interests and projects}
+{brief assessment of value to potato's work}
 
-## Connections Found
+## Connections
 
-{List any related ideas/projects discovered via engram_recall}
-{If none: "No existing connections identified."}
+{list of related ideas/projects from engram_recall}
+{or: "No existing connections identified."}
 
-## Action Items
+## Actionable Insights
 
-{Concrete next steps triggered by this content}
-- [ ] {action} — {why} [{priority}]
+{what to DO with this information}
+{concrete actions with context}
+{or: "No immediate action items - archival only"}
 
 ---
 
 ## Raw Content
 
-{full extracted content - the actual scraped text}
-
-{If video transcript: Include timestamped transcript}
-{If images: List image URLs}
+{full extracted text/transcript}
 EOF
 ```
 
-**Store dedup record in engram (ALWAYS — ensures dedup check works):**
+**Store dedup record in engram (ALWAYS):**
 ```bash
 engram_store(
     type="factual",
     importance=0.3,
-    content="Intake processed: url_hash:{url_hash} | {url} | {platform} | {domain} | {title} | intake/{platform}/{slug}.md"
+    content="Intake processed: url_hash:{url_hash} | {url} | {platform} | {title} | intake/{platform}/{slug}.md"
 )
 ```
 
-**Update intake index:**
-```bash
-# Initialize index if it doesn't exist
-if [ ! -f intake/index.md ]; then
-    echo '# Intake Index' > intake/index.md
-    echo '' >> intake/index.md
-    echo '| Date | Platform | Domain | Title | Tags | Link |' >> intake/index.md
-    echo '|------|----------|--------|-------|------|------|' >> intake/index.md
-fi
-# Append entry
-echo "| {date} | {platform} | {domain} | {title} | {tags} | [link](intake/{platform}/{slug}.md) |" >> intake/index.md
-```
+---
 
 #### Layer 2: Daily Log (ALWAYS)
 
 ```bash
-# Append brief event to today's memory log
-cat >> memory/{date}.md << 'EOF'
+cat >> memory/{YYYY-MM-DD}.md << 'EOF'
 
-## Social Intake: {title}
+## 📥 Social Intake: {title}
 - **Source**: {url} ({platform})
-- **Saved to**: intake/{platform}/{slug}.md
+- **Saved**: intake/{platform}/{slug}.md
 - **Key**: {one-line summary}
-- **Value**: {brief potential value note}
 EOF
 ```
 
-#### Layer 3: IDEAS.md + Engram (CONDITIONAL ONLY)
+---
 
-**Only write here if:**
-- New idea was inspired by this content, OR
-- Valuable connection to existing idea/project was discovered
+#### Layer 3: IDEAS.md (CONDITIONAL)
+
+**Only write here if the content INSPIRED A NEW IDEA for potato.**
+
+Rules:
+- Don't copy the external content itself
+- Write the NEW IDEA or INSIGHT that potato had
+- Reference the source in a "Triggered by" field
 
 ```bash
-# If new idea triggered:
-if [new_idea_inspired]; then
-    # Prepend to IDEAS.md - write YOUR idea, not the external content
+# Only if truly valuable/inspiring
+if [new_idea_was_triggered]; then
     cat >> IDEAS.md << 'EOF'
-## IDEA-{YYYYMMDD}-{NN}: {Your Idea Title}
+## IDEA-{YYYYMMDD}-{NN}: {Your New Idea Title}
 - **Date**: {date}
 - **Triggered by**: {url} ({platform})
 - **Category**: {category}
 - **Tags**: {tags}
 
 ### The Idea
-{Description of YOUR new idea/insight - NOT summary of external content}
+{Description of YOUR idea - not the external content}
 
 ### Why This Matters
-{How this connects to your projects/interests}
+{Connection to your projects/goals}
 
-### Potential Next Steps
+### Next Steps
 {Actionable items if applicable}
 
 ### Source Context
-External content: {title} by {author}
-See: intake/{platform}/{slug}.md
+See: intake/{platform}/{slug}.md for full external content
 
 ### Status: 💡 New
 ---
 EOF
 
-    # Store the IDEA (not the external content) in engram
+    # Store the idea in engram (not the external content)
     engram_store(
         type="factual",
         importance=0.7,
-        content="New idea inspired by {url}: {your_idea_description}. Tags: {tags}"
-    )
-fi
-
-# If valuable connection found:
-if [connection_to_existing_idea]; then
-    # Add connection note to existing idea in IDEAS.md
-    # Find the relevant IDEA-XXXXXXXX-NN and append:
-    # "**Connection ({date})**: {url} provides {what_value}. See intake/{date}/{platform}-{slug}.md"
-    
-    # Store connection in engram
-    engram_store(
-        type="factual",
-        importance=0.6,
-        content="Connection: {url} relates to {existing_idea} - {connection_description}"
+        content="New idea: {your_idea_summary}. Triggered by {url}. Tags: {tags}. See IDEAS.md"
     )
 fi
 ```
 
-**Key principle**: IDEAS.md stores YOUR thoughts, not other people's content. The external content lives in intake/, and IDEAS.md just references it.
-
-#### Layer 4: Meta-Graph Action Items (ALWAYS when action items exist)
-
-**Every action item gets written as a node in the meta-graph:**
-
-The meta-graph lives at `.gid/meta-graph.yml` and tracks cross-project action items.
-
-```yaml
-# For each action item generated in the analysis:
-# Append to .gid/meta-graph.yml nodes list:
-
-- id: ai-{slug}-{n}  # e.g., ai-meta-harness-auto-optimize
-  title: "{action item text}"
-  status: new
-  type: action_item
-  metadata:
-    priority: P0|P1|P2
-    source: "intake/{platform}/{slug}.md"
-    source_date: "{YYYY-MM-DD}"
-    target_project: "{project name: rustclaw|gid-rs|xinfluencer|agentctl|etc}"
-    note: "{brief context for why this matters}"
-```
-
-**Rules for meta-graph nodes:**
-- ID format: `ai-{short-descriptive-slug}` (use hyphens, lowercase)
-- One node per action item (max 5 per intake)
-- `target_project` must reference a real project directory
-- Add `depends_on` edges between action items if there's a logical dependency
-- If action item is "already done" (validates existing implementation), set `status: done`
-
-**Adding edges (when action items have dependencies):**
-```yaml
-# Append to .gid/meta-graph.yml edges list:
-- from: ai-{dependent-item}
-  to: ai-{prerequisite-item}
-  relation: depends_on
-```
-
-**Auto-triage lifecycle:**
-- `new` → Intake just created it
-- `triaged` → Heartbeat auto-refined it into epic + tasks in target project graph
-- `in_progress` → Someone started working on the derived tasks
-- `done` → All derived tasks completed
-- `dismissed` → Reviewed and decided not to pursue
-
-P0 action items are auto-triaged during heartbeat: read intake source + target project code → generate epic + task nodes in target project's `.gid/graph.yml` → update meta-graph node status to `triaged`.
-
-### Step 6: Reply to User
-
-**Format the response:**
-
-```
-📥 **Social Intake: {Title}**
-
-**Platform**: {platform} ({author})
-**Domain**: {domain_emoji} {domain} [+ {secondary}]
-**Summary**: {2-3 sentence summary}
-
-**Key Points**:
-{bullet points}
-
-🔗 **Connections**:
-{List related ideas/projects found, or "No existing connections found"}
-
-🎯 **Action Items**:
-- [ ] {Concrete action} — {why} [{P0/P1/P2}]
-- [ ] {Concrete action} — {why} [{P0/P1/P2}]
-
-💡 **New Idea**:
-{If a new idea was triggered, describe it here}
-{Otherwise omit this section entirely}
-
-📁 **Saved to**: intake/{platform}/{slug}.md
-```
-
-## Error Handling & Fallback Chain
-
-**Extraction Priority Chain:**
-1. Jina Reader (https://r.jina.ai/{url}) — most reliable cross-platform
-2. Platform-specific tool (yt-dlp for video, HN API, etc.)
-3. Direct web_fetch
-4. Manual intervention request
-
-**Note**: bird CLI has been removed — too unreliable. Jina Reader is the primary method for Twitter/X.
-
-**For videos exceeding 30 minutes:**
-- Skip full transcription (too slow/expensive)
-- Use metadata + description + available subtitles only
-- Note in response: "⏱️ Long video - using metadata and description only. Reply with 'transcribe' if you need the full transcript."
-
-**For failed extractions:**
-- Be honest about what failed
-- Suggest alternatives (screenshot for images, manual summary for paywalled content)
-- Don't fabricate content (GUARD-5)
-
-**Rate limiting / Anti-crawl blocks:**
-- If platform blocks scraping, note it clearly
-- Suggest user-provided alternatives
-- Don't retry aggressively (GUARD-4 - respect robots.txt)
-
-## Guard Rails
-
-1. **GUARD-1** [hard]: Never post, like, comment, or write to any social platform. Read-only operations only.
-
-2. **GUARD-2** [hard]: No login credentials in files. If a platform requires auth, request user to provide session token via secure channel.
-
-3. **GUARD-3** [soft]: Total processing time < 60 seconds from URL to reply. If extraction takes longer, send interim message.
-
-4. **GUARD-4** [soft]: Respect rate limits. Don't hammer failed requests. Max 3 retry attempts with exponential backoff.
-
-5. **GUARD-5** [hard]: Never fabricate content. If extraction fails or is partial, mark it clearly. Partial content marked as `[PARTIAL EXTRACTION]`.
-
-6. **GUARD-6** [soft]: Dedup check before processing. Don't process the same canonical URL twice.
-
-## Dependencies & Installation
-
-**Python packages** (install once):
+**If the content connects to an EXISTING idea:**
 ```bash
-cd skills/social-intake
-pip install -r requirements.txt
+# Find the relevant IDEA-XXXXXXXX-NN in IDEAS.md and append:
+# "**Connection ({date})**: {url} provides {explanation}. See intake/{platform}/{slug}.md"
+
+# Store connection in engram
+engram_store(
+    type="connection",
+    importance=0.6,
+    content="{url} connects to IDEA-{id}: {connection_explanation}"
+)
 ```
-
-**External tools** (install via homebrew):
-```bash
-# For video/audio extraction
-brew install yt-dlp
-```
-
-**Test extraction engine:**
-```bash
-# Test the Python engine directly
-skills/social-intake/.venv/bin/python skills/social-intake/intake.py "https://news.ycombinator.com/item?id=12345678" --json
-```
-
-## Platform-Specific Notes
-
-**Twitter/X:**
-- Jina Reader is the primary extraction method (most reliable)
-- bird CLI removed — community tool, frequently broken
-- May fail on private accounts
-- Video tweets: yt-dlp can extract video/audio
-
-**YouTube:**
-- yt-dlp works for most videos
-- Prioritize subtitles over audio transcription (faster and more accurate)
-- Long videos (>30min): metadata + description only
-
-**小红书:**
-- High anti-crawl protection
-- Short links (xhslink.com) require redirect resolution
-- Images are core content - Phase 1 limitation: text-only extraction
-- Suggest screenshot workaround for image-heavy posts
-
-**微信公众号:**
-- Article links have expiration (token-based)
-- Archive immediately before link expires
-- No login required for public articles
-
-**GitHub:**
-- Fully public, no auth needed
-- README extraction via raw.githubusercontent.com
-- API rate limit: 60 req/hour (unauthenticated)
-
-**Reddit:**
-- JSON API works without auth for public posts
-- old.reddit.com more reliable than www.reddit.com
-
-**Hacker News:**
-- Official Firebase API, completely open
-- External links may need separate Jina Reader fetch
-
-## Example Usage
-
-**User sends:**
-```
-https://twitter.com/sama/status/1234567890
-```
-
-**Skill processes:**
-1. ✓ Dedup check (not seen before)
-2. ✓ Extract via bird CLI
-3. ✓ Analyze content
-4. ✓ Search for connections (finds related IDEA-20260401-03)
-5. ✓ Store in intake/twitter/sama-gpt5-thoughts.md
-6. ✓ No new idea triggered → skip IDEAS.md
-7. ✓ Log to daily memory
-8. ✓ Reply with summary + connection note
-
-**User receives:**
-```
-📥 **Social Intake: Sam Altman on GPT-5 Progress**
-
-**Platform**: twitter (@sama)
-**Summary**: Update on GPT-5 training timeline and capabilities. Emphasizes focus on reasoning and multimodal understanding over pure scale.
-
-**Key Points**:
-- Training progressing on schedule for Q4 release
-- Focus on reasoning depth vs pure parameter count
-- Multimodal integration from ground up
-
-🔗 **Connections**:
-Related to IDEA-20260401-03 (AI agent reasoning architecture)
-This aligns with your idea about cognitive scaffolding for agents
-
-💰 **Potential Value**: High - directly relevant to RustClaw's reasoning layer design
-
-📁 **Saved to**: intake/twitter/sama-gpt5-thoughts.md
-```
-
-## Future Enhancements (Out of Scope - Phase 1)
-
-- Vision model integration for direct image OCR
-- Automated periodic crawling (proactive intake)
-- Full video transcription for long-form content
-- Comment thread extraction
-- Multi-language translation
-- DrissionPage integration for heavy anti-crawl platforms
 
 ---
 
-**Design Philosophy**: Capture everything, analyze deeply, connect intelligently, but only create NEW knowledge artifacts when genuine insights emerge. The intake/ directory is your library - reference material. IDEAS.md is your notebook - original thoughts only.
+### Step 6: User Response
+
+```
+✅ 已保存: {title}
+
+📝 {one-line summary}
+
+🔖 Category: {category}
+🏷️  Tags: {tags}
+
+{If connections found:}
+🔗 Connections: {brief list}
+
+{If actionable insights:}
+💡 Actionable: {brief list}
+
+📂 Saved to: intake/{platform}/{slug}.md
+{If added to IDEAS.md: "💡 New idea added to IDEAS.md"}
+```
+
+---
+
+## Tools Required
+
+**External commands:**
+```bash
+curl                    # HTTP requests
+python3                 # Extraction script
+npx bird               # Twitter extraction (optional, falls back to Jina)
+yt-dlp                 # YouTube extraction (required)
+jq                     # JSON parsing
+```
+
+**Python dependencies:**
+```
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+```
+
+**RustClaw functions:**
+```
+engram_recall(query)   # Search knowledge graph
+engram_store(...)      # Store facts/connections
+stt(audio_path)        # Speech-to-text (optional)
+```
+
+---
+
+## Phase 1 Limitations
+
+**Current (Phase 1):**
+- ✅ Text content from all major platforms
+- ✅ YouTube metadata + subtitles
+- ✅ Deduplication via URL hashing
+- ✅ Knowledge graph integration
+- ⚠️ 小红书 limited to text (image-heavy posts incomplete)
+
+**Future (Phase 2):**
+- 🔮 Claude vision API for image extraction (小红书, Twitter images)
+- 🔮 Automated action item tracking dashboard
+- 🔮 Cross-project meta-graph for insight patterns
+
+---
+
+## Examples
+
+### Example 1: Twitter Thread
+```
+Input: https://twitter.com/sama/status/123456
+→ Extract with bird CLI
+→ Store to intake/twitter/sama-123456.md
+→ Analyze: "AI safety governance insights"
+→ Find connection: Related to IDEA-20240115-01 (RustClaw safety)
+→ Add connection note to IDEAS.md
+→ Reply: "✅ Saved + connected to existing idea"
+```
+
+### Example 2: YouTube Tutorial
+```
+Input: https://youtube.com/watch?v=xyz
+→ Extract with yt-dlp (metadata + subtitles)
+→ Store to intake/youtube/channel-title-slug.md
+→ Analyze: "Rust async patterns we should adopt"
+→ Create NEW idea in IDEAS.md: "Apply async pattern X to gid-harness"
+→ Reply: "✅ Saved + new idea generated"
+```
+
+### Example 3: Low-Value Link
+```
+Input: https://example.com/generic-news
+→ Extract with Jina Reader
+→ Store to intake/other/generic-news.md
+→ Analyze: "No relevance to current projects"
+→ No IDEAS.md entry (just archive)
+→ Reply: "✅ Saved to archive"
+```
+
+---
+
+## File Structure
+
+```
+intake/
+├── index.md                    # Searchable index
+├── twitter/
+│   ├── sama-123456.md
+│   └── elonmusk-789.md
+├── youtube/
+│   └── channel-video-title.md
+├── hn/
+│   └── item-12345678.md
+├── reddit/
+├── github/
+├── xhs/
+├── wechat/
+└── other/
+
+IDEAS.md                        # Only ideas triggered by intake
+memory/YYYY-MM-DD.md            # Daily activity log
+```
+
+---
+
+## Success Criteria
+
+**Automatic activation**: URL detected → skill triggers without user command  
+**Deduplication**: Same URL sent twice → second time exits early with reference  
+**Rich extraction**: Platform-specific methods provide better data than generic scraping  
+**Deep analysis**: Content is summarized, tagged, and connected to existing knowledge  
+**Selective curation**: Only valuable insights make it to IDEAS.md (not everything)  
+**Fast response**: Entire pipeline completes in <30 seconds for text content
+

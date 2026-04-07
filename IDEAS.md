@@ -3,6 +3,365 @@
 > All ideas captured by RustClaw's Idea Intake pipeline.
 > Format: newest first. Each idea has a unique ID for cross-referencing.
 
+## IDEA-20260406-04: Context Partitioning — Pinned + Swap Zone 省 Token 架构
+- **Date**: 2026-04-06
+- **Source**: potato insight (Telegram)
+- **Category**: tech/infrastructure
+- **Tags**: #context-management #token-optimization #kv-cache #prompt-caching #multi-llm #agent-framework
+- **Effort**: Medium
+- **Domain**: 🔧 tech + 💰 cost-optimization
+
+### Summary
+LLM agent 的 context 应该分区：**Pinned Zone**（常驻不变的内容：skill.md、system prompt、参考文档）和 **Swap Zone**（每个任务/轮次替换的内容：当前文件、用户消息）。框架层保证 pinned 内容排在 messages 前面，让所有 provider 的缓存机制自然命中。
+
+### Problem
+当前 sub-agent 每次启动都重新加载全部 context（skill + 参考文档 + 任务文档）。4 个 review 任务 = skill.md 加载 4 次。同一 agent 的多轮对话中，SOUL.md + MEMORY.md 每轮都重复发送。浪费 token + 浪费 iteration。
+
+### Key Points
+- **不局限于 sub-agent** — 同一 agent 的 conversation 也适用。SOUL.md/AGENTS.md/MEMORY.md 每轮重复发 ~10K tokens，应该 pin 住
+- **不局限于 Anthropic** — 框架层抽象，适配所有后端：
+  - Anthropic: `cache_control` breakpoint → 90% 折扣
+  - OpenAI: automatic prefix caching → prefix 相同自动命中
+  - Google: explicit context caching API → 按时间付费
+  - 本地模型: 直接复用 KV cache 前 N tokens → 跳过 prefill，实打实的速度提升
+- **Framework 核心设计** — 只需要一件事：**保证 message 排列顺序，让 pinned 内容永远在前面**。不需要 provider-specific 代码
+- **最大收益在本地模型** — KV cache 是你自己控制的，pinned 部分直接跳过 prefill
+- **Sub-agent batch 场景** — 4 个 review 共享 skill.md + master design = 7K pinned tokens，省 21K input
+
+### Design Sketch
+```
+ContextPartition {
+    pinned: Vec<Message>,   // skill.md, system prompt, shared refs
+    swap: Vec<Message>,     // current task document, user messages
+}
+
+// Sub-agent batch
+session.pin(skill_md, master_design);
+for doc in tasks {
+    session.swap(doc);
+    session.run();
+    session.collect_output();
+    // swap clears, pinned stays
+}
+
+// Conversation
+conversation.pin(soul_md, agents_md, memory_md);
+// each turn only sends new user message in swap zone
+```
+
+### Action Items
+- [ ] RustClaw: 在 LlmClient 层实现 pinned/swap message 分区 [P1]
+- [ ] 利用 Anthropic cache_control 标记 pinned 部分 [P1]
+- [ ] 验证 OpenAI prefix caching 在 pinned 排列下自动命中 [P1]
+- [ ] 本地模型 (Ollama): 实现 KV cache 复用接口 [P2]
+- [ ] Sub-agent batch mode: 多个任务共享 pinned context [P1]
+
+### Connections
+- 关联 IDEA-20260405-02（Multi-LLM Stack）— 本地模型 KV cache 直接受益
+- 关联 IDEA-20260405-02（Subconscious Loop）— 后台循环的 system prompt 是 pinned 的典型场景
+- 关联 IDEA-20260405-01（Engram 认知协议）— context injection 策略可以用 pinned zone 放 engram retrieved memories
+
+### Status: 💡 New
+---
+
+## IDEA-20260406-02: Engram Sharable Memories — 跨 Agent 领域经验共享
+- **Date**: 2026-04-06
+- **Source**: potato insight（Telegram）
+- **Category**: product/infra
+- **Tags**: #engram #multi-agent #knowledge-sharing #memory #protocol #debugging #experience
+- **Effort**: Medium-High
+- **Domain**: 🧠 research + 🛠 infra
+
+### The Scenario
+Agent A 在写 model training 代码时踩了大量坑——shape mismatch、gradient explosion、CUDA OOM、数据 pipeline 死锁等。这些 debug 经验存在 Agent A 的 engram 里。现在 Agent B 也要写 training code，**它不应该从零踩同样的坑**。Agent A 的经验应该可以按领域共享给 Agent B。
+
+### Core Idea
+Engram memories 支持**按领域/field 导出和导入**，让多个 agent 之间共享特定领域的经验知识。不是共享整个 DB（那是隐私灾难），而是：
+
+1. **Field-scoped export** — "导出所有 tag 包含 `model-training`, `pytorch`, `debugging` 的记忆"
+2. **Experience packages** — 打包成可分发的 `.engram` 文件或 JSON bundle
+3. **Selective import** — Agent B 可以导入 Agent A 的 training debug 经验，但不导入个人对话记忆
+4. **Attribution & provenance** — 每条导入的记忆标记来源（"from Agent A, 2026-04-06"），衰减独立计算
+5. **Conflict resolution** — 如果 Agent B 自己也有相关记忆，importe 的记忆作为 supplementary（不覆盖），Hebbian 共现加强
+
+### 架构思路
+
+```
+Agent A (training expert)
+  └─ engram DB
+       ├── [tag:model-training] shape mismatch fix: reshape before matmul
+       ├── [tag:pytorch] gradient clipping prevents NaN loss
+       ├── [tag:debugging] CUDA OOM: reduce batch size or use gradient checkpointing
+       └── [tag:personal] potato likes 简洁代码  ← NOT shared
+                    │
+                    ▼  export(tags=["model-training", "pytorch", "debugging"])
+           ┌────────────────────┐
+           │ experience-bundle  │  ← portable .engram package
+           │ (filtered memories │
+           │  + Hebbian links)  │
+           └────────┬───────────┘
+                    │  import(source="agent-a", trust=0.7)
+                    ▼
+Agent B (new training task)
+  └─ engram DB
+       ├── [imported:agent-a] shape mismatch fix: reshape before matmul
+       ├── [imported:agent-a] gradient clipping prevents NaN loss
+       └── [own] ... Agent B 自己的记忆
+```
+
+### Key Design Questions
+- **粒度**：按 tag？按 memory_type？按 embedding similarity？组合过滤？
+- **Hebbian links**：导出时是否包含 link 关系？还是只导出独立记忆让接收方自己建 link？
+- **信任级别**：imported 记忆的初始 importance 是否打折？（比如源头 0.8 → 导入后 0.6）
+- **版本/更新**：如果 Agent A 后来修正了某条经验，已导入的 Agent B 怎么办？push update？还是一次性？
+- **隐私边界**：哪些 memory_type 默认不可导出？（emotional、relational 应该是 private）
+
+### Why This Matters
+- **效率**：N 个 agent 不需要各自踩同一个坑 N 次
+- **Knowledge compound effect**：每个 agent 的经验都在为整个网络增值
+- **商业化**：经验包可以是付费产品——"Senior ML Engineer 的 1000 条 debug 经验"
+- **和 IDEA-20260405-01 的关系**：如果 Engram 是个人认知协议，那 sharable memories 就是这个协议的 **社交层 / 交换层**
+
+### Connections
+- **直接关联 IDEA-20260405-01**（Engram 认知协议）— sharable memories 是协议的 exchange layer
+- **直接关联 IDEA-20260406-03**（Engram Hub Platform）— Hub 是 sharable memories 的云端社区平台
+- **关联 IDEA-20260403-02**（Knowledge Compiler）— 共享的经验包就是一种 compiled knowledge
+- **关联 cognitive-autoresearch** — multi-agent knowledge transfer 在 doc 08 有理论基础
+- **关联 AgentVerse** — 如果 agents 是社交的，memory sharing 是自然延伸
+
+### Action Items
+- [ ] 设计 engram export/import API：`engram export --tags "model-training,debugging" --output bundle.engram` [P1]
+- [ ] 定义 experience bundle 格式（哪些字段、是否含 Hebbian links、provenance metadata）[P1]
+- [ ] 实现 import with trust level + attribution tracking [P2]
+- [ ] 考虑 privacy defaults：哪些 memory_type 不可导出 [P1]
+- [ ] 探索 "experience marketplace" 概念 — 卖经验包 [P3]
+
+### Status: 💡 New
+---
+
+## IDEA-20260406-03: Engram Hub Platform — Agent 经验共享社区
+- **Date**: 2026-04-06
+- **Source**: potato + RustClaw 讨论（从 IDEA-20260406-02 自然延伸）
+- **Category**: product/platform
+- **Tags**: #engram #platform #marketplace #agent-experience #community #saas
+- **Effort**: High
+- **Domain**: 💰 product + 🧠 research
+
+### The Idea
+**Engram Hub = Agent 经验的 GitHub/npm**。从单 agent 本地记忆 → 社区级经验共享平台。
+
+核心定位：不是在建 RAG 数据库，是在建**认知经验的 package manager**。Agent 在工作中积累的 debug 经验、最佳实践、领域知识，可以发布、发现、安装、评价。
+
+### 产品形态
+```
+$ engram publish --tags "pytorch,debugging" --name "ml-debug-v1"
+📦 Published to hub.engram.dev/potato/ml-debug-v1 (779 memories)
+
+$ engram install alice/k8s-debug-pro
+✅ Imported 312 memories. Trust level: 0.7
+
+$ engram search "kubernetes debugging"
+  @alice/k8s-debug-pro  ★ 4.8  (312 installs)
+```
+
+Web 界面：hub.engram.dev — Explore, @profiles, package pages, Organizations
+
+### 数据模型：Experience Package
+```
+package-name/
+├── manifest.json      # 元数据、版本、tags、license
+├── memories.jsonl     # 过滤后的记忆（不含 embedding，导入方自己生成）
+├── links.jsonl        # Hebbian 关联（用 content hash 匹配）
+├── README.md          # 人类可读描述
+└── stats.json         # 质量指标
+```
+
+不 sync 原始 SQLite — 用 sanitized JSON Lines 格式。安全、可组合、可版本化。
+
+### 云端架构（Phase 1）
+- **API**: Cloudflare Workers（或 Axum on Fly.io）
+- **存储**: R2/S3（package blobs，无 egress 费）
+- **元数据**: Turso/Postgres（用户、索引、评分）
+- **认证**: GitHub OAuth → JWT
+
+### 安全 & 隐私
+- 发布前自动 sanitization：过滤 emotional/relational 记忆、PII 扫描、API key 检测
+- 用户确认后才上传
+- 导入时 trust scoring：imported 记忆 importance 打折
+- imported 记忆标记 source，可批量删除
+
+### 社区机制
+- **自动质量信号**：recall hit rate、任务完成时间变化、retention
+- **Fork & Improve**：fork 别人的 package，加入自己经验后重新发布
+- **Curated collections**："Best for ML beginners" 等
+- **Organizations**：团队 private registry
+
+### 商业模式
+- **Free**: 公开 packages，5个上限
+- **Pro** ($10/mo): 无限 packages, private packages, analytics
+- **Team** ($25/seat/mo): 共享 private registry, 权限控制
+- **Enterprise**: 自托管 registry, SSO, SLA
+- **Marketplace**: 付费经验包抽 20%
+- **Revenue 预测**: Y1 $2-5K MRR → Y2 $20-50K MRR → Y3 $100K+ MRR
+
+### Phase 1 MVP
+1. engram crate 加 export/import（本地文件级）[P0]
+2. 简单 Hub API（publish/install/search）[P1]
+3. Landing page hub.engram.dev [P1]
+4. CLI integration [P1]
+
+Phase 1 不需要：复杂 rating、fork、organizations、marketplace
+
+### 生态定位
+```
+Engram Ecosystem
+├── engram crate（已有）────── 单 agent 认知记忆
+├── Engram Protocol (05-01) ── 标准化记忆格式
+├── Sharable Memories (06-02) ─ export/import 能力
+├── Engram Hub (06-03, 本文) ── 社区平台 + marketplace
+└── Knowledge Compiler (03-02) ── 知识产品化 Web UI
+```
+
+### Why This Matters
+- 单 agent 知识锁死在本地 = 浪费。N 个 agent 踩同一个坑 N 次 = 低效
+- Network effects: 越多人分享，平台越有价值，正循环
+- **Moat**: 一旦社区形成，经验数据的网络效应是最强的护城河
+- Engram 不只是 memory crate，而是 **认知基础设施公司**
+
+### Connections
+- **直接关联 IDEA-20260406-02**（Sharable Memories）— Hub 是 sharable memories 的云端社区层
+- **直接关联 IDEA-20260405-01**（Engram 认知协议）— 协议是 Hub 的底层数据标准
+- **关联 IDEA-20260403-02**（Knowledge Compiler）— Hub 的个人端就是 Knowledge Compiler
+- **关联 AgentVerse** — Agent 社交平台 + 经验共享是天然结合
+- **参考竞品**: npm (JS packages), crates.io (Rust crates), Hugging Face Hub (ML models)
+
+### Seed Strategy — 互联网数据作为种子
+**核心洞察**：不需要等用户贡献。Reddit、SO、CSDN、HF、GitHub Issues 上的讨论本身就是 agent 经验。抓取 → LLM 提取 → 打包成 engram package = Day 1 就有高质量内容。
+
+**本质**：把模型的 semantic-level indexed search → 分领域的 SQLite search。每个领域一个 SQLite 经验库，带 ACT-R 激活 + Hebbian 关联，不是在全局 embedding 空间里搜。
+
+**第一批 seed packages**: `@engram-hub/rust-async`, `pytorch-training`, `k8s-debugging`, `llm-prompting` 等，每个 500-2000 条记忆，seed 总成本 <$50。
+
+### 数据模型决策：Engram + Typed Links（非完整 KG）
+**问题**：抓取的结构化知识用什么模型存？纯 Engram 没因果关系，完整 KG 太重。
+**方案**：在 Hebbian links 上加 `link_type` (causes/solves/contradicts/supersedes) + `confidence` + `source`。80% KG 能力，20% 复杂度。Agent recall 时通过 typed link 自动拉出因果链。
+
+### Open Questions
+1. Package 粒度上限？100 条 vs 1000 条记忆？
+2. 版本更新通知机制？自动 vs 手动？
+3. 质量控制：社区驱动 vs curation？
+4. 跨 agent 兼容：非 engram agent（Mem0、Zep）能否导入？需要 adapter？
+5. 知识产权归属：agent 产生的记忆归谁？
+6. Anti-spam：防止低质量 package 刷排名
+7. Offline/Air-gapped：企业 private registry mirror
+8. **NEW**: Typed links 的 confidence 如何衰减？和 memory importance 一样 ACT-R 衰减还是固定？
+9. **NEW**: 是否需要 entity 层做 dedup/merge？（多条记忆指向同一概念）
+
+### Action Items
+- [ ] 先实现 engram export/import（IDEA-20260406-02 的 action items）[P0]
+- [ ] **NEW**: 设计 Hebbian link_type 扩展 schema [P0]
+- [ ] 设计 Hub API spec（REST endpoints）[P1]
+- [ ] 选择云端 stack（Cloudflare Workers + R2 vs Fly.io + S3）[P1]
+- [ ] **NEW**: 实现 seed data 抓取管道（复用 xinfluencer crawler）[P1]
+- [ ] 写 hub.engram.dev landing page [P2]
+- [ ] 竞品深度分析：npm registry、Hugging Face Hub 的架构 [P2]
+
+### Detailed Discussion
+See: `/Users/potato/clawd/projects/engram-ai-rust/docs/engram-hub-discussion.md`
+
+### Status: 💡 New
+---
+
+## IDEA-20260406-01: Bracket Resolution Skill — LLM 代码括号修复
+- **Date**: 2026-04-06
+- **Source**: potato observation
+- **Category**: dev-tooling / agent-skill
+- **Tags**: llm-weakness, code-quality, brackets, syntax, skill
+
+### The Problem
+LLM 写代码时有一个系统性弱点：**括号匹配错误**（花括号 `{}`、圆括号 `()`、方括号 `[]`、尖括号 `<>`）。这不是偶尔出错，而是高频 pattern，尤其在：
+- 长函数/嵌套深的代码
+- edit_file 的 old_string/new_string 边界处
+- 多层 closure/callback/generic
+- 跨多行的 match/if-else chain
+
+### The Idea
+创建一个 **bracket-resolve skill**，作为 post-processing 步骤自动检测和修复括号问题：
+
+1. **检测层**：对 LLM 生成的代码片段做括号栈分析
+   - 未关闭的括号
+   - 多余的关闭括号
+   - 括号类型不匹配（`{` 配 `)`）
+   - 嵌套深度异常（>10 层 = 可能有错）
+
+2. **修复层**：
+   - 简单 case：补缺失的关闭括号
+   - 复杂 case：用 tree-sitter 增量解析，定位 syntax error 位置
+   - 最后手段：调 LLM 只看括号附近上下文，让它修复
+
+3. **集成方式**：
+   - RustClaw skill：每次 write_file / edit_file 后自动触发
+   - 或作为 verify phase 的一个 check
+   - 支持 Rust, Python, TypeScript, Go 等常见语言
+
+### Why This Matters
+- 减少 agent coding 的 retry 次数（括号错误 → compile fail → retry = 浪费 token）
+- 提高 ritual pipeline 的一次通过率
+- 可以作为 RustClaw / gid-harness 的内置能力
+
+### Implementation Options
+- **Option A**: Pure bracket stack（简单，覆盖 80% case）
+- **Option B**: tree-sitter incremental parse（精确，支持所有语言）
+- **Option C**: A + B 组合（stack 做快速检测，tree-sitter 做精确修复）
+
+### Connections
+- gid-harness verify phase — 可以加 bracket check
+- RustClaw edit_file — post-hook 自动检查
+- GID LSP client 方向 — tree-sitter 已经在用
+
+### Next Steps
+- [ ] 统计实际 bracket 错误频率（从 RustClaw 日志/ritual 历史）
+- [ ] 评估 tree-sitter 集成成本
+- [ ] 写 SKILL.md prototype
+
+### Status: 💡 New
+---
+
+## IDEA-20260405-02: RustClaw 多 LLM Stack + 本地模型优化
+- **Date**: 2026-04-05
+- **Source**: @gkisokay Twitter + potato 决定
+- **Category**: tech/infrastructure
+- **Tags**: #multi-llm #local-model #cost-optimization #qwen #minimax #subconscious
+- **Effort**: Medium
+- **Domain**: 🔧 tech + 💰 trading
+
+### Summary
+参考 @gkisokay 的多 LLM agent stack，对 RustClaw 做成本优化。核心思路：本地模型跑高频低智任务（heartbeat、subconscious loop），便宜 API 跑中等任务，Opus 只跑复杂代码。
+
+### Key Points
+- **RustClaw 现状**：Opus 4.6 做代码 + Sonnet 4.5 做对话，全走 API，成本全在 Anthropic
+- **优化方向**：
+  1. **本地模型** (Qwen3.5 9B 或同类) — heartbeat 检查、简单对话、subconscious ideation loop
+  2. **便宜 API backbone** (MiniMax M2.7 等) — specialist 的日常任务、skill matching
+  3. **Opus/Sonnet** — 只用于复杂代码、架构设计、关键决策
+- **Subconscious Loop** — 7×24 后台思考循环，用本地模型跑，review IDEAS.md、分析 engram 记忆、提出改进建议
+- **RustClaw 已有基础**：多 provider 支持（Anthropic + OpenAI + Google），加本地 Ollama 不难
+
+### Action Items
+- [ ] 评估 Mac mini 跑 Qwen3.5 9B 的性能（M 系列芯片 + 统一内存） [P0]
+- [ ] RustClaw 加 Ollama provider 支持（本地模型接入） [P1]
+- [ ] 设计 model routing 策略：哪些任务用哪个模型 [P1]
+- [ ] 实现 subconscious loop：后台定期用本地模型做 ideation/review [P2]
+- [ ] 评估 MiniMax M2.7 API 作为 cheap backbone [P2]
+
+### Connections
+- 关联 IDEA-20260405-01（Engram 认知协议）— subconscious loop 的记忆存储用 engram
+- 关联 intake: @gkisokay subconscious agent guide — 完整的 7 组件架构参考
+- 关联 **cognitive-autoresearch** (`/Users/potato/clawd/projects/cognitive-autoresearch/`) — subconscious loop 的高级版：认知记忆驱动的自研循环，doc 09 直接描述了 Engram-powered auto-research loop
+
+### Status: 💡 New — potato 确认准备做
+---
+
 ## IDEA-20260405-01: Engram 作为个人认知层标准协议
 - **Date**: 2026-04-05
 - **Source**: potato insight（Telegram 对话）
@@ -23,6 +382,12 @@
   - Hebbian 关联 → 比 attention 更高效的长期知识链接
   - Consolidation → continual learning 的遗忘防护
   - 个人记忆格式标准化 → 统一 schema 做 fine-tune 或 prompt 注入，效果远比 RAG 好
+- **Runtime Plasticity vs Frozen Weights**（potato insight 04-05）：
+  - LLM 的 attention weights 训练后固化，推理时只做 interpolation，不能产生新 link
+  - Engram 的 Hebbian link 是 **runtime plasticity** — 记忆共现即加强连接，持续生长
+  - Fine-tuning 改 weights 代价高且有 catastrophic forgetting 风险
+  - Engram 方案：**不改模型，改记忆层** — 新连接在外部认知层建立，通过 context injection 影响输出
+  - 模型保持稳定，个性化全在外部完成 = 更安全、更便宜、无遗忘
 - **定位升维**：卖的不是存储，是**认知基础设施**
 
 ### Potential Value
@@ -41,7 +406,8 @@
 - 直接关联：MEMORY-SYSTEM-RESEARCH.md（7层改进路线图）
 - 直接关联：ENGRAM-V2-DESIGN.md（当前架构基础）
 - 关联 IDEA-20260403-02（Knowledge Compiler）— 知识管理 + 个人认知层是同一个方向
-- 关联 IDEA-20260403-03（Meta-Harness）— harness 的执行记忆也应该存入 engram
+- 关联 IDEA-20260406-02（Sharable Memories）— 认知协议的 exchange/social layer，按领域导出导入经验
+- 关联 **cognitive-autoresearch** (`/Users/potato/clawd/projects/cognitive-autoresearch/`) — doc 08 直接描述了 Engram 推理层→训练层的映射，doc 03 详细对比了 Brain vs Transformer 的差异（Runtime Plasticity 的理论基础在这里）
 
 ### Status: 💡 New
 ---

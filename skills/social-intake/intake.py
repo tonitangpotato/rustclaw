@@ -5,55 +5,53 @@ Handles URL deduplication, platform detection, content scraping, and file storag
 Called by RustClaw's social-intake skill for complex extraction tasks.
 
 Usage:
-    python intake.py <url> [--dedup-check] [--output-dir ./intake]
+    python intake.py <url> [--json] [--dedup-check]
+    
+Examples:
+    # Extract with JSON output
+    python intake.py "https://twitter.com/sama/status/123" --json
+    
+    # Get dedup hash only
+    python intake.py "https://example.com" --dedup-check
+    
+    # Human-readable output (default)
+    python intake.py "https://news.ycombinator.com/item?id=12345"
 """
 
 import argparse
 import hashlib
 import json
-import os
 import re
 import subprocess
 import sys
 import urllib.parse
 from dataclasses import dataclass, asdict
 from datetime import datetime
-from pathlib import Path
 from typing import Optional, Dict, List, Any
-import requests
-from bs4 import BeautifulSoup
+
+try:
+    import requests
+    from bs4 import BeautifulSoup
+except ImportError:
+    print("Error: Missing dependencies. Install with: pip install -r requirements.txt", file=sys.stderr)
+    sys.exit(1)
 
 
 # Platform detection patterns
 PLATFORM_PATTERNS = {
-    'twitter': [
-        r'twitter\.com/',
-        r'x\.com/',
-        r't\.co/',
-    ],
-    'youtube': [
-        r'youtube\.com/',
-        r'youtu\.be/',
-    ],
-    'hn': [
-        r'news\.ycombinator\.com',
-    ],
-    'reddit': [
-        r'reddit\.com/',
-        r'old\.reddit\.com/',
-    ],
-    'xhs': [
-        r'xhslink\.com/',
-        r'xiaohongshu\.com/',
-    ],
-    'wechat': [
-        r'mp\.weixin\.qq\.com/',
-    ],
-    'github': [
-        r'github\.com/',
-        r'raw\.githubusercontent\.com/',
-    ],
+    'twitter': [r'twitter\.com/', r'x\.com/'],
+    'youtube': [r'youtube\.com/', r'youtu\.be/'],
+    'hn': [r'news\.ycombinator\.com'],
+    'reddit': [r'reddit\.com/', r'old\.reddit\.com/'],
+    'xhs': [r'xiaohongshu\.com/'],
+    'wechat': [r'mp\.weixin\.qq\.com/'],
+    'github': [r'github\.com/', r'raw\.githubusercontent\.com/'],
+    'weibo': [r'weibo\.com/'],
+    'bilibili': [r'bilibili\.com/', r'b23\.tv/'],
 }
+
+# Short link domains that need resolution
+SHORT_LINK_DOMAINS = ['t.co', 'xhslink.com', 'b23.tv', 'bit.ly', 'tinyurl.com']
 
 
 @dataclass
@@ -69,12 +67,15 @@ class ExtractionResult:
     extraction_method: str = "unknown"
     media_urls: List[str] = None
     video_url: Optional[str] = None
+    url_hash: str = ""
     error: Optional[str] = None
     success: bool = True
 
     def __post_init__(self):
         if self.media_urls is None:
             self.media_urls = []
+        if not self.url_hash and self.canonical_url:
+            self.url_hash = URLNormalizer.get_hash(self.canonical_url)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -85,38 +86,20 @@ class URLNormalizer:
     
     TRACKING_PARAMS = [
         'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
-        'fbclid', 'gclid', 'ref', 'source', '_hsenc', '_hsmi',
-        's', 't',  # Twitter/X share tracking params
+        'fbclid', 'gclid', 'ref', 'source', '_hsenc', '_hsmi', 's', 't',
     ]
 
     @staticmethod
     def normalize(url: str) -> str:
         """Remove tracking parameters and normalize URL"""
         parsed = urllib.parse.urlparse(url)
-        
-        # Parse query params
         params = urllib.parse.parse_qs(parsed.query)
-        
-        # Remove tracking params
-        clean_params = {
-            k: v for k, v in params.items() 
-            if k not in URLNormalizer.TRACKING_PARAMS
-        }
-        
-        # Rebuild query string
+        clean_params = {k: v for k, v in params.items() if k not in URLNormalizer.TRACKING_PARAMS}
         clean_query = urllib.parse.urlencode(clean_params, doseq=True)
-        
-        # Rebuild URL
-        clean_url = urllib.parse.urlunparse((
-            parsed.scheme,
-            parsed.netloc,
-            parsed.path,
-            parsed.params,
-            clean_query,
-            ''  # Remove fragment
+        return urllib.parse.urlunparse((
+            parsed.scheme, parsed.netloc, parsed.path,
+            parsed.params, clean_query, ''
         ))
-        
-        return clean_url
 
     @staticmethod
     def get_hash(url: str) -> str:
@@ -144,25 +127,36 @@ class ShortLinkResolver:
     @staticmethod
     def resolve(url: str) -> str:
         """Follow redirects and return final URL"""
+        parsed = urllib.parse.urlparse(url)
+        domain = parsed.netloc.lower().replace('www.', '')
+        
+        is_short_link = any(domain == sl or domain.endswith('.' + sl) for sl in SHORT_LINK_DOMAINS)
+        if not is_short_link:
+            return url
+        
+        # Try curl first (more reliable for some platforms)
         try:
-            # Use curl to follow redirects (more reliable than requests for some platforms)
             result = subprocess.run(
                 ['curl', '-Ls', '-o', '/dev/null', '-w', '%{url_effective}', url],
-                capture_output=True,
-                text=True,
-                timeout=10
+                capture_output=True, text=True, timeout=10
             )
             if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
+                resolved = result.stdout.strip()
+                print(f"[Resolved] {url} → {resolved}", file=sys.stderr)
+                return resolved
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
         
         # Fallback to requests
         try:
             response = requests.head(url, allow_redirects=True, timeout=5)
-            return response.url
+            if response.url and response.url != url:
+                print(f"[Resolved] {url} → {response.url}", file=sys.stderr)
+                return response.url
         except Exception:
-            return url
+            pass
+        
+        return url
 
 
 class TwitterExtractor:
@@ -176,14 +170,17 @@ class TwitterExtractor:
         try:
             bird_result = subprocess.run(
                 ['npx', '-y', 'bird', 'read', url],
-                capture_output=True,
-                text=True,
-                timeout=30
+                capture_output=True, text=True, timeout=30
             )
             if bird_result.returncode == 0 and bird_result.stdout:
-                result.raw_content = bird_result.stdout
+                result.raw_content = bird_result.stdout.strip()
                 result.extraction_method = 'bird-cli'
-                TwitterExtractor._parse_bird_output(result, bird_result.stdout)
+                # Extract author if format is "@username: text"
+                match = re.match(r'@(\w+):\s*(.*)', result.raw_content, re.DOTALL)
+                if match:
+                    result.author = match.group(1)
+                    result.raw_content = match.group(2).strip()
+                result.success = True
                 return result
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:
             result.error = f"bird-cli failed: {e}"
@@ -192,26 +189,16 @@ class TwitterExtractor:
         try:
             jina_url = f"https://r.jina.ai/{url}"
             response = requests.get(jina_url, timeout=15)
-            if response.status_code == 200:
+            if response.status_code == 200 and response.text:
                 result.raw_content = response.text
                 result.extraction_method = 'jina-reader'
+                result.success = True
                 return result
         except Exception as e:
             result.error = f"All methods failed: {e}"
-            result.success = False
         
+        result.success = False
         return result
-    
-    @staticmethod
-    def _parse_bird_output(result: ExtractionResult, output: str):
-        """Parse bird CLI output for structured data"""
-        # Bird typically outputs tweet text directly
-        result.raw_content = output.strip()
-        # Extract author if present in format "@username: text"
-        match = re.match(r'@(\w+):\s*(.*)', output, re.DOTALL)
-        if match:
-            result.author = match.group(1)
-            result.raw_content = match.group(2).strip()
 
 
 class YouTubeExtractor:
@@ -223,15 +210,13 @@ class YouTubeExtractor:
         
         try:
             # Get metadata with yt-dlp
-            metadata_cmd = subprocess.run(
+            cmd = subprocess.run(
                 ['yt-dlp', '--dump-json', '--no-download', url],
-                capture_output=True,
-                text=True,
-                timeout=30
+                capture_output=True, text=True, timeout=30
             )
             
-            if metadata_cmd.returncode == 0 and metadata_cmd.stdout:
-                data = json.loads(metadata_cmd.stdout)
+            if cmd.returncode == 0 and cmd.stdout:
+                data = json.loads(cmd.stdout)
                 result.title = data.get('title')
                 result.author = data.get('uploader')
                 result.date = data.get('upload_date')
@@ -239,10 +224,8 @@ class YouTubeExtractor:
                 result.video_url = url
                 result.extraction_method = 'yt-dlp-metadata'
                 
-                # Check for subtitles
                 if data.get('subtitles') or data.get('automatic_captions'):
-                    result.extraction_method = 'yt-dlp-metadata+subtitles'
-                    result.raw_content += "\n\n[Note: Video has subtitles available for full transcript]"
+                    result.raw_content += "\n\n[Subtitles available - call yt-dlp separately for full transcript]"
                 
                 result.success = True
                 return result
@@ -251,8 +234,7 @@ class YouTubeExtractor:
         
         # Fallback to Jina Reader
         try:
-            jina_url = f"https://r.jina.ai/{url}"
-            response = requests.get(jina_url, timeout=15)
+            response = requests.get(f"https://r.jina.ai/{url}", timeout=15)
             if response.status_code == 200:
                 result.raw_content = response.text
                 result.extraction_method = 'jina-reader'
@@ -272,7 +254,6 @@ class HackerNewsExtractor:
     def extract(url: str) -> ExtractionResult:
         result = ExtractionResult(url=url, canonical_url=url, platform='hn')
         
-        # Extract item ID from URL
         match = re.search(r'item\?id=(\d+)', url)
         if not match:
             result.error = "Could not parse HN item ID"
@@ -282,7 +263,6 @@ class HackerNewsExtractor:
         item_id = match.group(1)
         
         try:
-            # Use HN API
             api_url = f"https://hacker-news.firebaseio.com/v0/item/{item_id}.json"
             response = requests.get(api_url, timeout=10)
             
@@ -290,23 +270,15 @@ class HackerNewsExtractor:
                 data = response.json()
                 result.title = data.get('title')
                 result.author = data.get('by')
-                result.date = datetime.fromtimestamp(data.get('time', 0)).isoformat()
+                result.date = datetime.fromtimestamp(data.get('time', 0)).isoformat() if data.get('time') else None
                 
-                # Get text content
                 content_parts = []
                 if data.get('title'):
                     content_parts.append(f"# {data['title']}")
                 if data.get('text'):
                     content_parts.append(data['text'])
                 if data.get('url'):
-                    content_parts.append(f"\nOriginal URL: {data['url']}")
-                    # Optionally fetch external link content
-                    try:
-                        external = requests.get(f"https://r.jina.ai/{data['url']}", timeout=10)
-                        if external.status_code == 200:
-                            content_parts.append(f"\n--- External Content ---\n{external.text[:2000]}")
-                    except Exception:
-                        pass
+                    content_parts.append(f"\nExternal URL: {data['url']}")
                 
                 result.raw_content = "\n\n".join(content_parts)
                 result.extraction_method = 'hn-api'
@@ -326,46 +298,36 @@ class RedditExtractor:
     def extract(url: str) -> ExtractionResult:
         result = ExtractionResult(url=url, canonical_url=url, platform='reddit')
         
-        # Convert to old.reddit.com for easier parsing
-        json_url = url.replace('www.reddit.com', 'old.reddit.com')
-        if not json_url.endswith('.json'):
-            json_url += '.json'
-        
         try:
-            response = requests.get(
-                json_url,
-                headers={'User-Agent': 'Mozilla/5.0'},
-                timeout=10
-            )
+            # Use Reddit's JSON API (append .json to URL)
+            json_url = url.rstrip('/') + '.json'
+            response = requests.get(json_url, headers={'User-Agent': 'RustClaw/1.0'}, timeout=10)
             
             if response.status_code == 200:
                 data = response.json()
-                
                 # Reddit returns [post_data, comments_data]
-                if isinstance(data, list) and len(data) > 0:
-                    post_data = data[0]['data']['children'][0]['data']
-                    
-                    result.title = post_data.get('title')
-                    result.author = post_data.get('author')
-                    result.date = datetime.fromtimestamp(post_data.get('created_utc', 0)).isoformat()
-                    
-                    content_parts = [f"# {result.title}"]
-                    if post_data.get('selftext'):
-                        content_parts.append(post_data['selftext'])
-                    if post_data.get('url') and post_data['url'] != url:
-                        content_parts.append(f"\nLink: {post_data['url']}")
-                    
-                    result.raw_content = "\n\n".join(content_parts)
-                    result.extraction_method = 'reddit-json-api'
-                    result.success = True
-                    return result
+                post = data[0]['data']['children'][0]['data']
+                
+                result.title = post.get('title')
+                result.author = post.get('author')
+                result.date = datetime.fromtimestamp(post.get('created_utc', 0)).isoformat() if post.get('created_utc') else None
+                
+                content_parts = [f"# {post.get('title', 'Untitled')}"]
+                if post.get('selftext'):
+                    content_parts.append(post['selftext'])
+                if post.get('url') and post['url'] != url:
+                    content_parts.append(f"\nLinked URL: {post['url']}")
+                
+                result.raw_content = "\n\n".join(content_parts)
+                result.extraction_method = 'reddit-json-api'
+                result.success = True
+                return result
         except Exception as e:
             result.error = f"Reddit JSON API failed: {e}"
         
         # Fallback to Jina Reader
         try:
-            jina_url = f"https://r.jina.ai/{url}"
-            response = requests.get(jina_url, timeout=15)
+            response = requests.get(f"https://r.jina.ai/{url}", timeout=15)
             if response.status_code == 200:
                 result.raw_content = response.text
                 result.extraction_method = 'jina-reader'
@@ -378,213 +340,46 @@ class RedditExtractor:
         return result
 
 
-class XiaohongshuExtractor:
-    """Extract content from 小红书 using Playwright (headless browser).
-    
-    XHS blocks direct note access for unauthenticated users (error 300031).
-    Strategy: Navigate to /explore first, then use client-side routing to load
-    the note in a modal overlay, which renders the full content.
-    """
+class XHSExtractor:
+    """Extract content from 小红书 (Xiaohongshu)"""
     
     @staticmethod
     def extract(url: str) -> ExtractionResult:
         result = ExtractionResult(url=url, canonical_url=url, platform='xhs')
         
-        # Resolve short links
-        if 'xhslink.com' in url:
-            canonical_url = ShortLinkResolver.resolve(url)
-            result.canonical_url = canonical_url
-            url = canonical_url
-        
-        # Extract note ID from URL
-        note_id_match = re.search(r'/(?:discovery/item|explore)/([a-f0-9]+)', url)
-        if not note_id_match:
-            result.error = "Could not extract note ID from URL"
-            result.success = False
-            return result
-        
-        note_id = note_id_match.group(1)
-        explore_url = f"https://www.xiaohongshu.com/explore/{note_id}"
-        result.canonical_url = explore_url
-        
+        # Phase 1: Use Jina Reader (limited effectiveness due to anti-crawl)
         try:
-            from playwright.sync_api import sync_playwright
-            import time as _time
-            
-            with sync_playwright() as p:
-                browser = p.chromium.launch(
-                    headless=True,
-                    args=['--disable-blink-features=AutomationControlled']
-                )
-                ctx = browser.new_context(
-                    user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-                    viewport={'width': 1440, 'height': 900}
-                )
-                page = ctx.new_page()
-                page.add_init_script('Object.defineProperty(navigator, "webdriver", {get: () => undefined})')
-                
-                try:
-                    # Step 1: Load explore homepage first (direct note URLs are blocked)
-                    try:
-                        page.goto('https://www.xiaohongshu.com/explore', timeout=15000)
-                    except Exception:
-                        pass  # Timeout on load event is OK, SPA may keep loading
-                    _time.sleep(3)
-                    
-                    # Step 2: Navigate to the specific note via client-side routing
-                    page.evaluate(f'window.history.pushState({{}}, "", "/explore/{note_id}")')
-                    page.evaluate('window.dispatchEvent(new PopStateEvent("popstate"))')
-                    _time.sleep(2)
-                    
-                    # If pushState didn't trigger the note modal, try clicking the note card
-                    note_container = page.query_selector('#noteContainer')
-                    if not note_container:
-                        # Try direct navigation as fallback
-                        try:
-                            page.goto(explore_url, timeout=15000)
-                        except Exception:
-                            pass
-                        _time.sleep(3)
-                        note_container = page.query_selector('#noteContainer')
-                    
-                    # Step 3: Extract content from the modal/page
-                    title_el = page.query_selector('#detail-title')
-                    result.title = title_el.inner_text().strip() if title_el else None
-                    
-                    # Author
-                    author_el = page.query_selector('.username') or page.query_selector('.author .name')
-                    result.author = author_el.inner_text().strip() if author_el else None
-                    
-                    # Main content
-                    desc_el = page.query_selector('#detail-desc') or page.query_selector('.note-text')
-                    content_text = desc_el.inner_text().strip() if desc_el else ''
-                    
-                    # Tags from content
-                    tags = re.findall(r'#\S+', content_text)
-                    
-                    # Interaction counts
-                    interactions = {}
-                    for name, selectors in [
-                        ('likes', ['.like-wrapper .count', 'span.like-count']),
-                        ('collects', ['.collect-wrapper .count', 'span.collect-count']),
-                        ('comments', ['.chat-wrapper .count', 'span.comment-count']),
-                    ]:
-                        for sel in selectors:
-                            el = page.query_selector(sel)
-                            if el:
-                                interactions[name] = el.inner_text().strip()
-                                break
-                    
-                    # Images
-                    for sel in ['#noteContainer img', '.swiper-slide img', '.note-image img']:
-                        img_els = page.query_selector_all(sel)
-                        for img_el in img_els:
-                            src = img_el.get_attribute('src') or img_el.get_attribute('data-src') or ''
-                            if src.startswith('//'):
-                                src = 'https:' + src
-                            if src.startswith('http') and ('xhscdn' in src or 'xiaohongshu' in src):
-                                if src not in result.media_urls:
-                                    result.media_urls.append(src)
-                    
-                    # Video
-                    video_el = page.query_selector('video source') or page.query_selector('video')
-                    if video_el:
-                        video_src = video_el.get_attribute('src') or ''
-                        if video_src.startswith('//'):
-                            video_src = 'https:' + video_src
-                        if video_src.startswith('http'):
-                            result.media_urls.append(video_src)
-                    
-                    # Build structured output
-                    parts = []
-                    if result.title:
-                        parts.append(f"# {result.title}")
-                    if result.author:
-                        parts.append(f"**Author:** {result.author}")
-                    if content_text:
-                        parts.append(f"\n{content_text}")
-                    if tags:
-                        parts.append(f"\n**Tags:** {' '.join(tags)}")
-                    if interactions:
-                        parts.append(f"\n**Interactions:** {json.dumps(interactions, ensure_ascii=False)}")
-                    if result.media_urls:
-                        parts.append(f"\n**Media:** {len(result.media_urls)} items")
-                    
-                    result.raw_content = '\n'.join(parts)
-                    result.extraction_method = 'playwright'
-                    result.success = bool(content_text or result.title)
-                    
-                    if not result.success:
-                        # Last resort: get full noteContainer text
-                        if note_container:
-                            full_text = note_container.inner_text()[:5000]
-                            if full_text and len(full_text) > 50:
-                                result.raw_content = full_text
-                                result.success = True
-                                result.extraction_method = 'playwright-container'
-                
-                finally:
-                    browser.close()
-                    
-        except ImportError:
-            result.error = "Playwright not installed. Run: pip install playwright && playwright install chromium"
-            result.success = False
+            response = requests.get(f"https://r.jina.ai/{url}", timeout=15)
+            if response.status_code == 200 and len(response.text) > 100:
+                result.raw_content = response.text
+                result.extraction_method = 'jina-reader'
+                result.success = True
+                return result
         except Exception as e:
-            result.error = f"XHS extraction failed: {e}"
-            result.success = False
+            result.error = f"Jina Reader failed: {e}"
         
+        # If Jina fails, mark as partial success with helpful error
+        result.error = "Phase 1 limitation: 小红书 image content requires vision model (planned Phase 2)"
+        result.success = False
         return result
 
 
-class WechatExtractor:
-    """Extract content from WeChat official accounts"""
+class WeChatExtractor:
+    """Extract content from WeChat Official Accounts"""
     
     @staticmethod
     def extract(url: str) -> ExtractionResult:
         result = ExtractionResult(url=url, canonical_url=url, platform='wechat')
         
-        # Try direct fetch first
         try:
-            response = requests.get(
-                url,
-                headers={'User-Agent': 'Mozilla/5.0'},
-                timeout=15
-            )
-            
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # Extract title
-                title_tag = soup.find('meta', property='og:title')
-                if title_tag:
-                    result.title = title_tag.get('content')
-                
-                # Extract author
-                author_tag = soup.find('meta', attrs={'name': 'author'})
-                if author_tag:
-                    result.author = author_tag.get('content')
-                
-                # Extract content
-                content_div = soup.find('div', id='js_content')
-                if content_div:
-                    result.raw_content = content_div.get_text(separator='\n', strip=True)
-                    result.extraction_method = 'direct-fetch'
-                    result.success = True
-                    return result
-        except Exception:
-            pass
-        
-        # Fallback to Jina Reader
-        try:
-            jina_url = f"https://r.jina.ai/{url}"
-            response = requests.get(jina_url, timeout=15)
+            response = requests.get(f"https://r.jina.ai/{url}", timeout=15)
             if response.status_code == 200:
                 result.raw_content = response.text
                 result.extraction_method = 'jina-reader'
                 result.success = True
                 return result
         except Exception as e:
-            result.error = f"WeChat extraction failed: {e}"
+            result.error = f"Jina Reader failed: {e}"
             result.success = False
         
         return result
@@ -597,85 +392,49 @@ class GitHubExtractor:
     def extract(url: str) -> ExtractionResult:
         result = ExtractionResult(url=url, canonical_url=url, platform='github')
         
-        # Parse URL to determine type (repo, issue, discussion)
-        parsed = urllib.parse.urlparse(url)
-        path_parts = [p for p in parsed.path.split('/') if p]
+        # Parse GitHub URL to determine type
+        match = re.search(r'github\.com/([^/]+)/([^/]+)/?$', url)
+        if match:
+            # Repository page
+            owner, repo = match.groups()
+            try:
+                # Get README
+                readme_url = f"https://raw.githubusercontent.com/{owner}/{repo}/HEAD/README.md"
+                readme_response = requests.get(readme_url, timeout=10)
+                
+                # Get metadata
+                api_url = f"https://api.github.com/repos/{owner}/{repo}"
+                api_response = requests.get(api_url, timeout=10)
+                
+                content_parts = []
+                if api_response.status_code == 200:
+                    data = api_response.json()
+                    result.title = data.get('full_name')
+                    result.author = data.get('owner', {}).get('login')
+                    content_parts.append(f"# {data.get('full_name')}")
+                    content_parts.append(f"Description: {data.get('description', 'N/A')}")
+                    content_parts.append(f"Stars: {data.get('stargazers_count', 0)} | Language: {data.get('language', 'N/A')}")
+                
+                if readme_response.status_code == 200:
+                    content_parts.append(f"\n## README\n\n{readme_response.text[:3000]}")
+                
+                result.raw_content = "\n\n".join(content_parts)
+                result.extraction_method = 'github-api'
+                result.success = True
+                return result
+            except Exception as e:
+                result.error = f"GitHub API failed: {e}"
         
-        if len(path_parts) >= 2:
-            owner, repo = path_parts[0], path_parts[1]
-            
-            # If it's a repo page, get README
-            if len(path_parts) == 2 or (len(path_parts) == 3 and path_parts[2] in ['tree', 'blob']):
-                return GitHubExtractor._extract_repo(owner, repo, url, result)
-            
-            # If it's an issue/discussion, use Jina Reader
-            elif 'issues' in path_parts or 'discussions' in path_parts:
-                return GitHubExtractor._extract_issue(url, result)
-        
-        # Fallback to Jina Reader
+        # Fallback to Jina Reader for issues, discussions, etc.
         try:
-            jina_url = f"https://r.jina.ai/{url}"
-            response = requests.get(jina_url, timeout=15)
+            response = requests.get(f"https://r.jina.ai/{url}", timeout=15)
             if response.status_code == 200:
                 result.raw_content = response.text
                 result.extraction_method = 'jina-reader'
-                result.success = True
-        except Exception as e:
-            result.error = f"GitHub extraction failed: {e}"
-            result.success = False
-        
-        return result
-    
-    @staticmethod
-    def _extract_repo(owner: str, repo: str, url: str, result: ExtractionResult) -> ExtractionResult:
-        """Extract repo README and metadata"""
-        try:
-            # Get repo metadata
-            api_url = f"https://api.github.com/repos/{owner}/{repo}"
-            response = requests.get(api_url, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                result.title = f"{owner}/{repo}"
-                result.author = owner
-                result.date = data.get('created_at')
-                
-                content_parts = [
-                    f"# {owner}/{repo}",
-                    f"Description: {data.get('description', 'N/A')}",
-                    f"Stars: {data.get('stargazers_count', 0)}",
-                    f"Language: {data.get('language', 'N/A')}",
-                    f"Topics: {', '.join(data.get('topics', []))}",
-                ]
-                
-                # Try to get README
-                readme_url = f"https://raw.githubusercontent.com/{owner}/{repo}/HEAD/README.md"
-                readme_response = requests.get(readme_url, timeout=10)
-                if readme_response.status_code == 200:
-                    content_parts.append(f"\n--- README ---\n{readme_response.text}")
-                
-                result.raw_content = "\n\n".join(content_parts)
-                result.extraction_method = 'github-api+readme'
                 result.success = True
                 return result
         except Exception as e:
-            result.error = f"GitHub repo extraction failed: {e}"
-            result.success = False
-        
-        return result
-    
-    @staticmethod
-    def _extract_issue(url: str, result: ExtractionResult) -> ExtractionResult:
-        """Extract issue/discussion content"""
-        try:
-            jina_url = f"https://r.jina.ai/{url}"
-            response = requests.get(jina_url, timeout=15)
-            if response.status_code == 200:
-                result.raw_content = response.text
-                result.extraction_method = 'jina-reader'
-                result.success = True
-        except Exception as e:
-            result.error = f"GitHub issue extraction failed: {e}"
+            result.error = f"All methods failed: {e}"
             result.success = False
         
         return result
@@ -689,23 +448,20 @@ class GenericExtractor:
         result = ExtractionResult(url=url, canonical_url=url, platform='other')
         
         try:
-            jina_url = f"https://r.jina.ai/{url}"
-            response = requests.get(jina_url, timeout=15)
+            response = requests.get(f"https://r.jina.ai/{url}", timeout=15)
             if response.status_code == 200:
                 result.raw_content = response.text
                 result.extraction_method = 'jina-reader'
                 result.success = True
-            else:
-                result.error = f"Jina Reader returned status {response.status_code}"
-                result.success = False
+                return result
         except Exception as e:
-            result.error = f"Generic extraction failed: {e}"
+            result.error = f"Jina Reader failed: {e}"
             result.success = False
         
         return result
 
 
-class IntakeEngine:
+class ContentExtractor:
     """Main extraction orchestrator"""
     
     EXTRACTORS = {
@@ -713,27 +469,27 @@ class IntakeEngine:
         'youtube': YouTubeExtractor,
         'hn': HackerNewsExtractor,
         'reddit': RedditExtractor,
-        'xhs': XiaohongshuExtractor,
-        'wechat': WechatExtractor,
+        'xhs': XHSExtractor,
+        'wechat': WeChatExtractor,
         'github': GitHubExtractor,
-        'other': GenericExtractor,
     }
     
     @staticmethod
     def extract(url: str) -> ExtractionResult:
-        """Main entry point for content extraction"""
-        # Normalize URL
-        canonical_url = URLNormalizer.normalize(url)
+        """Main extraction entry point"""
+        # Step 1: Resolve short links
+        resolved_url = ShortLinkResolver.resolve(url)
         
-        # Detect platform
-        platform = PlatformDetector.detect(canonical_url)
+        # Step 2: Detect platform
+        platform = PlatformDetector.detect(resolved_url)
         
-        # Get appropriate extractor
-        extractor_class = IntakeEngine.EXTRACTORS.get(platform, GenericExtractor)
+        # Step 3: Extract with platform-specific extractor
+        extractor = ContentExtractor.EXTRACTORS.get(platform, GenericExtractor)
+        result = extractor.extract(resolved_url)
         
-        # Extract content
-        result = extractor_class.extract(url)
-        result.canonical_url = canonical_url
+        # Step 4: Normalize URL and compute hash
+        result.canonical_url = URLNormalizer.normalize(resolved_url)
+        result.url_hash = URLNormalizer.get_hash(result.canonical_url)
         
         return result
 
@@ -741,43 +497,50 @@ class IntakeEngine:
 def main():
     parser = argparse.ArgumentParser(description='Social Media Intake - Content Extraction Engine')
     parser.add_argument('url', help='URL to extract content from')
-    parser.add_argument('--dedup-check', action='store_true', help='Only output URL hash for dedup check')
-    parser.add_argument('--output-dir', default='./intake', help='Output directory for saved content')
-    parser.add_argument('--json', action='store_true', help='Output result as JSON')
+    parser.add_argument('--json', action='store_true', help='Output as JSON (default: human-readable)')
+    parser.add_argument('--dedup-check', action='store_true', help='Only output URL hash for deduplication')
     
     args = parser.parse_args()
     
     # Dedup check mode
     if args.dedup_check:
-        url_hash = URLNormalizer.get_hash(args.url)
+        resolved = ShortLinkResolver.resolve(args.url)
+        canonical = URLNormalizer.normalize(resolved)
+        url_hash = URLNormalizer.get_hash(canonical)
         print(url_hash)
         return 0
     
-    # Normal extraction mode
-    result = IntakeEngine.extract(args.url)
-    
-    if args.json:
-        print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
-    else:
-        # Human-readable output
-        print(f"Platform: {result.platform}")
-        print(f"Canonical URL: {result.canonical_url}")
-        print(f"Method: {result.extraction_method}")
-        print(f"Success: {result.success}")
+    # Full extraction
+    try:
+        result = ContentExtractor.extract(args.url)
         
-        if result.title:
-            print(f"Title: {result.title}")
-        if result.author:
-            print(f"Author: {result.author}")
-        if result.date:
-            print(f"Date: {result.date}")
-        if result.error:
-            print(f"Error: {result.error}")
+        if args.json:
+            print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+        else:
+            # Human-readable output
+            print(f"URL: {result.url}")
+            print(f"Platform: {result.platform}")
+            print(f"Method: {result.extraction_method}")
+            print(f"Hash: {result.url_hash}")
+            print(f"Success: {result.success}")
+            if result.title:
+                print(f"Title: {result.title}")
+            if result.author:
+                print(f"Author: {result.author}")
+            if result.date:
+                print(f"Date: {result.date}")
+            if result.error:
+                print(f"Error: {result.error}")
+            print(f"\n--- Content ({len(result.raw_content)} chars) ---")
+            print(result.raw_content[:500])
+            if len(result.raw_content) > 500:
+                print("... (truncated)")
         
-        print(f"\n--- Content ---")
-        print(result.raw_content[:500] + "..." if len(result.raw_content) > 500 else result.raw_content)
+        return 0 if result.success else 1
     
-    return 0 if result.success else 1
+    except Exception as e:
+        print(f"Fatal error: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == '__main__':
