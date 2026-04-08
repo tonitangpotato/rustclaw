@@ -634,8 +634,57 @@ impl Tool for WriteFileTool {
 
         tokio::fs::write(&path, content).await?;
 
+        // Post-write syntax validation for supported languages
+        let mut result_msg = format!("Wrote {} bytes to {}", content.len(), path.display());
+        
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            let check_cmd = match ext {
+                "rs" => {
+                    // Find Cargo.toml by walking up
+                    let mut cargo_dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+                    loop {
+                        if cargo_dir.join("Cargo.toml").exists() {
+                            break;
+                        }
+                        if !cargo_dir.pop() {
+                            break;
+                        }
+                    }
+                    if cargo_dir.join("Cargo.toml").exists() {
+                        Some(format!(
+                            "cd {} && cargo check --message-format=short 2>&1 | head -20",
+                            cargo_dir.display()
+                        ))
+                    } else {
+                        None
+                    }
+                }
+                "py" => Some(format!("python3 -c \"import ast; ast.parse(open('{}').read())\" 2>&1", path.display())),
+                "ts" | "tsx" => Some(format!("npx tsc --noEmit {} 2>&1 | head -10", path.display())),
+                "js" | "jsx" => Some(format!("node --check {} 2>&1", path.display())),
+                "json" => Some(format!("python3 -c \"import json; json.load(open('{}'))\" 2>&1", path.display())),
+                "yaml" | "yml" => Some(format!("python3 -c \"import yaml; yaml.safe_load(open('{}'))\" 2>&1", path.display())),
+                _ => None,
+            };
+            
+            if let Some(cmd) = check_cmd {
+                if let Ok(output) = tokio::process::Command::new("sh")
+                    .args(["-c", &cmd])
+                    .output()
+                    .await
+                {
+                    if !output.status.success() {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        let msg = if stderr.is_empty() { stdout } else { stderr };
+                        result_msg.push_str(&format!("\n\n⚠️ Post-write validation warning:\n{}", msg.trim()));
+                    }
+                }
+            }
+        }
+
         Ok(ToolResult {
-            output: format!("Wrote {} bytes to {}", content.len(), path.display()),
+            output: result_msg,
             is_error: false,
         })
     }

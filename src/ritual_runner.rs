@@ -2297,6 +2297,12 @@ fn find_standalone_absolute_paths(text: &str) -> Vec<String> {
     results
 }
 
+/// Check if a task description contains an explicit target project directory.
+/// Returns true if `extract_target_project_dir` would find a path.
+pub fn has_target_project_dir(context: &str) -> bool {
+    extract_target_project_dir(context).is_some()
+}
+
 /// Recursively count files in a directory.
 async fn count_files_recursive(dir: &Path) -> usize {
     let mut count = 0;

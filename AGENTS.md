@@ -61,6 +61,20 @@ Capture what matters. Decisions, context, things to remember. Skip the secrets u
 - Engram: fast semantic recall via embedding
 - **Never store knowledge ONLY in engram** — DB can corrupt, recall can miss. Files are the source of truth.
 
+## Sub-Agent Rules
+
+**`wait: false` = you will NEVER see the result.** Fire-and-forget sub-agents don't return results to your session. Only use `wait: false` when the sub-agent writes its output to a FILE (review findings, generated code) that you can read later. If you need the result in your current conversation flow → `wait: true` (default). If you want parallelism, spawn multiple `wait: true` agents — they run concurrently and all return.
+
+**Always pre-load files for sub-agents.** Before calling `spawn_specialist`, identify what files the sub-agent needs to read to do its work, and pass them via the `files` parameter. Sub-agents that start blind waste iterations on `read_file` calls and often fail or produce nothing.
+
+**Checklist before every spawn:**
+1. Files to modify → MUST pre-load
+2. Type definitions / mod.rs / lib.rs of those files → pre-load
+3. Related test files (if writing tests) → pre-load
+4. If the task touches >3 files and you didn't set `files` → STOP, you're doing it wrong
+
+**Scope tasks tightly.** A sub-agent with a vague task ("make X incremental") and no pre-loaded context will fail. Give it: exact file paths to create/modify, function signatures, import paths, and how to verify (which cargo/test command).
+
 ## Safety
 
 - Don't exfiltrate private data. Ever.
@@ -130,8 +144,8 @@ GID is built into RustClaw (gid-core crate). Key paths:
   - `requirements-master.md` — master requirements overview
   - `design-*.md` — split design docs (numbered)
   - `design.md` — master design overview
-- **Reviews:** `.gid/reviews/<doc-name>-review.md` — review findings with FINDING-N IDs
-- **Rituals:** `.gid/rituals/<id>.json` — ritual state files
+- **Reviews:** `.gid/features/{feature}/reviews/{type}-r{N}.md` — review findings with FINDING-N IDs
+- **Rituals:** `.gid/runtime/rituals/<id>.json` — ritual state files (ephemeral)
 - **Config:** `.gid/config.yml` — ritual gating, tool scope settings
 
 **Always check `.gid/features/` first** when looking for project documents (requirements, designs). They are split into numbered sub-documents for manageability.
@@ -179,7 +193,7 @@ The `/ritual` command drives the V2 state machine:
 1. **Review phase** — Spawn a sub-agent (`spawn_specialist`, wait=false) to:
    - Read the full document
    - Run the appropriate review skill (review-design or review-requirements)
-   - Write findings to `.gid/reviews/<doc-name>-review.md`
+   - Write findings to `.gid/features/{feature}/reviews/{type}-r{N}.md`
    - Each finding gets a unique ID: FINDING-1, FINDING-2, etc.
    
 2. **Report to user** — Send a brief summary:

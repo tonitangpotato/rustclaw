@@ -10,7 +10,7 @@
 //!   /autopilot status
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Autopilot configuration.
@@ -55,8 +55,9 @@ pub struct Task {
 pub struct AutopilotHandle {
     running: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
-    tasks_completed: Arc<std::sync::atomic::AtomicU32>,
-    total_turns: Arc<std::sync::atomic::AtomicU32>,
+    tasks_completed: Arc<AtomicU32>,
+    total_turns: Arc<AtomicU32>,
+    total_tokens: Arc<AtomicU64>,
 }
 
 impl AutopilotHandle {
@@ -87,6 +88,10 @@ impl AutopilotHandle {
             self.tasks_completed.load(Ordering::Relaxed),
             self.total_turns.load(Ordering::Relaxed),
         )
+    }
+
+    pub fn total_tokens(&self) -> u64 {
+        self.total_tokens.load(Ordering::Relaxed)
     }
 }
 
@@ -189,8 +194,9 @@ pub async fn run(
     let handle = AutopilotHandle {
         running: Arc::new(AtomicBool::new(true)),
         paused: Arc::new(AtomicBool::new(false)),
-        tasks_completed: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-        total_turns: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        tasks_completed: Arc::new(AtomicU32::new(0)),
+        total_turns: Arc::new(AtomicU32::new(0)),
+        total_tokens: Arc::new(AtomicU64::new(0)),
     };
     let handle_clone = handle.clone();
     let session_key = config.session_key.clone();
@@ -304,6 +310,14 @@ pub async fn run(
                     )
                 };
 
+                // Snapshot session tokens before the call
+                let tokens_before = runner
+                    .sessions()
+                    .get_session(&session_key)
+                    .await
+                    .map(|s| s.total_tokens)
+                    .unwrap_or(0);
+
                 match runner
                     .process_message(&session_key, &msg, None, None)
                     .await
@@ -312,6 +326,16 @@ pub async fn run(
                         task_turns += 1;
                         total_turns += 1;
                         handle_clone.total_turns.store(total_turns, Ordering::Relaxed);
+
+                        // Track token delta from this turn
+                        let tokens_after = runner
+                            .sessions()
+                            .get_session(&session_key)
+                            .await
+                            .map(|s| s.total_tokens)
+                            .unwrap_or(0);
+                        let delta = tokens_after.saturating_sub(tokens_before);
+                        handle_clone.total_tokens.fetch_add(delta, Ordering::Relaxed);
 
                         // Progress report every 10 turns
                         if task_turns % 10 == 0 {
@@ -370,9 +394,10 @@ pub async fn run(
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
 
+        let final_tokens = handle_clone.total_tokens.load(Ordering::Relaxed);
         notify(&format!(
-            "Finished: {} tasks completed, {} total turns",
-            completed_count, total_turns,
+            "Finished: {} tasks completed, {} total turns, {} tokens used",
+            completed_count, total_turns, final_tokens,
         ));
         Ok(completed_count)
     });

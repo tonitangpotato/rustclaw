@@ -901,6 +901,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "deunicode"
+version = "1.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "abd57806937c9cc163efc8ea3910e00a62e2aeb0b8119f1793a978088f8f6b04"
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1447,15 +1453,18 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "deunicode",
  "dirs 6.0.0",
  "futures",
  "glob",
+ "infomap-rs",
  "regex",
  "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.10.9",
  "tokio",
  "tracing",
  "tree-sitter",
@@ -1998,6 +2007,13 @@ dependencies = [
  "portable-atomic",
  "unicode-width",
  "web-time",
+]
+
+[[package]]
+name = "infomap-rs"
+version = "0.1.0"
+dependencies = [
+ "rand 0.8.5",
 ]
 
 [[package]]

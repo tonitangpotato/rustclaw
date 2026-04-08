@@ -31,6 +31,8 @@ struct TelegramBot {
     autopilot_handle: Arc<tokio::sync::Mutex<Option<crate::autopilot::AutopilotHandle>>>,
     /// Generation counter for autopilot resume timers (prevents stacking)
     autopilot_resume_gen: Arc<std::sync::atomic::AtomicU64>,
+    /// Pending ritual tasks waiting for project selection (chat_id → task description)
+    pending_ritual_tasks: Arc<tokio::sync::Mutex<std::collections::HashMap<i64, String>>>,
 }
 
 impl TelegramBot {
@@ -53,6 +55,7 @@ impl TelegramBot {
             ritual_event_registry: crate::ritual_runner::new_event_registry(),
             autopilot_handle: Arc::new(tokio::sync::Mutex::new(None)),
             autopilot_resume_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            pending_ritual_tasks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         })
     }
     
@@ -665,9 +668,28 @@ Choose a model:", current),
                 if arg == "status" {
                     if let Some(ref h) = *handle_guard {
                         if h.is_running() {
-                            self.send_message(chat_id, "🤖 Autopilot is running.", None).await?;
+                            let (tasks, turns) = h.stats();
+                            let tokens = h.total_tokens();
+                            self.send_message(
+                                chat_id,
+                                &format!(
+                                    "🤖 Autopilot is running{}.\n📊 {} tasks done, {} turns, {} tokens",
+                                    if h.is_paused() { " (paused)" } else { "" },
+                                    tasks, turns, tokens,
+                                ),
+                                None,
+                            ).await?;
                         } else {
-                            self.send_message(chat_id, "Autopilot finished.", None).await?;
+                            let (tasks, turns) = h.stats();
+                            let tokens = h.total_tokens();
+                            self.send_message(
+                                chat_id,
+                                &format!(
+                                    "Autopilot finished.\n📊 {} tasks done, {} turns, {} tokens",
+                                    tasks, turns, tokens,
+                                ),
+                                None,
+                            ).await?;
                             *handle_guard = None;
                         }
                     } else {
@@ -1217,46 +1239,52 @@ Choose a model:", current),
                     return Ok(());
                 }
 
-                // Start new ritual as an isolated sub-agent (independent session/context)
-                // This prevents ritual phases from polluting the main agent's context
-                self.send_message(chat_id, &format!("🚀 Starting ritual: \"{}\"", task), None).await?;
-                let bot = self.clone();
-                let task_string = task.to_string();
-                let notify_fn = self.make_notify_fn(chat_id);
-                let cancel_registry = self.ritual_cancel_registry.clone();
-                let event_registry = self.ritual_event_registry.clone();
-                tokio::spawn(async move {
-                    // Create ritual runner with its own LLM client (separate from main agent)
-                    let ritual_llm = match crate::llm::create_client(&bot.runner.config().llm) {
-                        Ok(c) => Arc::new(tokio::sync::RwLock::new(c)),
-                        Err(e) => {
-                            let _ = bot.send_message(chat_id, &format!("❌ Failed to create ritual LLM client: {}", e), None).await;
-                            return;
+                // Start new ritual — check if project path can be auto-detected
+                // If not, show project selector inline keyboard
+                let has_explicit_project = crate::ritual_runner::has_target_project_dir(task);
+                
+                if has_explicit_project {
+                    // Project path found in task text — start immediately
+                    self.send_message(chat_id, &format!("🚀 Starting ritual: \"{}\"", task), None).await?;
+                    self.spawn_ritual(chat_id, task.to_string(), self.runner.workspace_root().to_path_buf());
+                } else {
+                    // No project path — show project selector
+                    let projects = self.discover_projects();
+                    if projects.is_empty() {
+                        // No known projects, start with workspace root
+                        self.send_message(chat_id, &format!("🚀 Starting ritual: \"{}\"", task), None).await?;
+                        self.spawn_ritual(chat_id, task.to_string(), self.runner.workspace_root().to_path_buf());
+                    } else if projects.len() == 1 {
+                        // Only one project — use it directly
+                        let project_path = std::path::PathBuf::from(&projects[0].1);
+                        self.send_message(chat_id, &format!("🚀 Starting ritual in `{}`: \"{}\"", projects[0].0, task), None).await?;
+                        self.spawn_ritual(chat_id, task.to_string(), project_path);
+                    } else {
+                        // Multiple projects — show inline keyboard
+                        let mut pending = self.pending_ritual_tasks.lock().await;
+                        pending.insert(chat_id, task.to_string());
+                        
+                        let mut buttons = Vec::new();
+                        for (name, path) in &projects {
+                            buttons.push(serde_json::json!([{
+                                "text": format!("📁 {}", name),
+                                "callback_data": format!("__ritual_project:{}", path)
+                            }]));
                         }
-                    };
-                    let runner = crate::ritual_runner::RitualRunner::with_registries(
-                        bot.runner.workspace_root().to_path_buf(),
-                        ritual_llm,
-                        notify_fn,
-                        cancel_registry,
-                        event_registry,
-                    ).with_agent_runner(bot.runner.clone());
-                    match runner.start(task_string).await {
-                        Ok(state) => {
-                            if let Err(e) = runner.save_state(&state) {
-                                tracing::error!("Failed to save final ritual state: {}", e);
-                            }
-                            tracing::info!("Ritual finished in {} phase", state.phase.display_name());
-                        }
-                        Err(e) => {
-                            let _ = bot.send_message(
-                                chat_id,
-                                &format!("❌ Ritual failed: {}", e),
-                                None,
-                            ).await;
-                        }
+                        
+                        let payload = serde_json::json!({
+                            "chat_id": chat_id,
+                            "text": format!("📂 Select project for ritual:\n\"{}\"", task),
+                            "reply_markup": { "inline_keyboard": buttons }
+                        });
+                        
+                        self.client
+                            .post(self.api_url("sendMessage"))
+                            .json(&payload)
+                            .send()
+                            .await?;
                     }
-                });
+                }
             }
         }
         Ok(())
@@ -1308,6 +1336,91 @@ Choose a model:", current),
             self.ritual_cancel_registry.clone(),
             self.ritual_event_registry.clone(),
         ).with_agent_runner(self.runner.clone())
+    }
+
+    /// Discover known projects that have `.gid/` directories (indicating GID-managed projects).
+    /// Returns (display_name, absolute_path) pairs.
+    fn discover_projects(&self) -> Vec<(String, String)> {
+        let mut projects = Vec::new();
+        
+        // Check known project directories
+        let search_dirs = [
+            self.runner.workspace_root().to_path_buf(), // RustClaw itself
+        ];
+        
+        // Also check clawd/projects/ if it exists
+        let clawd_projects = std::path::PathBuf::from("/Users/potato/clawd/projects");
+        
+        // Add the workspace root if it has .gid/
+        for dir in &search_dirs {
+            if dir.join(".gid").is_dir() {
+                let name = dir.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| dir.to_string_lossy().to_string());
+                projects.push((name, dir.to_string_lossy().to_string()));
+            }
+        }
+        
+        // Scan clawd/projects/ for sub-projects
+        if clawd_projects.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&clawd_projects) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() && path.join(".gid").is_dir() {
+                        let name = path.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        let abs = path.to_string_lossy().to_string();
+                        // Avoid duplicates
+                        if !projects.iter().any(|(_, p)| p == &abs) {
+                            projects.push((name, abs));
+                        }
+                    }
+                }
+            }
+        }
+        
+        projects.sort_by(|a, b| a.0.cmp(&b.0));
+        projects
+    }
+
+    /// Start a ritual with a specific project root, spawning it in a background task.
+    fn spawn_ritual(&self, chat_id: i64, task: String, project_root: std::path::PathBuf) {
+        let bot = self.clone();
+        let notify_fn = self.make_notify_fn(chat_id);
+        let cancel_registry = self.ritual_cancel_registry.clone();
+        let event_registry = self.ritual_event_registry.clone();
+        tokio::spawn(async move {
+            let ritual_llm = match crate::llm::create_client(&bot.runner.config().llm) {
+                Ok(c) => Arc::new(tokio::sync::RwLock::new(c)),
+                Err(e) => {
+                    let _ = bot.send_message(chat_id, &format!("❌ Failed to create ritual LLM client: {}", e), None).await;
+                    return;
+                }
+            };
+            let runner = crate::ritual_runner::RitualRunner::with_registries(
+                project_root,
+                ritual_llm,
+                notify_fn,
+                cancel_registry,
+                event_registry,
+            ).with_agent_runner(bot.runner.clone());
+            match runner.start(task).await {
+                Ok(state) => {
+                    if let Err(e) = runner.save_state(&state) {
+                        tracing::error!("Failed to save final ritual state: {}", e);
+                    }
+                    tracing::info!("Ritual finished in {} phase", state.phase.display_name());
+                }
+                Err(e) => {
+                    let _ = bot.send_message(
+                        chat_id,
+                        &format!("❌ Ritual failed: {}", e),
+                        None,
+                    ).await;
+                }
+            }
+        });
     }
 
     /// Build a ritual event from user free-text based on the ritual's current phase.
@@ -1498,6 +1611,41 @@ Choose a model:", current),
                     }))
                     .send()
                     .await;
+            }
+            return Ok(());
+        }
+
+        // Handle ritual project selection callbacks
+        if let Some(project_path) = data.strip_prefix("__ritual_project:") {
+            // Retrieve the pending ritual task for this chat
+            let task = {
+                let mut pending = self.pending_ritual_tasks.lock().await;
+                pending.remove(&chat_id)
+            };
+            
+            if let Some(task) = task {
+                let project_name = std::path::Path::new(project_path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| project_path.to_string());
+                self.answer_callback_query(callback_id, Some(&format!("Selected: {}", project_name))).await?;
+                
+                // Update the message to show selection
+                if let Some(msg_id) = message_id {
+                    let _ = self.client
+                        .post(self.api_url("editMessageText"))
+                        .json(&serde_json::json!({
+                            "chat_id": chat_id,
+                            "message_id": msg_id,
+                            "text": format!("🚀 Starting ritual in `{}`:\n\"{}\"", project_name, task),
+                        }))
+                        .send()
+                        .await;
+                }
+                
+                self.spawn_ritual(chat_id, task, std::path::PathBuf::from(project_path));
+            } else {
+                self.answer_callback_query(callback_id, Some("⚠️ No pending ritual task")).await?;
             }
             return Ok(());
         }
