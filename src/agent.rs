@@ -54,7 +54,6 @@ pub struct SubAgent {
 pub struct AgentType {
     pub name: &'static str,
     pub system_prompt: &'static str,
-    pub tools: &'static [&'static str],
     pub default_model: &'static str,
     pub default_max_iterations: u32,
 }
@@ -80,7 +79,6 @@ impl AgentType {
             - NO writing or editing files\n\
             - NO user conversations\n\
             - NO reading SOUL.md, AGENTS.md, USER.md, TOOLS.md, MEMORY.md",
-        tools: &["read_file", "list_dir", "search_files", "exec"],
         default_model: "claude-sonnet-4-5-20250929",
         default_max_iterations: 20,
     };
@@ -109,7 +107,6 @@ impl AgentType {
             - NO user conversations\n\
             - NO external messages unless explicitly tasked\n\
             - NO reading SOUL.md, AGENTS.md, USER.md, TOOLS.md, MEMORY.md",
-        tools: &["read_file", "write_file", "edit_file", "list_dir", "search_files", "exec"],
         default_model: "claude-opus-4-6",
         default_max_iterations: 40,
     };
@@ -125,18 +122,17 @@ impl AgentType {
             4. Write findings to review files — use write_file or edit_file to save your review.\n\
             5. Be specific — cite line numbers, quote the problematic text, suggest concrete fixes.\n\
             6. Use FINDING-N format for each finding (e.g., FINDING-1, FINDING-2) so they can be selectively applied.\n\
-            7. Don't initiate — no proactive actions, no side quests.\n\
-            8. Be ephemeral — you may be terminated after completion.\n\
-            9. Recover from truncated output — re-read in smaller chunks if output was compacted.\n\
+            7. Use exec for verification: cargo check, grep, git log — ground your review in facts.\n\
+            8. Don't initiate — no proactive actions, no side quests.\n\
+            9. Be ephemeral — you may be terminated after completion.\n\
+            10. Recover from truncated output — re-read in smaller chunks if output was compacted.\n\
             \n\
             ## Output\n\
             Summary of findings count and severity. Key issues first.\n\
             \n\
             ## What You DON'T Do\n\
-            - NO running shell commands\n\
             - NO user conversations\n\
             - NO reading SOUL.md, AGENTS.md, USER.md, TOOLS.md, MEMORY.md",
-        tools: &["read_file", "write_file", "edit_file", "list_dir", "search_files"],
         default_model: "claude-sonnet-4-5-20250929",
         default_max_iterations: 20,
     };
@@ -150,19 +146,19 @@ impl AgentType {
             2. Read selectively — use list_dir and search_files to understand structure, then read key files.\n\
             3. Think before writing — outline your design approach before producing documents.\n\
             4. Be concrete — include file paths, function signatures, data structures in your designs.\n\
-            5. Don't initiate — no proactive actions, no side quests.\n\
-            6. Be ephemeral — you may be terminated after completion.\n\
-            7. Recover from truncated output — re-read in smaller chunks if output was compacted.\n\
+            5. Write design docs using write_file or edit_file.\n\
+            6. Use exec for verification: cargo check, grep, git log — confirm assumptions against the actual codebase.\n\
+            7. Don't initiate — no proactive actions, no side quests.\n\
+            8. Be ephemeral — you may be terminated after completion.\n\
+            9. Recover from truncated output — re-read in smaller chunks if output was compacted.\n\
             \n\
             ## Output\n\
             Structured design document with clear sections. Include trade-offs and alternatives considered.\n\
             \n\
             ## What You DON'T Do\n\
-            - NO writing code or modifying source files\n\
-            - NO running shell commands\n\
+            - NO modifying source code files (only design/planning docs)\n\
             - NO user conversations\n\
             - NO reading SOUL.md, AGENTS.md, USER.md, TOOLS.md, MEMORY.md",
-        tools: &["read_file", "list_dir", "search_files"],
         default_model: "claude-sonnet-4-5-20250929",
         default_max_iterations: 15,
     };
@@ -1509,8 +1505,11 @@ CRITICAL CONSTRAINTS:
             guard.clone_boxed()
         };
 
-        // Create typed tool registry + workspace (pre-execution, may fail)
-        let tools = ToolRegistry::for_agent_type(agent_type.tools, &workspace_dir);
+        // Give all sub-agents the full tool set. Safety is enforced via system prompt
+        // guidance (e.g., "you are a reviewer — focus on review"), not by removing tools.
+        // The old `for_agent_type()` whitelist caused failures: REVIEWER couldn't exec,
+        // PLANNER couldn't write files, etc. Sub-agents need tools to do their job.
+        let tools = ToolRegistry::for_subagent(&workspace_dir);
         let workspace = match Workspace::load(&workspace_dir) {
             Ok(w) => w,
             Err(e) => return fail(format!("Failed to load workspace '{}': {}", workspace_dir, e)),

@@ -129,27 +129,7 @@ impl ToolRegistry {
         registry
     }
     
-    /// Register tools for a typed agent. Only registers tools named in the list.
-    /// Tool names: "read_file", "write_file", "edit_file", "list_dir", "search_files", "exec", "web_fetch", "tts", "stt"
-    pub fn for_agent_type(tools: &[&str], workspace_root: &str) -> Self {
-        let mut registry = Self::new();
-        registry.workspace_root = Some(std::path::PathBuf::from(workspace_root));
-        for tool_name in tools {
-            match *tool_name {
-                "exec" => registry.register(Box::new(ExecTool)),
-                "read_file" => registry.register(Box::new(ReadFileTool::new(workspace_root))),
-                "write_file" => registry.register(Box::new(WriteFileTool::new(workspace_root))),
-                "edit_file" => registry.register(Box::new(EditFileTool::new(workspace_root))),
-                "list_dir" => registry.register(Box::new(ListDirTool::new(workspace_root))),
-                "search_files" => registry.register(Box::new(SearchFilesTool::new(workspace_root))),
-                "web_fetch" => registry.register(Box::new(WebFetchTool)),
-                "tts" => registry.register(Box::new(TtsTool)),
-                "stt" => registry.register(Box::new(SttTool)),
-                other => tracing::warn!("Unknown tool name in agent type: {}", other),
-            }
-        }
-        registry
-    }
+
 
     /// Register core tools for sub-agents with shared memory (engram).
     /// Sub-agents share the main memory manager for cross-agent memory access.
