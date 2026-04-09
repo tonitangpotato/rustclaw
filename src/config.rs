@@ -491,6 +491,12 @@ pub struct MemoryConfig {
     #[serde(default = "default_recall_limit")]
     pub recall_limit: usize,
 
+    /// Number of recent memories to load on session start (0 = disabled).
+    /// When a new session starts (no prior messages), the most recent N memories
+    /// are injected into the system prompt as context continuity.
+    #[serde(default = "default_recent_memory_limit")]
+    pub recent_memory_limit: usize,
+
     /// Optional drives for importance boosting (EmotionalBus integration).
     /// Memories aligned with these drives get automatic importance boosts.
     #[serde(default)]
@@ -522,6 +528,10 @@ fn default_true() -> bool {
 
 fn default_recall_limit() -> usize {
     5
+}
+
+fn default_recent_memory_limit() -> usize {
+    50
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

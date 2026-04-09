@@ -818,6 +818,32 @@ CRITICAL CONSTRAINTS:
         // 1. Get or create session
         let mut session = self.sessions.get_or_create(session_key).await;
 
+        // 1b. On fresh session, load recent memories for continuity
+        let recent_memory_context = if session.messages.is_empty() {
+            let limit = self.config.memory.recent_memory_limit;
+            if limit > 0 {
+                match self.memory.recall_recent(limit) {
+                    Ok(memories) if !memories.is_empty() => {
+                        tracing::info!(
+                            "Fresh session '{}': loaded {} recent memories for continuity",
+                            session_key,
+                            memories.len()
+                        );
+                        crate::memory::MemoryManager::format_recent_for_prompt(&memories)
+                    }
+                    Ok(_) => String::new(),
+                    Err(e) => {
+                        tracing::warn!("Failed to load recent memories (non-fatal): {}", e);
+                        String::new()
+                    }
+                }
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
         // 2. Scan inbound for secrets (SafetyLayer)
         if let Some(warning) = self.safety.scan_inbound_for_secrets(user_message) {
             tracing::warn!("Inbound secret detected from user {:?}", user_id);
@@ -875,6 +901,10 @@ CRITICAL CONSTRAINTS:
             // memory_context already contains ⚠️ header from engram_hooks
             system_prompt.push_str("\n");
             system_prompt.push_str(&memory_context);
+        }
+        if !recent_memory_context.is_empty() {
+            system_prompt.push_str("\n");
+            system_prompt.push_str(&recent_memory_context);
         }
 
         // 5. Add user message to session

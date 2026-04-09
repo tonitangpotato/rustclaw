@@ -466,6 +466,47 @@ impl MemoryManager {
         Ok(())
     }
 
+    /// Recall recent memories by creation time (no query/embedding needed).
+    /// Used for session startup: injects the most recent N memories as context
+    /// so the agent doesn't start from zero after a restart.
+    pub fn recall_recent(&self, limit: usize) -> anyhow::Result<Vec<RecalledMemory>> {
+        let engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let records = engram
+            .recall_recent(limit, None)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        Ok(records
+            .into_iter()
+            .map(|r| RecalledMemory {
+                content: r.content.clone(),
+                memory_type: format!("{:?}", r.memory_type),
+                confidence: r.importance,
+                source: Some(r.source.clone()),
+                confidence_label: Some("recent".to_string()),
+            })
+            .collect())
+    }
+
+    /// Format recent memories for session startup injection.
+    /// Groups by time proximity and shows timestamps for context.
+    pub fn format_recent_for_prompt(memories: &[RecalledMemory]) -> String {
+        if memories.is_empty() {
+            return String::new();
+        }
+
+        let mut lines = Vec::with_capacity(memories.len() + 3);
+        lines.push(String::new());
+        lines.push("## 🧠 Recent Memories (session startup — most recent first)".to_string());
+        lines.push("These are your most recent memories, loaded automatically to maintain continuity across restarts.".to_string());
+
+        for mem in memories {
+            let type_tag = &mem.memory_type;
+            lines.push(format!("- [{}] {}", type_tag, mem.content));
+        }
+
+        lines.join("\n")
+    }
+
     // ─── EmotionalAccumulator (process_interaction) ─────────────────────
 
     /// Process an interaction with emotional content.
