@@ -19,12 +19,20 @@ Don't ask permission. Just do it.
 
 ## Memory
 
-You wake up fresh each session. These files are your continuity:
-- **Daily notes:** `memory/YYYY-MM-DD.md` (create `memory/` if needed) — raw logs of what happened
-- **Long-term:** `MEMORY.md` — your curated memories, like a human's long-term memory
-- **Self-graph:** `.gid/graph.yml` — structured index of who you are, what you can do, what you've learned
+You wake up fresh each session. These are your continuity layers:
+- **engram** — primary memory, auto-stored + auto-recalled. `recall_recent` loads last 50 memories at session startup.
+- **memory/YYYY-MM-DD.md** — daily log, human-readable backup. Loaded into context (today + yesterday).
+- **MEMORY.md** — curated long-term memory, loaded in main session only.
+- **tasks/** — task tracking (separate from memory)
+- **.gid/graph.yml** — project structure + code intelligence
 
-Capture what matters. Decisions, context, things to remember. Skip the secrets unless asked to keep them.
+### Where Things Go
+- **Everything significant** → engram (auto-stored by framework) + `memory/YYYY-MM-DD.md` (manual backup)
+- **Curated knowledge** → `MEMORY.md` (periodic review)
+- **Task/project progress** → `tasks/YYYY-MM-DD.md` or GID graph
+- **Ideas** → `IDEAS.md`
+
+**engram is the primary memory source.** Daily logs are backup in case engram has issues (still in testing). Write to both.
 
 ### 🧠 MEMORY.md - Your Long-Term Memory
 - **ONLY load in main session** (direct chats with your human)
@@ -51,7 +59,7 @@ Capture what matters. Decisions, context, things to remember. Skip the secrets u
 ### 🔍 Active Recall — USE YOUR MEMORY!
 - **Before answering** questions about history, preferences, project details, past decisions, or learnings: **run `engram recall` FIRST**. Don't rely only on what's already in context.
 - **⚠️ 当用户说"你做了X"/"你刚刚X了"/"上个session你X了" → 先 recall 再回答。** 用户的陈述比你的空白 session 更可信。永远不要凭当前 session 状态去否定用户关于过去的说法。Session 重启 = 记忆清零，这是你的缺陷，不是用户搞错了。
-- MEMORY.md is a slim safety net, NOT a complete record. The full history lives in daily logs and Engram.
+- MEMORY.md is a slim safety net, NOT a complete record. The full history lives in daily logs (memory/) and Engram.
 - **If you're unsure about something we discussed before → search for it, don't guess.**
 
 ### 📝 Double-Write Rule — ALWAYS KEEP FILE BACKUPS!
@@ -74,6 +82,30 @@ Capture what matters. Decisions, context, things to remember. Skip the secrets u
 4. If the task touches >3 files and you didn't set `files` → STOP, you're doing it wrong
 
 **Scope tasks tightly.** A sub-agent with a vague task ("make X incremental") and no pre-loaded context will fail. Give it: exact file paths to create/modify, function signatures, import paths, and how to verify (which cargo/test command).
+
+### Sub-Agent Task Fitness — What to Delegate vs Do Yourself
+
+**DO delegate to sub-agents:**
+- Writing a single well-defined file (input: spec/design section, output: source file)
+- Applying a set of specific changes (input: findings list + target file, output: edited file)
+- Running tests, builds, verification commands
+- Simple research (fetch a URL, search codebase for pattern)
+
+**Do NOT delegate to sub-agents:**
+- **Design reviews** — needs full doc + checklist + cross-reference = too much context
+- **Architecture decisions** — needs global project understanding
+- **Multi-file refactors** — sub-agent context can't hold enough files
+- **Tasks where the skill injection alone is >3k tokens** — leaves too little budget for actual work
+
+**Why:** Sub-agents have the same context window but start with skill injection + pre-loaded files + task description already consuming 10-15k tokens. Review skills (27+ checks) consume most of the budget before any work begins. The main agent already has project context loaded — doing it directly is 3x faster and doesn't waste tokens on failed delegations.
+
+**The economic rule:** If a failed sub-agent costs ~50k tokens and you'll end up doing it yourself anyway, just do it yourself. Only delegate when P(success) > 80%.
+
+### Cross-Workspace Sub-Agent Rule
+When the target code is NOT in the sub-agent's default workspace:
+1. Set `workspace` parameter to the target project root, OR
+2. Pre-load ALL target files via `files` (not just specs — include implementation files)
+3. Never rely on sub-agent's own search to find cross-workspace files — it will find wrong files (e.g., old scaffolds instead of real implementation)
 
 ## Safety
 
@@ -219,6 +251,22 @@ engram --db /Users/potato/rustclaw/engram-memory.db recall "query" --limit 5
 ## Heartbeat
 
 RustClaw has built-in heartbeat checking via HEARTBEAT.md. Check that file for current tasks.
+
+### Heartbeat Logging Rules
+
+**Heartbeat writes to `memory/YYYY-MM-DD.md`** (detailed, not in context). Write as much detail as needed.
+
+**Heartbeat scope (what to check):**
+- Test suites pass/fail (both projects)
+- Disk space (alert if <15GB)
+- New git commits since last check
+- Process health (is daemon running)
+- Engram consolidation (run if needed)
+
+**NOT heartbeat scope:**
+- Task plan status / project progress
+- Full engram stats
+- Meta-graph inventory
 
 ## Make It Yours
 

@@ -1071,3 +1071,61 @@ File 解决"结构化交接"，但语义级的快速查询需要 engram：
 
 ### Status: 💡 New
 ---
+
+## IDEA-20260407-02: Building potato's AI Community — 个人品牌 + 社区建设
+- **Date**: 2026-04-07
+- **Source**: potato Telegram message
+- **Category**: community/marketing/personal-brand
+- **Tags**: #community #impact #personal-brand #open-source #AI #nousresearch #engineer-union #visibility
+- **Effort**: Medium-High (ongoing)
+- **Domain**: 🌍 community + 💰 product
+
+### The Idea
+围绕 potato 的 AI 项目生态（RustClaw、GID、Engram、xinfluencer 等）建立自己的开发者/AI 社区。不只是推广产品，而是建立一个有观点、有立场的社区——讨论 AI agent 开发、AI 替代人类的伦理/现实、工程师的未来。参考 Nous Research 等成功案例的社区运营模式。
+
+### 参考案例分析
+
+**Nous Research 模式：**
+- 核心：开源 LLM 模型（Hermes 系列）→ 126 个 HF 模型，425K+ 下载
+- 社区载体：Discord（~50K members）+ Twitter + HuggingFace
+- 18 人团队，但社区贡献者远超团队规模
+- 关键策略：**先做出好东西 → 开源 → 社区自然聚集**
+- 技术报告作为内容锚点（Hermes 3/4 Technical Reports）
+- 没有花哨的 marketing，纯靠技术实力和开源贡献
+
+**其他成功模式：**
+- **Hugging Face**: 平台 + 社区一体化，让每个人都能参与
+- **LangChain**: 教程 + 文档驱动社区，解决实际问题
+- **r/LocalLLaMA**: 草根社区，用户自组织，低门槛参与
+- **EleutherAI**: 纯志愿者研究组织，论文 + 开源模型
+
+### potato 的独特定位
+
+potato 不是在做模型，而是在做 **AI agent 基础设施**。这个定位的社区策略不同：
+
+1. **核心叙事**："用 AI 赋能个体开发者，而不是替代他们"
+   - RustClaw = 单人也能有一个 AI 团队
+   - GID = AI 自主写代码的工作流
+   - Engram = AI 记忆系统
+   - 这个叙事天然连接到 Engineer Union 和 Block 裁员的话题
+
+2. **社区价值主张**：
+   - 不是又一个 "AI 工具推荐" 群
+   - 而是："我们这些做 AI 工具的人 + 用 AI 工具的人，如何让个体开发者变得更强"
+   - 讨论：AI 替代 vs 增强、工程师的未来、小团队如何用 AI 和大公司竞争
+
+### Why This Matters
+- **所有产品都需要分发渠道** — 没有社区/影响力，再好的产品也没人知道
+- **复合效应** — 影响力 → 用户 → 反馈 → 更好的产品 → 更大影响力
+- **财务自由路径** — 社区是获客成本最低的渠道
+- **护城河** — 代码可以被抄，社区不行
+
+### Connections
+- **IDEA-20260402-03**: Engineer Union 平台 — 可作为社区中的一个核心话题/功能
+- **IDEA-20260402-04**: Marketing 自动化 Pipeline — 社区是 pipeline 的 destination
+- **IDEA-20260330-01**: Social media intake — 社区内容的输入源
+- **xinfluencer**: 自动化社交媒体互动 — 社区增长的工具
+- **AgentVerse**: AI agent 社交平台 — 可能是社区的最终载体
+
+### Status: 💡 New
+---
