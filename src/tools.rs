@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::RwLock;
+
 use engramai::MemoryType;
 use serde::Serialize;
 use serde_json::Value;
@@ -15,6 +15,7 @@ use serde_json::Value;
 use gid_core::{
     Graph, Node, Edge, NodeStatus,
     parser::{load_graph as gid_load_graph, save_graph as gid_save_graph},
+    storage::{load_graph_auto, save_graph_auto, StorageBackend, detect_backend},
     query::QueryEngine,
     validator::Validator,
     visual::{render, VisualFormat},
@@ -27,7 +28,13 @@ use gid_core::{
     complexity,
     working_mem,
     ignore,
+    infer::{self, InferConfig, InferLevel, OutputFormat as InferOutputFormat, merge_into_graph, format_output as infer_format_output},
     ritual::scope::{default_scope_for_phase, ToolScope},
+    harness::{
+        assemble_task_context,
+        ContextQuery, ContextFilters, OutputFormat as ContextOutputFormat,
+        assemble_context, format_context,
+    },
 };
 use crate::config::AgentConfig;
 use crate::memory::MemoryManager;
@@ -105,6 +112,7 @@ impl ToolRegistry {
         registry.register(Box::new(WebFetchTool));
         registry.register(Box::new(EditFileTool::new(workspace_root)));
         registry.register(Box::new(SearchFilesTool::new(workspace_root)));
+        registry.register(Box::new(RestartSelfTool));
         // Web search (requires Brave API key)
         if let Some(key) = &config.web_search.brave_api_key {
             registry.register(Box::new(WebSearchTool::new(key.clone())));
@@ -182,56 +190,54 @@ impl ToolRegistry {
     }
 
     /// Register GID (task graph) tools.
+    /// All GID tools receive a shared GraphManager that supports cross-project access
+    /// via the optional `"project"` parameter.
     pub fn with_gid(mut self, graph_path: &str) -> Self {
-        let graph = Arc::new(tokio::sync::RwLock::new(
-            gid_load_graph(std::path::Path::new(graph_path)).unwrap_or_default()
-        ));
-        let path = Arc::new(graph_path.to_string());
+        let mgr = Arc::new(GraphManager::new(graph_path));
 
         // Original 5 tools (backward compatible)
-        self.register(Box::new(GidTasksTool::new(graph.clone())));
-        self.register(Box::new(GidAddTaskTool::new(graph.clone(), path.clone())));
-        self.register(Box::new(GidUpdateTaskTool::new(graph.clone(), path.clone())));
-        self.register(Box::new(GidAddEdgeTool::new(graph.clone(), path.clone())));
-        self.register(Box::new(GidReadTool::new(graph.clone())));
+        self.register(Box::new(GidTasksTool { mgr: mgr.clone() }));
+        self.register(Box::new(GidAddTaskTool { mgr: mgr.clone() }));
+        self.register(Box::new(GidUpdateTaskTool { mgr: mgr.clone() }));
+        self.register(Box::new(GidAddEdgeTool { mgr: mgr.clone() }));
+        self.register(Box::new(GidReadTool { mgr: mgr.clone() }));
 
         // New gid-core tools
-        self.register(Box::new(GidCompleteTool::new(graph.clone(), path.clone())));
-        self.register(Box::new(GidQueryImpactTool::new(graph.clone())));
-        self.register(Box::new(GidQueryDepsTool::new(graph.clone())));
-        self.register(Box::new(GidValidateTool::new(graph.clone())));
-        self.register(Box::new(GidAdviseTool::new(graph.clone())));
-        self.register(Box::new(GidVisualTool::new(graph.clone())));
-        self.register(Box::new(GidHistoryTool::new(path.clone())));
-        self.register(Box::new(GidRefactorTool::new(graph.clone(), path.clone())));
+        self.register(Box::new(GidCompleteTool { mgr: mgr.clone() }));
+        self.register(Box::new(GidQueryImpactTool { mgr: mgr.clone() }));
+        self.register(Box::new(GidQueryDepsTool { mgr: mgr.clone() }));
+        self.register(Box::new(GidValidateTool { mgr: mgr.clone() }));
+        self.register(Box::new(GidAdviseTool { mgr: mgr.clone() }));
+        self.register(Box::new(GidVisualTool { mgr: mgr.clone() }));
+        self.register(Box::new(GidHistoryTool { mgr: mgr.clone() }));
+        self.register(Box::new(GidRefactorTool { mgr: mgr.clone() }));
 
         // Code graph extraction tools
-        self.register(Box::new(GidExtractTool::new(graph.clone(), path.clone())));
-        self.register(Box::new(GidSchemaTool::new(graph.clone())));
+        self.register(Box::new(GidExtractTool { mgr: mgr.clone() }));
+        self.register(Box::new(GidSchemaTool { mgr: mgr.clone() }));
         // Design, planning, ritual, and execution tools
-        // path is graph_path (e.g. ".gid/graph.yml"), we need the .gid/ directory
-        let gid_pathbuf = PathBuf::from(path.as_str())
-            .parent()
-            .unwrap_or(std::path::Path::new(".gid"))
-            .to_path_buf();
-        self.register(Box::new(GidDesignTool::new(graph.clone(), gid_pathbuf.clone())));
-        self.register(Box::new(GidPlanTool::new(graph.clone())));
+        self.register(Box::new(GidDesignTool { mgr: mgr.clone() }));
+        self.register(Box::new(GidPlanTool { mgr: mgr.clone() }));
         // V2 ritual: single tool for LLM to trigger ritual programmatically
         self.register(Box::new(StartRitualTool::new(
-            self.workspace_root.clone().unwrap_or_else(|| gid_pathbuf.parent().unwrap_or(std::path::Path::new(".")).to_path_buf()),
+            self.workspace_root.clone().unwrap_or_else(|| mgr.workspace_gid_dir.parent().unwrap_or(std::path::Path::new(".")).to_path_buf()),
             self.llm_client.clone(),
             self.ritual_notify.clone(),
         )));
 
-        self.register(Box::new(GidStatsTool::new(gid_pathbuf.clone())));
+        self.register(Box::new(GidStatsTool { mgr: mgr.clone() }));
 
         // Additional gid-core tools (semantify, complexity, working memory, ignore, scope)
-        // GidExecuteTool removed — functionality merged into GidPlanTool with detail=true
-        self.register(Box::new(GidSemantifyTool::new(graph.clone(), path.clone())));
+        self.register(Box::new(GidSemantifyTool { mgr: mgr.clone() }));
         self.register(Box::new(GidComplexityTool));
         self.register(Box::new(GidWorkingMemoryTool));
-        self.register(Box::new(GidIgnoreTool::new(gid_pathbuf.clone())));
+        self.register(Box::new(GidIgnoreTool { mgr: mgr.clone() }));
         self.register(Box::new(GidScopeTool));
+        self.register(Box::new(GidInferTool { mgr: mgr.clone() }));
+
+        // Context assembly tools
+        self.register(Box::new(GidContextTool { mgr: mgr.clone() }));
+        self.register(Box::new(GidTaskContextTool { mgr: mgr.clone() }));
 
         self
     }
@@ -451,6 +457,53 @@ impl Tool for ExecTool {
                 result
             },
             is_error: !output.status.success(),
+        })
+    }
+}
+
+// ─── Restart Self Tool ──────────────────────────────────────
+
+/// Safely restart this RustClaw process via clean exit.
+/// launchd KeepAlive will respawn automatically.
+pub struct RestartSelfTool;
+
+#[async_trait]
+impl Tool for RestartSelfTool {
+    fn name(&self) -> &str {
+        "restart_self"
+    }
+
+    fn description(&self) -> &str {
+        "Safely restart this RustClaw instance. The process exits cleanly and launchd respawns it automatically. Use this instead of kill/launchctl commands."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "Why the restart is needed (logged before exit)"
+                }
+            },
+            "required": ["reason"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let reason = input["reason"].as_str().unwrap_or("no reason given");
+        tracing::info!("Restart requested: {}", reason);
+
+        // Spawn a delayed exit so the tool result can be sent back first
+        tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            tracing::info!("Exiting for restart (KeepAlive will respawn)");
+            std::process::exit(0);
+        });
+
+        Ok(ToolResult {
+            output: format!("Restarting in 2 seconds (reason: {}). I'll be back shortly.", reason),
+            is_error: false,
         })
     }
 }
@@ -2578,6 +2631,111 @@ impl Tool for SpawnSpecialistTool {
 type SharedGraph = Arc<tokio::sync::RwLock<Graph>>;
 type SharedPath = Arc<String>;
 
+/// Manages workspace graph and lazily-loaded external project graphs.
+/// All GID tools receive an `Arc<GraphManager>` instead of direct `(SharedGraph, SharedPath)`.
+/// When a tool's input includes a `"project"` parameter (path to a project directory),
+/// it resolves to that project's graph; otherwise it uses the workspace default.
+struct GraphManager {
+    /// Workspace graph (default).
+    workspace_graph: SharedGraph,
+    /// Path to workspace graph.yml (e.g. ".gid/graph.yml").
+    workspace_path: SharedPath,
+    /// Path to workspace .gid/ directory.
+    workspace_gid_dir: PathBuf,
+    /// Cache of loaded external project graphs: project_root → (graph, path).
+    cache: tokio::sync::RwLock<std::collections::HashMap<PathBuf, (SharedGraph, SharedPath)>>,
+}
+
+impl GraphManager {
+    fn new(graph_path: &str) -> Self {
+        let path = std::path::Path::new(graph_path);
+        let gid_dir = path
+            .parent()
+            .unwrap_or(std::path::Path::new(".gid"))
+            .to_path_buf();
+        let backend = detect_backend(&gid_dir);
+        let (graph, effective_path) = match backend {
+            StorageBackend::Sqlite => {
+                let g = load_graph_auto(&gid_dir, Some(StorageBackend::Sqlite))
+                    .unwrap_or_default();
+                let p = gid_dir.join("graph.db").to_string_lossy().to_string();
+                (g, p)
+            }
+            _ => {
+                let g = gid_load_graph(path).unwrap_or_default();
+                (g, graph_path.to_string())
+            }
+        };
+        let graph = Arc::new(tokio::sync::RwLock::new(graph));
+        Self {
+            workspace_graph: graph,
+            workspace_path: Arc::new(effective_path),
+            workspace_gid_dir: gid_dir,
+            cache: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Resolve a (graph, path) pair from tool input.
+    /// If input contains `"project"`: load/cache that project's graph.
+    /// Otherwise: return the workspace graph.
+    async fn resolve(&self, input: &Value) -> anyhow::Result<(SharedGraph, SharedPath)> {
+        match input.get("project").and_then(|v| v.as_str()) {
+            None => Ok((self.workspace_graph.clone(), self.workspace_path.clone())),
+            Some(project_dir) => self.resolve_external(project_dir).await,
+        }
+    }
+
+    /// Resolve the .gid/ directory path from tool input.
+    async fn resolve_gid_dir(&self, input: &Value) -> anyhow::Result<PathBuf> {
+        match input.get("project").and_then(|v| v.as_str()) {
+            None => Ok(self.workspace_gid_dir.clone()),
+            Some(project_dir) => {
+                let project_path = std::path::Path::new(project_dir);
+                let root = find_project_root(project_path)
+                    .unwrap_or_else(|| project_path.to_path_buf());
+                Ok(root.join(".gid"))
+            }
+        }
+    }
+
+    /// Load (or return cached) an external project's graph.
+    async fn resolve_external(&self, project_dir: &str) -> anyhow::Result<(SharedGraph, SharedPath)> {
+        let project_path = std::path::Path::new(project_dir);
+        let root = find_project_root(project_path)
+            .unwrap_or_else(|| project_path.to_path_buf());
+        let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
+
+        // Check cache first.
+        {
+            let cache = self.cache.read().await;
+            if let Some(entry) = cache.get(&canonical) {
+                return Ok(entry.clone());
+            }
+        }
+
+        // Load from disk.
+        let gid_dir = root.join(".gid");
+        std::fs::create_dir_all(&gid_dir)?;
+        let backend = detect_backend(&gid_dir);
+        let graph_file = match backend {
+            StorageBackend::Sqlite => gid_dir.join("graph.db"),
+            _ => gid_dir.join("graph.yml"),
+        };
+        let graph = load_graph_auto(&gid_dir, Some(backend)).unwrap_or_default();
+        let shared_graph = Arc::new(tokio::sync::RwLock::new(graph));
+        let shared_path = Arc::new(graph_file.to_string_lossy().to_string());
+
+        // Cache it.
+        let entry = (shared_graph.clone(), shared_path.clone());
+        {
+            let mut cache = self.cache.write().await;
+            cache.insert(canonical, entry);
+        }
+
+        Ok((shared_graph, shared_path))
+    }
+}
+
 /// Helper: save graph to disk after mutation.
 /// Format a sub-agent duration in human-readable form.
 fn format_subagent_duration(elapsed: std::time::Duration) -> String {
@@ -2592,7 +2750,22 @@ fn format_subagent_duration(elapsed: std::time::Duration) -> String {
 }
 
 fn save_gid_graph(graph: &Graph, path: &str) -> anyhow::Result<()> {
-    gid_save_graph(graph, std::path::Path::new(path))
+    let path = std::path::Path::new(path);
+    if path.extension().and_then(|e| e.to_str()) == Some("db") {
+        save_graph_auto(graph, path.parent().unwrap_or(std::path::Path::new(".")), Some(StorageBackend::Sqlite))
+            .map_err(|e| anyhow::anyhow!("{}", e))
+    } else {
+        gid_save_graph(graph, path)
+    }
+}
+
+/// Common JSON Schema property for cross-project access.
+/// Add this to any GID tool's `input_schema` properties to enable the `project` parameter.
+fn gid_project_property() -> (String, Value) {
+    ("project".to_string(), serde_json::json!({
+        "type": "string",
+        "description": "Path to an external project directory. If provided, operates on that project's graph instead of the workspace graph."
+    }))
 }
 
 /// Parse status string to NodeStatus.
@@ -2610,13 +2783,7 @@ fn parse_status(s: &str) -> Result<NodeStatus, String> {
 // ── gid_tasks: list tasks with optional status filter ──
 
 struct GidTasksTool {
-    graph: SharedGraph,
-}
-
-impl GidTasksTool {
-    fn new(graph: SharedGraph) -> Self {
-        Self { graph }
-    }
+    mgr: Arc<GraphManager>,
 }
 
 #[async_trait]
@@ -2630,6 +2797,7 @@ impl Tool for GidTasksTool {
     }
 
     fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -2641,13 +2809,15 @@ impl Tool for GidTasksTool {
                 "node_type": {
                     "type": "string",
                     "description": "Filter by node type. Default shows project nodes only (task/feature/component/legacy). Use 'code' for code nodes, 'all' for everything."
-                }
+                },
+                proj_key: proj_val,
             }
         })
     }
 
     async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
-        let graph = self.graph.read().await;
+        let (graph_arc, _path) = self.mgr.resolve(&input).await?;
+        let graph = graph_arc.read().await;
         let status_filter = input["status"].as_str();
 
         let summary = graph.summary();
@@ -2705,14 +2875,7 @@ impl Tool for GidTasksTool {
 // ── gid_add_task: add a new task ──
 
 struct GidAddTaskTool {
-    graph: SharedGraph,
-    path: SharedPath,
-}
-
-impl GidAddTaskTool {
-    fn new(graph: SharedGraph, path: SharedPath) -> Self {
-        Self { graph, path }
-    }
+    mgr: Arc<GraphManager>,
 }
 
 #[async_trait]
@@ -2726,6 +2889,7 @@ impl Tool for GidAddTaskTool {
     }
 
     fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -2740,7 +2904,8 @@ impl Tool for GidAddTaskTool {
                 "source": { "type": "string", "description": "Source origin: manual, code_extract, design, etc. (optional)" },
                 "node_kind": { "type": "string", "description": "Specific classification within node_type (optional)" },
                 "file_path": { "type": "string", "description": "Associated file path for code nodes (optional)" },
-                "metadata": { "type": "object", "description": "Additional metadata key-value pairs (optional)" }
+                "metadata": { "type": "object", "description": "Additional metadata key-value pairs (optional)" },
+                proj_key: proj_val,
             },
             "required": ["id", "title"]
         })
@@ -2773,7 +2938,8 @@ impl Tool for GidAddTaskTool {
             for (k, v) in meta { node.metadata.insert(k.clone(), v.clone()); }
         }
 
-        let mut graph = self.graph.write().await;
+        let (graph_arc, path) = self.mgr.resolve(&input).await?;
+        let mut graph = graph_arc.write().await;
         graph.add_node(node);
 
         // Add dependency edges
@@ -2785,7 +2951,7 @@ impl Tool for GidAddTaskTool {
             }
         }
 
-        save_gid_graph(&graph, &self.path)?;
+        save_gid_graph(&graph, &path)?;
 
         Ok(ToolResult {
             output: format!("✅ Task '{}' added: {}", id, title),
@@ -2797,14 +2963,7 @@ impl Tool for GidAddTaskTool {
 // ── gid_update_task: update task status/fields ──
 
 struct GidUpdateTaskTool {
-    graph: SharedGraph,
-    path: SharedPath,
-}
-
-impl GidUpdateTaskTool {
-    fn new(graph: SharedGraph, path: SharedPath) -> Self {
-        Self { graph, path }
-    }
+    mgr: Arc<GraphManager>,
 }
 
 #[async_trait]
@@ -2818,6 +2977,7 @@ impl Tool for GidUpdateTaskTool {
     }
 
     fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -2829,7 +2989,8 @@ impl Tool for GidUpdateTaskTool {
                 "metadata": { "type": "object", "description": "Additional metadata key-value pairs — shallow merge (optional)" },
                 "priority": { "type": "integer", "description": "Priority 0-255 (0=highest, optional)" },
                 "node_type": { "type": "string", "description": "Node type (optional)" },
-                "node_kind": { "type": "string", "description": "Node kind (optional)" }
+                "node_kind": { "type": "string", "description": "Node kind (optional)" },
+                proj_key: proj_val,
             },
             "required": ["id"]
         })
@@ -2838,7 +2999,8 @@ impl Tool for GidUpdateTaskTool {
     async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
         let id = input["id"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'id'"))?;
 
-        let mut graph = self.graph.write().await;
+        let (graph_arc, path) = self.mgr.resolve(&input).await?;
+        let mut graph = graph_arc.write().await;
 
         let node = graph.get_node_mut(id)
             .ok_or_else(|| anyhow::anyhow!("Task '{}' not found", id))?;
@@ -2887,7 +3049,7 @@ impl Tool for GidUpdateTaskTool {
             return Ok(ToolResult { output: format!("No changes for task '{}'", id), is_error: false });
         }
 
-        save_gid_graph(&graph, &self.path)?;
+        save_gid_graph(&graph, &path)?;
 
         Ok(ToolResult {
             output: format!("✅ Task '{}' updated: {}", id, changes.join(", ")),
@@ -2899,14 +3061,7 @@ impl Tool for GidUpdateTaskTool {
 // ── gid_add_edge: add a dependency edge ──
 
 struct GidAddEdgeTool {
-    graph: SharedGraph,
-    path: SharedPath,
-}
-
-impl GidAddEdgeTool {
-    fn new(graph: SharedGraph, path: SharedPath) -> Self {
-        Self { graph, path }
-    }
+    mgr: Arc<GraphManager>,
 }
 
 #[async_trait]
@@ -2920,12 +3075,14 @@ impl Tool for GidAddEdgeTool {
     }
 
     fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
         serde_json::json!({
             "type": "object",
             "properties": {
                 "from": { "type": "string", "description": "Source task ID" },
                 "to": { "type": "string", "description": "Target task ID" },
-                "relation": { "type": "string", "description": "Relationship type (default: depends_on). Common values: depends_on, blocks, subtask_of, relates_to, implements, contains, tests_for, calls, imports, defined_in, belongs_to, maps_to, overrides, inherits" }
+                "relation": { "type": "string", "description": "Relationship type (default: depends_on). Common values: depends_on, blocks, subtask_of, relates_to, implements, contains, tests_for, calls, imports, defined_in, belongs_to, maps_to, overrides, inherits" },
+                proj_key: proj_val,
             },
             "required": ["from", "to"]
         })
@@ -2936,9 +3093,10 @@ impl Tool for GidAddEdgeTool {
         let to = input["to"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'to'"))?;
         let relation = input["relation"].as_str().unwrap_or("depends_on");
 
-        let mut graph = self.graph.write().await;
+        let (graph_arc, path) = self.mgr.resolve(&input).await?;
+        let mut graph = graph_arc.write().await;
         graph.add_edge(Edge::new(from, to, relation));
-        save_gid_graph(&graph, &self.path)?;
+        save_gid_graph(&graph, &path)?;
 
         Ok(ToolResult {
             output: format!("✅ Edge added: {} —[{}]→ {}", from, relation, to),
@@ -2988,13 +3146,7 @@ fn filter_graph_by_layer(graph: &Graph, layer: Option<&str>) -> Graph {
 // ── gid_read: read full graph as YAML ──
 
 struct GidReadTool {
-    graph: SharedGraph,
-}
-
-impl GidReadTool {
-    fn new(graph: SharedGraph) -> Self {
-        Self { graph }
-    }
+    mgr: Arc<GraphManager>,
 }
 
 #[async_trait]
@@ -3008,6 +3160,7 @@ impl Tool for GidReadTool {
     }
 
     fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -3015,13 +3168,15 @@ impl Tool for GidReadTool {
                     "type": "string",
                     "enum": ["project", "code", "all"],
                     "description": "Filter by layer: project (tasks/features), code (extracted code nodes), all (default: all)"
-                }
+                },
+                proj_key: proj_val,
             }
         })
     }
 
     async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
-        let graph = self.graph.read().await;
+        let (graph_arc, _path) = self.mgr.resolve(&input).await?;
+        let graph = graph_arc.read().await;
         let layer = input["layer"].as_str();
         let filtered = filter_graph_by_layer(&graph, layer);
         let yaml = serde_yaml::to_string(&filtered)?;
@@ -3032,14 +3187,7 @@ impl Tool for GidReadTool {
 // ── gid_complete: mark task done and show unblocked tasks ──
 
 struct GidCompleteTool {
-    graph: SharedGraph,
-    path: SharedPath,
-}
-
-impl GidCompleteTool {
-    fn new(graph: SharedGraph, path: SharedPath) -> Self {
-        Self { graph, path }
-    }
+    mgr: Arc<GraphManager>,
 }
 
 #[async_trait]
@@ -3053,10 +3201,12 @@ impl Tool for GidCompleteTool {
     }
 
     fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
         serde_json::json!({
             "type": "object",
             "properties": {
-                "id": { "type": "string", "description": "Task ID to mark as done" }
+                "id": { "type": "string", "description": "Task ID to mark as done" },
+                proj_key: proj_val,
             },
             "required": ["id"]
         })
@@ -3065,7 +3215,8 @@ impl Tool for GidCompleteTool {
     async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
         let id = input["id"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'id'"))?;
 
-        let mut graph = self.graph.write().await;
+        let (graph_arc, path) = self.mgr.resolve(&input).await?;
+        let mut graph = graph_arc.write().await;
 
         // Check task exists
         if graph.get_node(id).is_none() {
@@ -3086,7 +3237,7 @@ impl Tool for GidCompleteTool {
             .map(|n| n.id.as_str())
             .collect();
 
-        save_gid_graph(&graph, &self.path)?;
+        save_gid_graph(&graph, &path)?;
 
         let mut output = format!("✅ Task '{}' marked done.", id);
         if !newly_unblocked.is_empty() {
@@ -3100,13 +3251,7 @@ impl Tool for GidCompleteTool {
 // ── gid_query_impact: impact analysis ──
 
 struct GidQueryImpactTool {
-    graph: SharedGraph,
-}
-
-impl GidQueryImpactTool {
-    fn new(graph: SharedGraph) -> Self {
-        Self { graph }
-    }
+    mgr: Arc<GraphManager>,
 }
 
 #[async_trait]
@@ -3120,11 +3265,13 @@ impl Tool for GidQueryImpactTool {
     }
 
     fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
         serde_json::json!({
             "type": "object",
             "properties": {
                 "id": { "type": "string", "description": "Task ID to analyze" },
-                "relations": { "type": "array", "items": { "type": "string" }, "description": "Filter traversal by edge relations (e.g. depends_on, blocks, tests_for, implements, calls, imports). Default: all relations." }
+                "relations": { "type": "array", "items": { "type": "string" }, "description": "Filter traversal by edge relations (e.g. depends_on, blocks, tests_for, implements, calls, imports). Default: all relations." },
+                proj_key: proj_val,
             },
             "required": ["id"]
         })
@@ -3133,7 +3280,8 @@ impl Tool for GidQueryImpactTool {
     async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
         let id = input["id"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'id'"))?;
 
-        let graph = self.graph.read().await;
+        let (graph_arc, _path) = self.mgr.resolve(&input).await?;
+        let graph = graph_arc.read().await;
         let engine = QueryEngine::new(&graph);
 
         let relations_input: Option<Vec<String>> = input["relations"].as_array()
@@ -3164,13 +3312,7 @@ impl Tool for GidQueryImpactTool {
 // ── gid_query_deps: dependency query ──
 
 struct GidQueryDepsTool {
-    graph: SharedGraph,
-}
-
-impl GidQueryDepsTool {
-    fn new(graph: SharedGraph) -> Self {
-        Self { graph }
-    }
+    mgr: Arc<GraphManager>,
 }
 
 #[async_trait]
@@ -3184,12 +3326,14 @@ impl Tool for GidQueryDepsTool {
     }
 
     fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
         serde_json::json!({
             "type": "object",
             "properties": {
                 "id": { "type": "string", "description": "Task ID to query" },
                 "transitive": { "type": "boolean", "description": "Include transitive dependencies (default: true)" },
-                "relations": { "type": "array", "items": { "type": "string" }, "description": "Filter traversal by edge relations (e.g. depends_on, blocks, tests_for, implements, calls, imports). Default: all relations." }
+                "relations": { "type": "array", "items": { "type": "string" }, "description": "Filter traversal by edge relations (e.g. depends_on, blocks, tests_for, implements, calls, imports). Default: all relations." },
+                proj_key: proj_val,
             },
             "required": ["id"]
         })
@@ -3199,7 +3343,8 @@ impl Tool for GidQueryDepsTool {
         let id = input["id"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'id'"))?;
         let transitive = input["transitive"].as_bool().unwrap_or(true);
 
-        let graph = self.graph.read().await;
+        let (graph_arc, _path) = self.mgr.resolve(&input).await?;
+        let graph = graph_arc.read().await;
         let engine = QueryEngine::new(&graph);
 
         let relations_input: Option<Vec<String>> = input["relations"].as_array()
@@ -3235,13 +3380,7 @@ impl Tool for GidQueryDepsTool {
 // ── gid_validate: graph validation ──
 
 struct GidValidateTool {
-    graph: SharedGraph,
-}
-
-impl GidValidateTool {
-    fn new(graph: SharedGraph) -> Self {
-        Self { graph }
-    }
+    mgr: Arc<GraphManager>,
 }
 
 #[async_trait]
@@ -3255,14 +3394,18 @@ impl Tool for GidValidateTool {
     }
 
     fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
         serde_json::json!({
             "type": "object",
-            "properties": {}
+            "properties": {
+                proj_key: proj_val,
+            }
         })
     }
 
-    async fn execute(&self, _input: Value) -> anyhow::Result<ToolResult> {
-        let graph = self.graph.read().await;
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let (graph_arc, _path) = self.mgr.resolve(&input).await?;
+        let graph = graph_arc.read().await;
         let validator = Validator::new(&graph);
         let result = validator.validate();
 
@@ -3276,13 +3419,7 @@ impl Tool for GidValidateTool {
 // ── gid_advise: graph analysis and suggestions ──
 
 struct GidAdviseTool {
-    graph: SharedGraph,
-}
-
-impl GidAdviseTool {
-    fn new(graph: SharedGraph) -> Self {
-        Self { graph }
-    }
+    mgr: Arc<GraphManager>,
 }
 
 #[async_trait]
@@ -3296,14 +3433,18 @@ impl Tool for GidAdviseTool {
     }
 
     fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
         serde_json::json!({
             "type": "object",
-            "properties": {}
+            "properties": {
+                proj_key: proj_val,
+            }
         })
     }
 
-    async fn execute(&self, _input: Value) -> anyhow::Result<ToolResult> {
-        let graph = self.graph.read().await;
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let (graph_arc, _path) = self.mgr.resolve(&input).await?;
+        let graph = graph_arc.read().await;
         let result = advise_analyze(&graph);
 
         if result.items.is_empty() {
@@ -3325,13 +3466,7 @@ impl Tool for GidAdviseTool {
 // ── gid_visual: render graph as ASCII ──
 
 struct GidVisualTool {
-    graph: SharedGraph,
-}
-
-impl GidVisualTool {
-    fn new(graph: SharedGraph) -> Self {
-        Self { graph }
-    }
+    mgr: Arc<GraphManager>,
 }
 
 #[async_trait]
@@ -3345,6 +3480,7 @@ impl Tool for GidVisualTool {
     }
 
     fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -3357,7 +3493,8 @@ impl Tool for GidVisualTool {
                     "type": "string",
                     "enum": ["project", "code", "all"],
                     "description": "Filter by layer: project (default — tasks/features only), code (extracted code nodes), all (everything)"
-                }
+                },
+                proj_key: proj_val,
             }
         })
     }
@@ -3369,7 +3506,8 @@ impl Tool for GidVisualTool {
             Err(e) => return Ok(ToolResult { output: e.to_string(), is_error: true }),
         };
 
-        let graph = self.graph.read().await;
+        let (graph_arc, _path) = self.mgr.resolve(&input).await?;
+        let graph = graph_arc.read().await;
         let layer = input["layer"].as_str().or(Some("project")); // default: project
         let filtered = filter_graph_by_layer(&graph, layer);
         let output = render(&filtered, format);
@@ -3381,13 +3519,7 @@ impl Tool for GidVisualTool {
 // ── gid_history: list/save snapshots ──
 
 struct GidHistoryTool {
-    path: SharedPath,
-}
-
-impl GidHistoryTool {
-    fn new(path: SharedPath) -> Self {
-        Self { path }
-    }
+    mgr: Arc<GraphManager>,
 }
 
 #[async_trait]
@@ -3401,6 +3533,7 @@ impl Tool for GidHistoryTool {
     }
 
     fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -3412,14 +3545,16 @@ impl Tool for GidHistoryTool {
                 "message": {
                     "type": "string",
                     "description": "Commit message when saving (optional)"
-                }
+                },
+                proj_key: proj_val,
             }
         })
     }
 
     async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
         let action = input["action"].as_str().unwrap_or("list");
-        let graph_path = std::path::Path::new(self.path.as_str());
+        let (_graph_arc, path) = self.mgr.resolve(&input).await?;
+        let graph_path = std::path::Path::new(path.as_str());
         let history_dir = graph_path.parent()
             .unwrap_or(std::path::Path::new("."))
             .join(".gid-history");
@@ -3466,14 +3601,7 @@ impl Tool for GidHistoryTool {
 // ── gid_refactor: rename/merge/split nodes ──
 
 struct GidRefactorTool {
-    graph: SharedGraph,
-    path: SharedPath,
-}
-
-impl GidRefactorTool {
-    fn new(graph: SharedGraph, path: SharedPath) -> Self {
-        Self { graph, path }
-    }
+    mgr: Arc<GraphManager>,
 }
 
 #[async_trait]
@@ -3487,6 +3615,7 @@ impl Tool for GidRefactorTool {
     }
 
     fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -3499,7 +3628,8 @@ impl Tool for GidRefactorTool {
                 "new_id": { "type": "string", "description": "New ID (for rename)" },
                 "new_title": { "type": "string", "description": "New title (for update_title)" },
                 "merge_into": { "type": "string", "description": "Target node to merge into (for merge)" },
-                "preview": { "type": "boolean", "description": "Preview only, don't apply (default: false)" }
+                "preview": { "type": "boolean", "description": "Preview only, don't apply (default: false)" },
+                proj_key: proj_val,
             },
             "required": ["operation", "id"]
         })
@@ -3510,7 +3640,8 @@ impl Tool for GidRefactorTool {
         let id = input["id"].as_str().ok_or_else(|| anyhow::anyhow!("Missing 'id'"))?;
         let preview = input["preview"].as_bool().unwrap_or(false);
 
-        let mut graph = self.graph.write().await;
+        let (graph_arc, path) = self.mgr.resolve(&input).await?;
+        let mut graph = graph_arc.write().await;
 
         match operation {
             "rename" => {
@@ -3530,7 +3661,7 @@ impl Tool for GidRefactorTool {
                         is_error: true,
                     });
                 }
-                save_gid_graph(&graph, &self.path)?;
+                save_gid_graph(&graph, &path)?;
 
                 Ok(ToolResult {
                     output: format!("✅ Renamed '{}' → '{}'", id, new_id),
@@ -3556,7 +3687,7 @@ impl Tool for GidRefactorTool {
                         is_error: true,
                     });
                 }
-                save_gid_graph(&graph, &self.path)?;
+                save_gid_graph(&graph, &path)?;
 
                 Ok(ToolResult {
                     output: format!("✅ Merged '{}' + '{}' → '{}'", id, target, new_id),
@@ -3573,7 +3704,7 @@ impl Tool for GidRefactorTool {
                         is_error: true,
                     });
                 }
-                save_gid_graph(&graph, &self.path)?;
+                save_gid_graph(&graph, &path)?;
 
                 Ok(ToolResult {
                     output: format!("✅ Updated title for '{}': {}", id, new_title),
@@ -3586,7 +3717,7 @@ impl Tool for GidRefactorTool {
 
                 match graph.remove_node(id) {
                     Some(_removed) => {
-                        save_gid_graph(&graph, &self.path)?;
+                        save_gid_graph(&graph, &path)?;
                         Ok(ToolResult {
                             output: format!("✅ Deleted node '{}' and {} associated edges", id, edge_count),
                             is_error: false,
@@ -3611,14 +3742,7 @@ impl Tool for GidRefactorTool {
 // ── gid_extract: extract code graph and merge with task graph ──
 
 struct GidExtractTool {
-    graph: SharedGraph,
-    path: SharedPath,
-}
-
-impl GidExtractTool {
-    fn new(graph: SharedGraph, path: SharedPath) -> Self {
-        Self { graph, path }
-    }
+    mgr: Arc<GraphManager>,
 }
 
 #[async_trait]
@@ -3632,13 +3756,15 @@ impl Tool for GidExtractTool {
     }
 
     fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
         serde_json::json!({
             "type": "object",
             "properties": {
                 "dir": {
                     "type": "string",
                     "description": "Directory to analyze (default: workspace src/)"
-                }
+                },
+                proj_key: proj_val,
             }
         })
     }
@@ -3657,7 +3783,8 @@ impl Tool for GidExtractTool {
         // Determine if this is an external directory (outside workspace).
         // If so, write to a separate .gid/graph.yml in that project instead of
         // merging into the workspace graph.
-        let workspace_graph_path = std::path::Path::new(self.path.as_str());
+        let (graph_arc, path) = self.mgr.resolve(&input).await?;
+        let workspace_graph_path = std::path::Path::new(path.as_str());
         let workspace_dir = workspace_graph_path
             .parent() // .gid/
             .and_then(|p| p.parent()) // workspace root
@@ -3672,14 +3799,18 @@ impl Tool for GidExtractTool {
         let code_edges = code_graph.edges.len();
 
         if is_external {
-            // External project: find project root and write to its own .gid/graph.yml
+            // External project: find project root and write to its own .gid/ (auto-detect backend)
             let project_root = find_project_root(dir_path).unwrap_or_else(|| dir_path.to_path_buf());
             let gid_dir = project_root.join(".gid");
             std::fs::create_dir_all(&gid_dir)?;
-            let target_graph_path = gid_dir.join("graph.yml");
+            let ext_backend = detect_backend(&gid_dir);
+            let target_graph_path = match ext_backend {
+                StorageBackend::Sqlite => gid_dir.join("graph.db"),
+                _ => gid_dir.join("graph.yml"),
+            };
 
             // Load existing graph from that project (or empty)
-            let existing = gid_load_graph(&target_graph_path).unwrap_or_default();
+            let existing = load_graph_auto(&gid_dir, Some(ext_backend)).unwrap_or_default();
             let existing_nodes = existing.nodes.len();
             let existing_edges = existing.edges.len();
 
@@ -3691,7 +3822,8 @@ impl Tool for GidExtractTool {
             let total_edges = unified.edges.len();
 
             // Save to the external project's .gid/
-            gid_save_graph(&unified, &target_graph_path)?;
+            save_graph_auto(&unified, &gid_dir, Some(ext_backend))
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             Ok(ToolResult {
                 output: format!(
@@ -3705,13 +3837,13 @@ impl Tool for GidExtractTool {
             })
         } else {
             // Internal: merge into workspace graph (original behavior)
-            let mut graph = self.graph.write().await;
+            let mut graph = graph_arc.write().await;
             let existing_nodes = graph.nodes.len();
             let existing_edges = graph.edges.len();
 
             let (code_nodes_vec, code_edges_vec) = codegraph_to_graph_nodes(&code_graph, workspace_dir);
             merge_code_layer(&mut graph, code_nodes_vec, code_edges_vec);
-            save_gid_graph(&graph, &self.path)?;
+            save_gid_graph(&graph, &path)?;
 
             let new_nodes = graph.nodes.len() - existing_nodes;
             let new_edges = graph.edges.len() - existing_edges;
@@ -3819,13 +3951,7 @@ fn load_code_graph_for_tool(dir: &std::path::Path) -> CodeGraph {
 // ── gid_schema: get code schema (classes, functions, signatures) ──
 
 struct GidSchemaTool {
-    graph: SharedGraph,
-}
-
-impl GidSchemaTool {
-    fn new(graph: SharedGraph) -> Self {
-        Self { graph }
-    }
+    mgr: Arc<GraphManager>,
 }
 
 #[async_trait]
@@ -3839,13 +3965,15 @@ impl Tool for GidSchemaTool {
     }
 
     fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
         serde_json::json!({
             "type": "object",
             "properties": {
                 "dir": {
                     "type": "string",
                     "description": "Directory to analyze (required)"
-                }
+                },
+                proj_key: proj_val,
             },
             "required": ["dir"]
         })
@@ -3864,7 +3992,8 @@ impl Tool for GidSchemaTool {
         }
 
         // Try graph.yml code nodes first
-        let graph = self.graph.read().await;
+        let (graph_arc, _path) = self.mgr.resolve(&input).await?;
+        let graph = graph_arc.read().await;
         let code_nodes = graph.code_nodes();
         if !code_nodes.is_empty() {
             // Build schema from graph code nodes
@@ -3912,14 +4041,7 @@ impl Tool for GidSchemaTool {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 struct GidDesignTool {
-    graph: Arc<RwLock<Graph>>,
-    gid_path: PathBuf,
-}
-
-impl GidDesignTool {
-    fn new(graph: Arc<RwLock<Graph>>, gid_path: PathBuf) -> Self {
-        Self { graph, gid_path }
-    }
+    mgr: Arc<GraphManager>,
 }
 
 #[async_trait]
@@ -3933,6 +4055,7 @@ impl Tool for GidDesignTool {
     }
 
     fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -3947,7 +4070,8 @@ impl Tool for GidDesignTool {
                 "context": {
                     "type": "string",
                     "description": "Additional context for design prompt generation"
-                }
+                },
+                proj_key: proj_val,
             }
         })
     }
@@ -3963,7 +4087,8 @@ impl Tool for GidDesignTool {
             let parsed: serde_yaml::Value = serde_yaml::from_str(yaml_content)
                 .map_err(|e| anyhow::anyhow!("Failed to parse YAML: {}", e))?;
 
-            let mut graph = self.graph.write().await;
+            let (graph_arc, path) = self.mgr.resolve(&input).await?;
+            let mut graph = graph_arc.write().await;
             let mut added_nodes = 0;
             let mut added_edges = 0;
 
@@ -3990,7 +4115,7 @@ impl Tool for GidDesignTool {
             }
 
             // Save
-            gid_save_graph(&graph, &self.gid_path)?;
+            save_gid_graph(&graph, &path)?;
 
             Ok(ToolResult {
                 output: format!("Merged: {} nodes added, {} edges added", added_nodes, added_edges),
@@ -3998,7 +4123,8 @@ impl Tool for GidDesignTool {
             })
         } else {
             // Generate design prompt
-            let graph = self.graph.read().await;
+            let (graph_arc, _path) = self.mgr.resolve(&input).await?;
+            let graph = graph_arc.read().await;
             let context = input["context"].as_str().unwrap_or("");
 
             let node_count = graph.nodes.len();
@@ -4037,13 +4163,7 @@ impl Tool for GidDesignTool {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 struct GidPlanTool {
-    graph: Arc<RwLock<Graph>>,
-}
-
-impl GidPlanTool {
-    fn new(graph: Arc<RwLock<Graph>>) -> Self {
-        Self { graph }
-    }
+    mgr: Arc<GraphManager>,
 }
 
 #[async_trait]
@@ -4057,10 +4177,12 @@ impl Tool for GidPlanTool {
     }
 
     fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
         serde_json::json!({
             "type": "object",
             "properties": {
-                "detail": { "type": "boolean", "description": "If true, include critical path analysis and estimated turns (default: false)" }
+                "detail": { "type": "boolean", "description": "If true, include critical path analysis and estimated turns (default: false)" },
+                proj_key: proj_val,
             }
         })
     }
@@ -4069,7 +4191,8 @@ impl Tool for GidPlanTool {
         use gid_core::harness::create_plan;
 
         let detail = input["detail"].as_bool().unwrap_or(false);
-        let graph = self.graph.read().await;
+        let (graph_arc, _path) = self.mgr.resolve(&input).await?;
+        let graph = graph_arc.read().await;
         let plan = create_plan(&graph)?;
 
         let mut output = format!("Execution Plan: {} tasks in {} layers\n\n", plan.total_tasks, plan.layers.len());
@@ -4105,13 +4228,7 @@ impl Tool for GidPlanTool {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 struct GidStatsTool {
-    gid_path: PathBuf,
-}
-
-impl GidStatsTool {
-    fn new(gid_path: PathBuf) -> Self {
-        Self { gid_path }
-    }
+    mgr: Arc<GraphManager>,
 }
 
 #[async_trait]
@@ -4125,16 +4242,20 @@ impl Tool for GidStatsTool {
     }
 
     fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
         serde_json::json!({
             "type": "object",
-            "properties": {}
+            "properties": {
+                proj_key: proj_val,
+            }
         })
     }
 
-    async fn execute(&self, _input: Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
         use gid_core::harness::TelemetryLogger;
 
-        let logger = TelemetryLogger::new(&self.gid_path);
+        let gid_dir = self.mgr.resolve_gid_dir(&input).await?;
+        let logger = TelemetryLogger::new(&gid_dir);
         let stats = logger.compute_stats()?;
 
         let output = format!(
@@ -4165,14 +4286,7 @@ impl Tool for GidStatsTool {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 struct GidSemantifyTool {
-    graph: Arc<RwLock<Graph>>,
-    path: Arc<String>,
-}
-
-impl GidSemantifyTool {
-    fn new(graph: Arc<RwLock<Graph>>, path: Arc<String>) -> Self {
-        Self { graph, path }
-    }
+    mgr: Arc<GraphManager>,
 }
 
 #[async_trait]
@@ -4186,19 +4300,23 @@ impl Tool for GidSemantifyTool {
     }
 
     fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
         serde_json::json!({
             "type": "object",
-            "properties": {}
+            "properties": {
+                proj_key: proj_val,
+            }
         })
     }
 
-    async fn execute(&self, _input: Value) -> anyhow::Result<ToolResult> {
-        let mut graph = self.graph.write().await;
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let (graph_arc, path) = self.mgr.resolve(&input).await?;
+        let mut graph = graph_arc.write().await;
         
         let assigned = semantify::apply_heuristic_layers(&mut graph);
         
         // Save the updated graph
-        gid_save_graph(&graph, std::path::Path::new(self.path.as_str()))?;
+        save_gid_graph(&graph, &path)?;
 
         let mut output = format!("✓ Semantify complete: {} nodes assigned layers\n\n", assigned);
         
@@ -4434,13 +4552,7 @@ impl Tool for GidWorkingMemoryTool {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 struct GidIgnoreTool {
-    gid_path: PathBuf,
-}
-
-impl GidIgnoreTool {
-    fn new(gid_path: PathBuf) -> Self {
-        Self { gid_path }
-    }
+    mgr: Arc<GraphManager>,
 }
 
 #[async_trait]
@@ -4454,6 +4566,7 @@ impl Tool for GidIgnoreTool {
     }
 
     fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -4464,14 +4577,16 @@ impl Tool for GidIgnoreTool {
                 "is_dir": {
                     "type": "boolean",
                     "description": "Whether the path is a directory (default: false)"
-                }
+                },
+                proj_key: proj_val,
             }
         })
     }
 
     async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
         // Load ignore list from project directory (parent of .gid)
-        let project_dir = self.gid_path.parent().unwrap_or(&self.gid_path);
+        let gid_dir = self.mgr.resolve_gid_dir(&input).await?;
+        let project_dir = gid_dir.parent().unwrap_or(&gid_dir);
         let ignore_list = ignore::load_ignore_list(project_dir);
         
         let path_to_check = input["path"].as_str();
@@ -4597,6 +4712,141 @@ impl Tool for GidScopeTool {
             output,
             is_error: false,
         })
+    }
+}
+
+// ── gid_infer: run infer pipeline (clustering → labeling → merge) ──
+
+struct GidInferTool {
+    mgr: Arc<GraphManager>,
+}
+
+#[async_trait]
+impl Tool for GidInferTool {
+    fn name(&self) -> &str {
+        "gid_infer"
+    }
+
+    fn description(&self) -> &str {
+        "Run the infer pipeline on a code graph: Infomap clustering → optional LLM labeling → component/feature nodes. Enriches the graph with architectural layers automatically discovered from code structure."
+    }
+
+    fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "dir": {
+                    "type": "string",
+                    "description": "Source directory for auto-extract if graph has no code nodes (optional)"
+                },
+                "level": {
+                    "type": "string",
+                    "description": "Inference level: 'component' (clustering only, no LLM), 'feature' (clustering + LLM labeling), 'all' (same as feature). Default: component",
+                    "enum": ["component", "feature", "all"]
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "If true, show results without merging into graph (default: false)"
+                },
+                "format": {
+                    "type": "string",
+                    "description": "Output format: 'summary', 'yaml', 'json'. Default: summary",
+                    "enum": ["summary", "yaml", "json"]
+                },
+                "min_community_size": {
+                    "type": "integer",
+                    "description": "Minimum files per component (default: 2)"
+                },
+                "hierarchical": {
+                    "type": "boolean",
+                    "description": "Use hierarchical clustering (default: false)"
+                },
+                "max_cluster_size": {
+                    "type": "integer",
+                    "description": "Maximum files per component. Clusters exceeding this are sub-clustered. Default: auto = max(20, total_files/5)"
+                },
+                proj_key: proj_val,
+            }
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        use infer::ClusterConfig;
+
+        let level = match input["level"].as_str().unwrap_or("component") {
+            "component" => InferLevel::Component,
+            "feature" => InferLevel::Feature,
+            "all" => InferLevel::All,
+            other => return Ok(ToolResult {
+                output: format!("Unknown level '{}'. Use: component, feature, all", other),
+                is_error: true,
+            }),
+        };
+
+        let format = match input["format"].as_str().unwrap_or("summary") {
+            "summary" => InferOutputFormat::Summary,
+            "yaml" => InferOutputFormat::Yaml,
+            "json" => InferOutputFormat::Json,
+            other => return Ok(ToolResult {
+                output: format!("Unknown format '{}'. Use: summary, yaml, json", other),
+                is_error: true,
+            }),
+        };
+
+        let dry_run = input["dry_run"].as_bool().unwrap_or(false);
+        let source_dir = input["dir"].as_str().map(std::path::PathBuf::from);
+
+        let mut cluster_config = ClusterConfig::default();
+        if let Some(min) = input["min_community_size"].as_u64() {
+            cluster_config.min_community_size = min as usize;
+        }
+        if let Some(h) = input["hierarchical"].as_bool() {
+            cluster_config.hierarchical = h;
+        }
+        if let Some(max) = input["max_cluster_size"].as_u64() {
+            cluster_config.max_cluster_size = Some(max as usize);
+        }
+
+        let config = InferConfig {
+            clustering: cluster_config,
+            labeling: if level == InferLevel::Component { None } else { Some(Default::default()) },
+            level,
+            format,
+            dry_run,
+            source_dir,
+        };
+
+        // Run infer on a snapshot of the graph (infer::run doesn't mutate)
+        let (graph_arc, path) = self.mgr.resolve(&input).await?;
+        let graph = graph_arc.read().await;
+        let result = infer::run(&graph, &config, None).await.map_err(|e| {
+            anyhow::anyhow!("Infer pipeline failed: {}", e)
+        })?;
+        drop(graph);
+
+        // Format output
+        let output_text = infer_format_output(&result, config.format);
+
+        // Merge if not dry-run
+        if !dry_run {
+            let mut graph = graph_arc.write().await;
+            let stats = merge_into_graph(&mut graph, &result, true);
+            save_gid_graph(&graph, &path)?;
+
+            Ok(ToolResult {
+                output: format!(
+                    "{}\n\n✅ Merged: +{} components, +{} features, +{} edges, -{} old nodes removed\nSaved to: {}",
+                    output_text, stats.components_added, stats.features_added, stats.edges_added, stats.old_nodes_removed, path
+                ),
+                is_error: false,
+            })
+        } else {
+            Ok(ToolResult {
+                output: format!("{}\n\n(dry-run: no changes written)", output_text),
+                is_error: false,
+            })
+        }
     }
 }
 
@@ -4762,6 +5012,208 @@ impl Tool for StartRitualTool {
             }
             Err(e) => Ok(ToolResult {
                 output: format!("❌ Ritual failed: {}", e),
+                is_error: true,
+            }),
+        }
+    }
+}
+
+// ── gid_context: assemble token-budget-aware context for target nodes ──
+
+struct GidContextTool {
+    mgr: Arc<GraphManager>,
+}
+
+#[async_trait]
+impl Tool for GidContextTool {
+    fn name(&self) -> &str {
+        "gid_context"
+    }
+
+    fn description(&self) -> &str {
+        "Assemble token-budget-aware context for target nodes. Traverses the graph to collect dependencies, callers, and tests with relevance scoring. Returns structured context that fits within the token budget."
+    }
+
+    fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
+        serde_json::json!({
+            "type": "object",
+            "required": ["targets"],
+            "properties": {
+                "targets": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "One or more node IDs to assemble context for (files, functions, classes, tasks)"
+                },
+                "token_budget": {
+                    "type": "integer",
+                    "description": "Maximum token budget for output (default: 8000). Targets are never truncated; transitive deps are dropped first when over budget."
+                },
+                "depth": {
+                    "type": "integer",
+                    "description": "Maximum traversal depth in hops (default: 2). depth=1 returns only direct dependencies."
+                },
+                "include": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Filter patterns: file globs (e.g. '*.rs') or type filters (e.g. 'type:function'). Empty = include all."
+                },
+                "exclude": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Node IDs to exclude from results."
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["markdown", "json", "yaml"],
+                    "description": "Output format (default: markdown). Markdown is optimized for LLM consumption."
+                },
+                proj_key: proj_val,
+            }
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let targets: Vec<String> = match input["targets"].as_array() {
+            Some(arr) => arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect(),
+            None => return Ok(ToolResult {
+                output: "Error: 'targets' is required and must be an array of node IDs".to_string(),
+                is_error: true,
+            }),
+        };
+
+        if targets.is_empty() {
+            return Ok(ToolResult {
+                output: "Error: 'targets' must contain at least one node ID".to_string(),
+                is_error: true,
+            });
+        }
+
+        let token_budget = input["token_budget"].as_u64().unwrap_or(8000) as usize;
+        let depth = input["depth"].as_u64().unwrap_or(2) as u32;
+
+        let format = match input["format"].as_str().unwrap_or("markdown") {
+            "markdown" | "md" => ContextOutputFormat::Markdown,
+            "json" => ContextOutputFormat::Json,
+            "yaml" | "yml" => ContextOutputFormat::Yaml,
+            other => return Ok(ToolResult {
+                output: format!("Unknown format '{}'. Use: markdown, json, yaml", other),
+                is_error: true,
+            }),
+        };
+
+        let include_patterns = input["include"].as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+
+        let exclude_ids = input["exclude"].as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+
+        // Derive project_root from graph path: .gid/graph.yml → parent of .gid/
+        let (graph_arc, path) = self.mgr.resolve(&input).await?;
+        let graph_path = PathBuf::from(path.as_str());
+        let project_root = graph_path.parent()
+            .and_then(|gid_dir| gid_dir.parent())
+            .map(|p| p.to_path_buf());
+
+        let query = ContextQuery {
+            targets,
+            token_budget,
+            depth,
+            filters: ContextFilters {
+                include_patterns,
+                exclude_ids,
+                modified_after: None,
+            },
+            format,
+            project_root,
+        };
+
+        let graph = graph_arc.read().await;
+        match assemble_context(&graph, &query) {
+            Ok(result) => {
+                let formatted = format_context(&result, query.format);
+                Ok(ToolResult {
+                    output: format!(
+                        "📊 Context: {}/{} nodes, {}/{} tokens, {}ms\n---\n{}",
+                        result.stats.nodes_included,
+                        result.stats.nodes_visited,
+                        result.stats.budget_used,
+                        result.stats.budget_total,
+                        result.stats.elapsed_ms,
+                        formatted
+                    ),
+                    is_error: false,
+                })
+            }
+            Err(e) => Ok(ToolResult {
+                output: format!("Context assembly failed: {}", e),
+                is_error: true,
+            }),
+        }
+    }
+}
+
+// ── gid_task_context: assemble implementation context for a task node ──
+
+struct GidTaskContextTool {
+    mgr: Arc<GraphManager>,
+}
+
+#[async_trait]
+impl Tool for GidTaskContextTool {
+    fn name(&self) -> &str {
+        "gid_task_context"
+    }
+
+    fn description(&self) -> &str {
+        "Assemble implementation context for a task node. Resolves design_ref to extract the relevant design section, maps satisfies GOALs to requirement text, collects guards and dependency interfaces. Returns everything a developer needs to implement the task."
+    }
+
+    fn input_schema(&self) -> Value {
+        let (proj_key, proj_val) = gid_project_property();
+        serde_json::json!({
+            "type": "object",
+            "required": ["task_id"],
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "Task node ID in the graph"
+                },
+                proj_key: proj_val,
+            }
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let task_id = match input["task_id"].as_str() {
+            Some(id) => id,
+            None => return Ok(ToolResult {
+                output: "Error: 'task_id' is required".to_string(),
+                is_error: true,
+            }),
+        };
+
+        // Derive gid_root from graph path: .gid/graph.yml → .gid/
+        let (graph_arc, path) = self.mgr.resolve(&input).await?;
+        let graph_path = PathBuf::from(path.as_str());
+        let gid_root = graph_path.parent()
+            .unwrap_or(std::path::Path::new(".gid"));
+
+        let graph = graph_arc.read().await;
+        match assemble_task_context(&graph, task_id, gid_root) {
+            Ok(context) => {
+                let prompt = context.render_prompt();
+                Ok(ToolResult {
+                    output: prompt,
+                    is_error: false,
+                })
+            }
+            Err(e) => Ok(ToolResult {
+                output: format!("Task context assembly failed for '{}': {}", task_id, e),
                 is_error: true,
             }),
         }

@@ -1016,6 +1016,7 @@ dependencies = [
 name = "engramai"
 version = "0.2.2"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "chrono",
  "clap",
@@ -1024,6 +1025,7 @@ dependencies = [
  "jieba-rs",
  "log",
  "rand 0.8.5",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",

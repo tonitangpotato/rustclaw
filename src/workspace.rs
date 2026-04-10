@@ -441,10 +441,9 @@ impl Workspace {
         let workspace_path = self.root.display().to_string();
         let model_name = self.model.as_deref().unwrap_or("unknown");
 
-        // Load today's daily notes
-        let today = Local::now().format("%Y-%m-%d").to_string();
-        let daily_path = self.root.join("memory").join(format!("{}.md", today));
-        let daily_notes = std::fs::read_to_string(&daily_path).ok();
+        // Daily notes — DISABLED: session continuity via engram recall_recent
+        // let daily_notes = std::fs::read_to_string(&daily_path).ok();
+        let daily_notes: Option<String> = None;
 
         // Match skills based on user message
         let matched_skills = self.match_skills(user_message.unwrap_or(""), 5);
@@ -767,24 +766,10 @@ impl Workspace {
         }
         sections.push(ws);
 
-        // 10. Daily notes (today + yesterday)
-        let mut daily = String::new();
-        let today = Local::now().format("%Y-%m-%d").to_string();
-        let yesterday = (Local::now() - chrono::Duration::days(1))
-            .format("%Y-%m-%d")
-            .to_string();
-
-        for (label, date) in [("today", &today), ("yesterday", &yesterday)] {
-            let path = self.root.join("memory").join(format!("{}.md", date));
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                daily.push_str(&format!("\n### memory/{}.md ({})\n", date, label));
-                daily.push_str(&content);
-                daily.push('\n');
-            }
-        }
-        if !daily.is_empty() {
-            sections.push(daily);
-        }
+        // 10. Daily notes — DISABLED (2026-04-09)
+        // Session continuity now handled by engram recall_recent at startup.
+        // Daily logs (memory/YYYY-MM-DD.md) are kept as human-readable backup
+        // but no longer injected into system prompt to avoid token waste.
 
         // 10. Matched skills
         let matched_skills = self.match_skills(user_message.unwrap_or(""), 5);
