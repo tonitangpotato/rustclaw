@@ -1,0 +1,23 @@
+# Project Registry — Issue Lifecycle Management
+# Skills read this file to discover project paths.
+# verify_command lives in each project's .gid/config.yml (not here).
+
+projects:
+  rustclaw:
+    path: /Users/potato/rustclaw
+    display_name: RustClaw
+  engramai:
+    path: /Users/potato/clawd/projects/engram-ai-rust
+    display_name: engramai
+  gid-rs:
+    path: /Users/potato/clawd/projects/gid-rs
+    display_name: gid-rs
+  agentctl:
+    path: /Users/potato/clawd/projects/agentctl
+    display_name: agentctl
+  xinfluencer:
+    path: /Users/potato/clawd/projects/xinfluencer
+    display_name: xinfluencer
+  infomap-rs:
+    path: /Users/potato/clawd/projects/infomap-rs
+    display_name: infomap-rs

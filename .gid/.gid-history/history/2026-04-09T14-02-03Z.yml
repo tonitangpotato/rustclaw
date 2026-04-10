@@ -1,3 +1,4 @@
+# Engram improvement plan: Phase A (3 tasks) + Phase B (4 tasks) with dependency graph
 project: null
 nodes:
 - id: module:prompt
@@ -40,10 +41,10 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 17
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
     - serde(tag = "type")
-    line_count: 17
   file_path: llm.rs
   start_line: 19
   signature: pub enum ContentBlock
@@ -55,9 +56,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 4
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
-    line_count: 4
   file_path: llm.rs
   start_line: 39
   signature: pub struct Message
@@ -131,9 +132,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 5
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
+    line_count: 5
   file_path: llm.rs
   start_line: 115
   signature: pub struct ToolCall
@@ -159,9 +160,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 6
     decorators:
     - derive(Debug, Clone, Default)
+    line_count: 6
   file_path: llm.rs
   start_line: 132
   signature: pub struct Usage
@@ -358,9 +359,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 11
     decorators:
     - derive(Debug, Clone, serde::Serialize)
-    line_count: 11
   file_path: llm.rs
   start_line: 359
   signature: pub struct TokenStats
@@ -413,9 +414,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 47
     decorators:
     - async_trait::async_trait
+    line_count: 47
   file_path: llm.rs
   start_line: 392
   signature: 'pub trait LlmClient: Send + Sync'
@@ -1654,9 +1655,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 7
     decorators:
     - derive(Debug, Clone)
-    line_count: 7
   file_path: session.rs
   start_line: 573
   signature: pub struct SessionSummary
@@ -1668,9 +1669,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 8
     decorators:
     - derive(sqlx::FromRow)
+    line_count: 8
   file_path: session.rs
   start_line: 582
   signature: struct SessionSummaryRow
@@ -1743,9 +1744,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 8
     decorators:
     - derive(Debug, Deserialize)
-    line_count: 8
   file_path: claude_cli.rs
   start_line: 48
   signature: struct CcJsonResult
@@ -1798,10 +1799,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 12
     decorators:
     - derive(Debug, Deserialize)
     - serde(tag = "type")
+    line_count: 12
   file_path: claude_cli.rs
   start_line: 97
   signature: enum CcContentBlock
@@ -2019,9 +2020,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 14
     decorators:
     - derive(Debug, Clone)
-    line_count: 14
   file_path: cron.rs
   start_line: 26
   signature: pub struct CronJob
@@ -2047,9 +2048,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 8
     decorators:
     - derive(Debug, Clone)
-    line_count: 8
   file_path: cron.rs
   start_line: 61
   signature: pub enum CronTask
@@ -2249,8 +2250,8 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 7
     is_test: true
+    line_count: 7
     decorators:
     - test
   file_path: cron.rs
@@ -2265,8 +2266,8 @@ nodes:
   metadata:
     decorators:
     - test
-    line_count: 6
     is_test: true
+    line_count: 6
   file_path: cron.rs
   start_line: 540
   signature: fn test_parse_cron_expression_6_field()
@@ -2277,10 +2278,10 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
+    line_count: 6
     decorators:
     - test
-    line_count: 6
-    is_test: true
   file_path: cron.rs
   start_line: 548
   signature: fn test_parse_cron_weekday()
@@ -2305,10 +2306,10 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
     decorators:
     - test
     line_count: 10
-    is_test: true
   file_path: cron.rs
   start_line: 563
   signature: fn test_parse_timezone()
@@ -2319,10 +2320,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 13
     decorators:
     - test
     is_test: true
+    line_count: 13
   file_path: cron.rs
   start_line: 575
   signature: fn test_cron_next_occurrence()
@@ -2333,9 +2334,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 22
     decorators:
     - test
-    line_count: 22
     is_test: true
   file_path: cron.rs
   start_line: 590
@@ -2363,8 +2364,8 @@ nodes:
   metadata:
     decorators:
     - test
-    line_count: 9
     is_test: true
+    line_count: 9
   file_path: cron.rs
   start_line: 655
   signature: fn test_truncate_str()
@@ -2382,9 +2383,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 20
     decorators:
     - derive(Debug, Clone)
-    line_count: 20
   file_path: events.rs
   start_line: 11
   signature: pub enum SubAgentEvent
@@ -2495,9 +2496,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 13
     decorators:
     - async_trait
+    line_count: 13
   file_path: tools.rs
   start_line: 49
   signature: 'pub trait Tool: Send + Sync'
@@ -5693,10 +5694,10 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
+    line_count: 6
     decorators:
     - test
-    line_count: 6
-    is_test: true
   file_path: tools.rs
   start_line: 4796
   signature: fn test_fuzzy_find_exact()
@@ -5707,10 +5708,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 10
+    is_test: true
     decorators:
     - test
-    is_test: true
+    line_count: 10
   file_path: tools.rs
   start_line: 4804
   signature: fn test_fuzzy_find_whitespace_diff()
@@ -5721,10 +5722,10 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
+    line_count: 6
     decorators:
     - test
-    line_count: 6
-    is_test: true
   file_path: tools.rs
   start_line: 4816
   signature: fn test_fuzzy_find_trailing_spaces()
@@ -5763,9 +5764,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 7
     decorators:
     - test
+    line_count: 7
     is_test: true
   file_path: tools.rs
   start_line: 4840
@@ -5777,10 +5778,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 16
-    is_test: true
     decorators:
     - tokio::test
+    is_test: true
+    line_count: 16
   file_path: tools.rs
   start_line: 4849
   signature: async fn test_edit_file_exact_match()
@@ -5791,10 +5792,10 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 19
     decorators:
     - tokio::test
     is_test: true
-    line_count: 19
   file_path: tools.rs
   start_line: 4867
   signature: async fn test_edit_file_multi_edit()
@@ -5805,10 +5806,10 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 21
+    is_test: true
     decorators:
     - tokio::test
-    is_test: true
-    line_count: 21
   file_path: tools.rs
   start_line: 4888
   signature: async fn test_edit_file_multi_edit_atomic_failure()
@@ -5819,10 +5820,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 18
-    is_test: true
     decorators:
     - tokio::test
+    line_count: 18
+    is_test: true
   file_path: tools.rs
   start_line: 4911
   signature: async fn test_edit_file_fuzzy_fallback()
@@ -5888,9 +5889,9 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
     decorators:
     - test
-    is_test: true
     line_count: 5
   file_path: text_utils.rs
   start_line: 107
@@ -5902,10 +5903,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     decorators:
     - test
     line_count: 5
+    is_test: true
   file_path: text_utils.rs
   start_line: 114
   signature: fn test_truncate_chars_cjk()
@@ -5916,10 +5917,10 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 6
     is_test: true
     decorators:
     - test
-    line_count: 6
   file_path: text_utils.rs
   start_line: 121
   signature: fn test_truncate_bytes_cjk()
@@ -5944,10 +5945,10 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
     decorators:
     - test
     line_count: 7
-    is_test: true
   file_path: text_utils.rs
   start_line: 136
   signature: fn test_split_message_cjk()
@@ -5958,10 +5959,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
+    line_count: 4
     decorators:
     - test
-    line_count: 4
+    is_test: true
   file_path: text_utils.rs
   start_line: 145
   signature: fn test_split_message_no_panic_on_emoji()
@@ -6883,9 +6884,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 5
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
-    line_count: 5
   file_path: config.rs
   start_line: 125
   signature: pub struct TokenBudgetConfig
@@ -7089,9 +7090,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 21
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
-    line_count: 21
   file_path: config.rs
   start_line: 229
   signature: pub struct HeartbeatConfig
@@ -7290,9 +7291,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 11
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
-    line_count: 11
   file_path: config.rs
   start_line: 428
   signature: pub struct SlackConfig
@@ -7303,9 +7304,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 12
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
-    line_count: 12
   file_path: config.rs
   start_line: 441
   signature: pub struct SignalConfig
@@ -7340,9 +7341,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 21
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize, Default)
+    line_count: 21
   file_path: config.rs
   start_line: 478
   signature: pub struct MemoryConfig
@@ -7353,9 +7354,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 12
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
+    line_count: 12
   file_path: config.rs
   start_line: 502
   signature: pub struct DriveConfig
@@ -7413,10 +7414,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 14
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
     - serde(tag = "type", rename_all = "snake_case")
+    line_count: 14
   file_path: config.rs
   start_line: 559
   signature: pub enum CronTaskConfig
@@ -7428,9 +7429,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 9
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize, Default)
-    line_count: 9
   file_path: config.rs
   start_line: 576
   signature: pub struct CronConfig
@@ -7564,9 +7565,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 9
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
+    line_count: 9
   file_path: config.rs
   start_line: 755
   signature: pub struct SearchConfig
@@ -7600,9 +7601,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 9
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
-    line_count: 9
   file_path: config.rs
   start_line: 781
   signature: pub struct BrowserConfig
@@ -7636,9 +7637,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 13
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
+    line_count: 13
   file_path: config.rs
   start_line: 806
   signature: pub struct SkillsConfig
@@ -7744,9 +7745,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 13
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
-    line_count: 13
   file_path: config.rs
   start_line: 888
   signature: pub struct ServerlessConfig
@@ -7827,9 +7828,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 9
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
-    line_count: 9
   file_path: config.rs
   start_line: 947
   signature: pub struct WorktreeConfig
@@ -7966,9 +7967,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 4
     decorators:
     - derive(Debug, Deserialize)
+    line_count: 4
   file_path: platform/instance.rs
   start_line: 41
   signature: struct TgUpdate
@@ -8005,9 +8006,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 5
     decorators:
     - derive(Debug, Deserialize)
+    line_count: 5
   file_path: platform/instance.rs
   start_line: 60
   signature: struct TgUser
@@ -8289,9 +8290,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 4
     decorators:
     - derive(Deserialize)
-    line_count: 4
   file_path: platform/server.rs
   start_line: 31
   signature: struct RegisterRequest
@@ -8328,9 +8329,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 3
     decorators:
     - derive(Serialize)
-    line_count: 3
   file_path: platform/server.rs
   start_line: 49
   signature: struct ErrorResponse
@@ -8341,9 +8342,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 4
     decorators:
     - derive(Deserialize)
+    line_count: 4
   file_path: platform/server.rs
   start_line: 54
   signature: struct CreateInstanceRequest
@@ -8595,9 +8596,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 6
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
-    line_count: 6
   file_path: platform/db.rs
   start_line: 30
   signature: pub struct Contact
@@ -8621,9 +8622,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 8
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
-    line_count: 8
   file_path: platform/db.rs
   start_line: 45
   signature: pub struct Instance
@@ -8634,9 +8635,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 12
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
+    line_count: 12
   file_path: platform/db.rs
   start_line: 55
   signature: pub struct CallLog
@@ -8964,9 +8965,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 14
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
-    line_count: 14
   file_path: user_model.rs
   start_line: 21
   signature: pub struct UserProfile
@@ -8978,9 +8979,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 12
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
-    line_count: 12
   file_path: user_model.rs
   start_line: 38
   signature: pub struct PreferenceEntry
@@ -8992,9 +8993,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 12
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize, Default)
+    line_count: 12
   file_path: user_model.rs
   start_line: 53
   signature: pub struct InteractionStyle
@@ -9006,9 +9007,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 10
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
+    line_count: 10
   file_path: user_model.rs
   start_line: 68
   signature: pub struct TopicInterest
@@ -9020,9 +9021,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 10
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize, Default)
+    line_count: 10
   file_path: user_model.rs
   start_line: 81
   signature: pub struct CommunicationPatterns
@@ -9227,9 +9228,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 13
     decorators:
     - derive(sqlx::FromRow)
-    line_count: 13
   file_path: user_model.rs
   start_line: 620
   signature: struct ProfileRow
@@ -9279,9 +9280,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 3
     decorators:
     - derive(sqlx::FromRow)
+    line_count: 3
   file_path: user_model.rs
   start_line: 659
   signature: struct AvgLength
@@ -9366,10 +9367,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 5
-    is_test: true
     decorators:
     - test
+    line_count: 5
+    is_test: true
   file_path: user_model.rs
   start_line: 792
   signature: fn test_emoji_ratio()
@@ -9380,10 +9381,10 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 5
     is_test: true
     decorators:
     - test
-    line_count: 5
   file_path: user_model.rs
   start_line: 799
   signature: fn test_technical_level()
@@ -9396,8 +9397,8 @@ nodes:
   metadata:
     decorators:
     - test
-    is_test: true
     line_count: 6
+    is_test: true
   file_path: user_model.rs
   start_line: 806
   signature: fn test_extract_topics()
@@ -9408,10 +9409,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 6
-    is_test: true
     decorators:
     - test
+    is_test: true
+    line_count: 6
   file_path: user_model.rs
   start_line: 814
   signature: fn test_is_emoji()
@@ -9568,9 +9569,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 9
     decorators:
     - allow(dead_code)
-    line_count: 9
   file_path: memory.rs
   start_line: 247
   signature: 'fn importance_to_layer(importance: f64) -> MemoryLayer'
@@ -9929,8 +9930,8 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 7
     is_test: true
+    line_count: 7
     decorators:
     - test
   file_path: memory.rs
@@ -9943,10 +9944,10 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
+    line_count: 7
     decorators:
     - test
-    line_count: 7
-    is_test: true
   file_path: memory.rs
   start_line: 795
   signature: fn test_detect_domain()
@@ -9957,10 +9958,10 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
+    line_count: 8
     decorators:
     - test
-    line_count: 8
-    is_test: true
   file_path: memory.rs
   start_line: 804
   signature: fn test_importance_to_layer()
@@ -9971,10 +9972,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     decorators:
     - test
     line_count: 115
+    is_test: true
   file_path: memory.rs
   start_line: 821
   signature: fn test_emotionbus_with_real_db()
@@ -10090,9 +10091,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 16
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
-    line_count: 16
   file_path: skills.rs
   start_line: 17
   signature: pub struct ProblemContext
@@ -10104,9 +10105,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 12
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
-    line_count: 12
   file_path: skills.rs
   start_line: 36
   signature: pub struct GeneratedSkill
@@ -10426,10 +10427,10 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
     decorators:
     - test
     line_count: 8
-    is_test: true
   file_path: skills.rs
   start_line: 614
   signature: fn test_assess_complexity_failure()
@@ -10440,10 +10441,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     line_count: 7
     decorators:
     - test
+    is_test: true
   file_path: skills.rs
   start_line: 624
   signature: fn test_generate_skill_name()
@@ -10454,8 +10455,8 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     line_count: 15
+    is_test: true
     decorators:
     - test
   file_path: skills.rs
@@ -10468,10 +10469,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 4
-    is_test: true
     decorators:
     - test
+    line_count: 4
+    is_test: true
   file_path: skills.rs
   start_line: 650
   signature: fn test_title_case()
@@ -10482,9 +10483,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 13
     decorators:
     - tokio::test
+    line_count: 13
     is_test: true
   file_path: skills.rs
   start_line: 656
@@ -10498,8 +10499,8 @@ nodes:
   metadata:
     decorators:
     - test
-    is_test: true
     line_count: 6
+    is_test: true
   file_path: skills.rs
   start_line: 671
   signature: fn test_find_similar_skill_empty()
@@ -10524,9 +10525,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 41
     decorators:
     - tokio::test
-    line_count: 41
     is_test: true
   file_path: skills.rs
   start_line: 705
@@ -10914,8 +10915,8 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     line_count: 3
+    is_test: true
   file_path: plugins.rs
   start_line: 289
   signature: struct TestPlugin
@@ -10959,10 +10960,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     line_count: 12
     decorators:
     - test
+    is_test: true
   file_path: plugins.rs
   start_line: 309
   signature: fn test_registry_registration()
@@ -10980,9 +10981,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 4
     decorators:
     - derive(Clone)
+    line_count: 4
   file_path: voice_mode.rs
   start_line: 10
   signature: pub struct VoiceMode
@@ -11042,10 +11043,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 10
     decorators:
     - tokio::test
     is_test: true
+    line_count: 10
   file_path: voice_mode.rs
   start_line: 62
   signature: async fn test_voice_mode_toggle()
@@ -11057,9 +11058,9 @@ nodes:
   type: code
   metadata:
     line_count: 13
-    is_test: true
     decorators:
     - tokio::test
+    is_test: true
   file_path: voice_mode.rs
   start_line: 74
   signature: async fn test_persistence()
@@ -11071,9 +11072,9 @@ nodes:
   type: code
   metadata:
     is_test: true
-    line_count: 5
     decorators:
     - test
+    line_count: 5
   file_path: voice_mode.rs
   start_line: 89
   signature: fn test_chat_id_from_session()
@@ -11225,10 +11226,10 @@ nodes:
   status: done
   type: code
   metadata:
-    decorators:
-    - test
     line_count: 5
     is_test: true
+    decorators:
+    - test
   file_path: engram_hooks.rs
   start_line: 207
   signature: fn test_hook_point_constants()
@@ -11597,8 +11598,8 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 16
     is_test: true
+    line_count: 16
     decorators:
     - test
   file_path: serverless.rs
@@ -11611,10 +11612,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 6
+    is_test: true
     decorators:
     - test
-    is_test: true
+    line_count: 6
   file_path: serverless.rs
   start_line: 455
   signature: fn test_agent_state_config_changed()
@@ -11625,10 +11626,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
-    line_count: 19
     decorators:
     - test
+    is_test: true
+    line_count: 19
   file_path: serverless.rs
   start_line: 463
   signature: fn test_runtime_event_serialization()
@@ -11639,10 +11640,10 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
     decorators:
     - test
     line_count: 12
-    is_test: true
   file_path: serverless.rs
   start_line: 484
   signature: fn test_compute_config_hash()
@@ -11653,9 +11654,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 9
     decorators:
     - test
-    line_count: 9
     is_test: true
   file_path: serverless.rs
   start_line: 498
@@ -11681,10 +11682,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 28
     decorators:
     - tokio::test
     is_test: true
+    line_count: 28
   file_path: serverless.rs
   start_line: 549
   signature: async fn test_list_hibernated()
@@ -11695,10 +11696,10 @@ nodes:
   status: done
   type: code
   metadata:
-    decorators:
-    - tokio::test
     line_count: 18
     is_test: true
+    decorators:
+    - tokio::test
   file_path: serverless.rs
   start_line: 579
   signature: async fn test_should_hibernate()
@@ -11710,9 +11711,9 @@ nodes:
   type: code
   metadata:
     is_test: true
-    line_count: 20
     decorators:
     - tokio::test
+    line_count: 20
   file_path: serverless.rs
   start_line: 599
   signature: async fn test_has_hibernated_state()
@@ -11725,8 +11726,8 @@ nodes:
   metadata:
     decorators:
     - test
-    is_test: true
     line_count: 14
+    is_test: true
   file_path: serverless.rs
   start_line: 621
   signature: fn test_state_file_path_sanitization()
@@ -11744,9 +11745,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 10
     decorators:
     - derive(Clone, Debug)
+    line_count: 10
   file_path: autopilot.rs
   start_line: 18
   signature: pub struct AutopilotConfig
@@ -11769,9 +11770,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 10
     decorators:
     - derive(Debug, Clone)
+    line_count: 10
   file_path: autopilot.rs
   start_line: 42
   signature: pub struct Task
@@ -11942,10 +11943,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
-    line_count: 16
     decorators:
     - test
+    is_test: true
+    line_count: 16
   file_path: autopilot.rs
   start_line: 413
   signature: fn test_parse_tasks()
@@ -11956,9 +11957,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 7
     decorators:
     - test
+    line_count: 7
     is_test: true
   file_path: autopilot.rs
   start_line: 431
@@ -11970,10 +11971,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 8
-    is_test: true
     decorators:
     - test
+    is_test: true
+    line_count: 8
   file_path: autopilot.rs
   start_line: 440
   signature: fn test_next_task_skips_skipped()
@@ -11984,10 +11985,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
-    line_count: 6
     decorators:
     - test
+    line_count: 6
+    is_test: true
   file_path: autopilot.rs
   start_line: 450
   signature: fn test_next_task_all_done()
@@ -11998,10 +11999,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 8
     decorators:
     - test
     is_test: true
+    line_count: 8
   file_path: autopilot.rs
   start_line: 458
   signature: fn test_find_task_by_description()
@@ -12048,9 +12049,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 7
     decorators:
     - derive(Debug, Clone)
-    line_count: 7
   file_path: hooks.rs
   start_line: 39
   signature: pub struct HookContext
@@ -12062,9 +12063,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 16
     decorators:
     - async_trait
-    line_count: 16
   file_path: hooks.rs
   start_line: 49
   signature: 'pub trait Hook: Send + Sync'
@@ -12450,9 +12451,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 16
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize, PartialEq)
-    line_count: 16
   file_path: gid_storage/types.rs
   start_line: 240
   signature: pub struct ChangeEntry
@@ -12484,9 +12485,9 @@ nodes:
   type: code
   metadata:
     is_test: true
+    line_count: 19
     decorators:
     - test
-    line_count: 19
   file_path: gid_storage/types.rs
   start_line: 281
   signature: fn test_node_builder()
@@ -12497,10 +12498,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     line_count: 16
     decorators:
     - test
+    is_test: true
   file_path: gid_storage/types.rs
   start_line: 302
   signature: fn test_edge_builder()
@@ -12511,10 +12512,10 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
+    line_count: 10
     decorators:
     - test
-    line_count: 10
-    is_test: true
   file_path: gid_storage/types.rs
   start_line: 320
   signature: fn test_node_serialization()
@@ -12525,10 +12526,10 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 9
+    is_test: true
     decorators:
     - test
-    is_test: true
-    line_count: 9
   file_path: gid_storage/types.rs
   start_line: 332
   signature: fn test_edge_serialization()
@@ -12546,9 +12547,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 31
     decorators:
     - derive(Debug, Clone, Copy, PartialEq, Eq)
-    line_count: 31
   file_path: gid_storage/error.rs
   start_line: 6
   signature: pub enum StorageOp
@@ -12571,9 +12572,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 49
     decorators:
     - derive(Debug, Error)
-    line_count: 49
   file_path: gid_storage/error.rs
   start_line: 77
   signature: pub enum StorageError
@@ -16552,9 +16553,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 11
     decorators:
     - async_trait
-    line_count: 11
   file_path: gid_storage/graph_storage.rs
   start_line: 238
   signature: 'pub trait GraphStorageQuery: GraphStorage'
@@ -16607,9 +16608,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 7
     decorators:
     - async_trait
-    line_count: 7
   file_path: gid_storage/graph_storage.rs
   start_line: 252
   signature: 'pub trait GraphStorageMigration: GraphStorage'
@@ -16711,10 +16712,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 3
     decorators:
     - test
     is_test: true
+    line_count: 3
   file_path: gid_storage/graph_storage.rs
   start_line: 276
   signature: fn test_trait_object_safety()
@@ -17492,9 +17493,9 @@ nodes:
   type: code
   metadata:
     line_count: 6
+    is_test: true
     decorators:
     - test
-    is_test: true
   file_path: gid_storage/schema.rs
   start_line: 337
   signature: fn test_schema_sql_not_empty()
@@ -17506,9 +17507,9 @@ nodes:
   type: code
   metadata:
     is_test: true
-    line_count: 3
     decorators:
     - test
+    line_count: 3
   file_path: gid_storage/schema.rs
   start_line: 345
   signature: fn test_schema_version()
@@ -17519,10 +17520,10 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
+    line_count: 9
     decorators:
     - test
-    line_count: 9
-    is_test: true
   file_path: gid_storage/schema.rs
   start_line: 350
   signature: fn test_all_tables_defined()
@@ -17533,10 +17534,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 7
-    is_test: true
     decorators:
     - test
+    line_count: 7
+    is_test: true
   file_path: gid_storage/schema.rs
   start_line: 361
   signature: fn test_fts5_defined()
@@ -17547,10 +17548,10 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 5
     is_test: true
     decorators:
     - test
-    line_count: 5
   file_path: gid_storage/schema.rs
   start_line: 370
   signature: fn test_indexes_defined()
@@ -17646,10 +17647,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 12
     decorators:
     - derive(Debug, Clone, Default, Serialize, Deserialize)
     - serde(rename_all = "camelCase")
+    line_count: 12
   file_path: auth_profiles.rs
   start_line: 106
   signature: pub struct ProfileUsageStats
@@ -17951,9 +17952,9 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     decorators:
     - test
+    is_test: true
     line_count: 8
   file_path: auth_profiles.rs
   start_line: 506
@@ -17965,10 +17966,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 9
     is_test: true
     decorators:
     - test
+    line_count: 9
   file_path: auth_profiles.rs
   start_line: 516
   signature: fn test_cooldown_overloaded()
@@ -17979,10 +17980,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 33
-    is_test: true
     decorators:
     - test
+    line_count: 33
+    is_test: true
   file_path: auth_profiles.rs
   start_line: 527
   signature: fn test_cooldown_no_escalation_during_active_window()
@@ -17993,10 +17994,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 38
-    is_test: true
     decorators:
     - test
+    is_test: true
+    line_count: 38
   file_path: auth_profiles.rs
   start_line: 562
   signature: fn test_store_round_robin()
@@ -18007,10 +18008,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 42
-    is_test: true
     decorators:
     - test
+    is_test: true
+    line_count: 42
   file_path: auth_profiles.rs
   start_line: 602
   signature: fn test_cooldown_ordering()
@@ -18323,9 +18324,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 3
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
+    line_count: 3
   file_path: credential.rs
   start_line: 325
   signature: struct CredentialFileConfig
@@ -18363,8 +18364,8 @@ nodes:
   metadata:
     decorators:
     - test
-    is_test: true
     line_count: 31
+    is_test: true
   file_path: credential.rs
   start_line: 365
   signature: fn test_inject_and_redact()
@@ -18375,9 +18376,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 40
     decorators:
     - test
-    line_count: 40
     is_test: true
   file_path: credential.rs
   start_line: 398
@@ -18389,10 +18390,10 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
     line_count: 15
     decorators:
     - test
-    is_test: true
   file_path: credential.rs
   start_line: 440
   signature: fn test_leak_detection()
@@ -18405,8 +18406,8 @@ nodes:
   metadata:
     decorators:
     - test
-    is_test: true
     line_count: 15
+    is_test: true
   file_path: credential.rs
   start_line: 457
   signature: fn test_rotation()
@@ -18417,10 +18418,10 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
     decorators:
     - test
     line_count: 9
-    is_test: true
   file_path: credential.rs
   start_line: 474
   signature: fn test_xor_cipher_roundtrip()
@@ -20219,10 +20220,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 12
-    is_test: true
     decorators:
     - test
+    line_count: 12
+    is_test: true
   file_path: prompt/sections.rs
   start_line: 654
   signature: fn test_preamble_section()
@@ -20234,9 +20235,9 @@ nodes:
   type: code
   metadata:
     line_count: 8
-    is_test: true
     decorators:
     - test
+    is_test: true
   file_path: prompt/sections.rs
   start_line: 668
   signature: fn test_preamble_excluded_for_subagent()
@@ -20247,10 +20248,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     decorators:
     - test
     line_count: 13
+    is_test: true
   file_path: prompt/sections.rs
   start_line: 678
   signature: fn test_gid_section_conditional()
@@ -20261,9 +20262,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 11
     decorators:
     - test
-    line_count: 11
     is_test: true
   file_path: prompt/sections.rs
   start_line: 693
@@ -20275,8 +20276,8 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 8
     is_test: true
+    line_count: 8
     decorators:
     - test
   file_path: prompt/sections.rs
@@ -20289,10 +20290,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 13
+    is_test: true
     decorators:
     - test
-    is_test: true
+    line_count: 13
   file_path: prompt/sections.rs
   start_line: 716
   signature: fn test_subagent_section()
@@ -20303,10 +20304,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
-    line_count: 20
     decorators:
     - test
+    line_count: 20
+    is_test: true
   file_path: prompt/sections.rs
   start_line: 731
   signature: fn test_prompt_builder_full()
@@ -20317,9 +20318,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 16
     decorators:
     - test
-    line_count: 16
     is_test: true
   file_path: prompt/sections.rs
   start_line: 753
@@ -20584,9 +20585,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 8
     decorators:
     - derive(Debug, Clone)
-    line_count: 8
   file_path: workspace.rs
   start_line: 25
   signature: pub struct MatchedSkill
@@ -20598,9 +20599,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 10
     decorators:
     - derive(Debug, Clone, Default, Deserialize)
-    line_count: 10
   file_path: workspace.rs
   start_line: 40
   signature: pub struct TriggerConfig
@@ -20671,9 +20672,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 5
     decorators:
     - derive(Debug, Clone)
-    line_count: 5
   file_path: workspace.rs
   start_line: 128
   signature: pub struct ParsedSkill
@@ -21080,10 +21081,10 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 10
     is_test: true
     decorators:
     - test
-    line_count: 10
   file_path: workspace.rs
   start_line: 896
   signature: fn test_match_skills_trigger_hit()
@@ -21094,10 +21095,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 9
-    is_test: true
     decorators:
     - test
+    line_count: 9
+    is_test: true
   file_path: workspace.rs
   start_line: 908
   signature: fn test_match_skills_no_match()
@@ -21108,10 +21109,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
-    line_count: 11
     decorators:
     - test
+    is_test: true
+    line_count: 11
   file_path: workspace.rs
   start_line: 919
   signature: fn test_match_skills_always_load()
@@ -21124,8 +21125,8 @@ nodes:
   metadata:
     decorators:
     - test
-    is_test: true
     line_count: 12
+    is_test: true
   file_path: workspace.rs
   start_line: 932
   signature: fn test_match_skills_always_load_plus_trigger()
@@ -21150,10 +21151,10 @@ nodes:
   status: done
   type: code
   metadata:
-    decorators:
-    - test
     line_count: 11
     is_test: true
+    decorators:
+    - test
   file_path: workspace.rs
   start_line: 960
   signature: fn test_match_skills_case_insensitive()
@@ -21164,9 +21165,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 11
     decorators:
     - test
-    line_count: 11
     is_test: true
   file_path: workspace.rs
   start_line: 973
@@ -21178,10 +21179,10 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
     decorators:
     - test
     line_count: 10
-    is_test: true
   file_path: workspace.rs
   start_line: 986
   signature: fn test_match_skills_empty_message()
@@ -21193,9 +21194,9 @@ nodes:
   type: code
   metadata:
     is_test: true
+    line_count: 20
     decorators:
     - test
-    line_count: 20
   file_path: workspace.rs
   start_line: 998
   signature: fn test_match_skills_empty_registry()
@@ -21220,10 +21221,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 38
     decorators:
     - test
     is_test: true
+    line_count: 38
   file_path: workspace.rs
   start_line: 1031
   signature: fn test_match_skills_regex_triggers()
@@ -21327,9 +21328,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 10
     decorators:
     - derive(Debug, Clone)
-    line_count: 10
   file_path: safety.rs
   start_line: 97
   signature: pub struct InjectionWarning
@@ -21434,9 +21435,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 8
     decorators:
     - derive(Debug, Clone, Copy, PartialEq, Eq)
+    line_count: 8
   file_path: safety.rs
   start_line: 369
   signature: pub enum LeakAction
@@ -21484,9 +21485,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 6
     decorators:
     - derive(Debug, Clone)
+    line_count: 6
   file_path: safety.rs
   start_line: 410
   signature: pub struct LeakPattern
@@ -21512,9 +21513,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 8
     decorators:
     - derive(Debug)
+    line_count: 8
   file_path: safety.rs
   start_line: 431
   signature: pub struct LeakScanResult
@@ -21713,9 +21714,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 12
     decorators:
     - derive(Debug, Clone)
+    line_count: 12
   file_path: safety.rs
   start_line: 772
   signature: pub struct PolicyRule
@@ -21758,9 +21759,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 10
     decorators:
     - derive(Debug, Clone, Copy, PartialEq, Eq)
+    line_count: 10
   file_path: safety.rs
   start_line: 811
   signature: pub enum PolicyAction
@@ -22147,9 +22148,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 8
     decorators:
     - derive(Debug, Clone, Default)
+    line_count: 8
   file_path: safety.rs
   start_line: 1076
   signature: pub struct ValidationResult
@@ -22209,9 +22210,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 8
     decorators:
     - derive(Debug, Clone)
+    line_count: 8
   file_path: safety.rs
   start_line: 1121
   signature: pub struct ValidationError
@@ -22223,9 +22224,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 9
     decorators:
     - derive(Debug, Clone, Copy, PartialEq, Eq, Hash)
+    line_count: 9
   file_path: safety.rs
   start_line: 1132
   signature: pub enum ValidationErrorCode
@@ -22714,10 +22715,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 5
     decorators:
     - test
     is_test: true
+    line_count: 5
   file_path: safety.rs
   start_line: 1701
   signature: fn test_safety_config_defaults()
@@ -22728,10 +22729,10 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 6
     is_test: true
     decorators:
     - test
-    line_count: 6
   file_path: safety.rs
   start_line: 1710
   signature: fn test_sanitizer_detect_ignore_previous()
@@ -22743,9 +22744,9 @@ nodes:
   type: code
   metadata:
     is_test: true
-    line_count: 6
     decorators:
     - test
+    line_count: 6
   file_path: safety.rs
   start_line: 1718
   signature: fn test_sanitizer_detect_system_injection()
@@ -22756,9 +22757,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 6
     decorators:
     - test
-    line_count: 6
     is_test: true
   file_path: safety.rs
   start_line: 1726
@@ -22770,10 +22771,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 6
     is_test: true
     decorators:
     - test
+    line_count: 6
   file_path: safety.rs
   start_line: 1734
   signature: fn test_sanitizer_clean_content_no_warnings()
@@ -22784,9 +22785,9 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     decorators:
     - test
+    is_test: true
     line_count: 6
   file_path: safety.rs
   start_line: 1742
@@ -22826,10 +22827,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 7
-    is_test: true
     decorators:
     - test
+    is_test: true
+    line_count: 7
   file_path: safety.rs
   start_line: 1777
   signature: fn test_leak_detect_github_token()
@@ -22840,10 +22841,10 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 7
     decorators:
     - test
     is_test: true
-    line_count: 7
   file_path: safety.rs
   start_line: 1786
   signature: fn test_leak_detect_aws_key()
@@ -22854,9 +22855,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 7
     decorators:
     - test
+    line_count: 7
     is_test: true
   file_path: safety.rs
   start_line: 1795
@@ -22868,10 +22869,10 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
     line_count: 7
     decorators:
     - test
-    is_test: true
   file_path: safety.rs
   start_line: 1804
   signature: fn test_leak_clean_content()
@@ -22882,10 +22883,10 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
+    line_count: 9
     decorators:
     - test
-    line_count: 9
-    is_test: true
   file_path: safety.rs
   start_line: 1813
   signature: fn test_leak_redact_bearer_token()
@@ -22896,9 +22897,9 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
     decorators:
     - test
-    is_test: true
     line_count: 6
   file_path: safety.rs
   start_line: 1824
@@ -22910,8 +22911,8 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     line_count: 4
+    is_test: true
     decorators:
     - test
   file_path: safety.rs
@@ -22924,9 +22925,9 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
     decorators:
     - test
-    is_test: true
     line_count: 5
   file_path: safety.rs
   start_line: 1840
@@ -22940,8 +22941,8 @@ nodes:
   metadata:
     decorators:
     - test
-    line_count: 4
     is_test: true
+    line_count: 4
   file_path: safety.rs
   start_line: 1847
   signature: fn test_policy_blocks_shell_injection()
@@ -22952,10 +22953,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
+    line_count: 5
     decorators:
     - test
-    line_count: 5
+    is_test: true
   file_path: safety.rs
   start_line: 1853
   signature: fn test_policy_normal_content_passes()
@@ -22980,8 +22981,8 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 7
     is_test: true
+    line_count: 7
     decorators:
     - test
   file_path: safety.rs
@@ -23022,10 +23023,10 @@ nodes:
   status: done
   type: code
   metadata:
-    decorators:
-    - test
     line_count: 6
     is_test: true
+    decorators:
+    - test
   file_path: safety.rs
   start_line: 1902
   signature: fn test_validator_valid_input()
@@ -23036,10 +23037,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
-    line_count: 6
     decorators:
     - test
+    is_test: true
+    line_count: 6
   file_path: safety.rs
   start_line: 1910
   signature: fn test_validator_empty_input()
@@ -23050,10 +23051,10 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 6
+    is_test: true
     decorators:
     - test
-    is_test: true
-    line_count: 6
   file_path: safety.rs
   start_line: 1918
   signature: fn test_validator_too_long()
@@ -23064,9 +23065,9 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     decorators:
     - test
+    is_test: true
     line_count: 6
   file_path: safety.rs
   start_line: 1926
@@ -23078,9 +23079,9 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
     decorators:
     - test
-    is_test: true
     line_count: 8
   file_path: safety.rs
   start_line: 1936
@@ -23106,10 +23107,10 @@ nodes:
   status: done
   type: code
   metadata:
-    decorators:
-    - test
     line_count: 11
     is_test: true
+    decorators:
+    - test
   file_path: safety.rs
   start_line: 1958
   signature: fn test_wrap_external_content()
@@ -23121,9 +23122,9 @@ nodes:
   type: code
   metadata:
     line_count: 7
-    is_test: true
     decorators:
     - test
+    is_test: true
   file_path: safety.rs
   start_line: 1971
   signature: fn test_floor_char_boundary()
@@ -23134,10 +23135,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     line_count: 6
     decorators:
     - test
+    is_test: true
   file_path: safety.rs
   start_line: 1982
   signature: fn test_check_prompt_injection()
@@ -23150,8 +23151,8 @@ nodes:
   metadata:
     decorators:
     - test
-    is_test: true
     line_count: 6
+    is_test: true
   file_path: safety.rs
   start_line: 1990
   signature: fn test_check_sensitive_leak()
@@ -23236,10 +23237,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 8
-    is_test: true
     decorators:
     - test
+    line_count: 8
+    is_test: true
   file_path: tool_result_storage.rs
   start_line: 116
   signature: fn test_should_persist()
@@ -23250,10 +23251,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
+    line_count: 15
     decorators:
     - test
-    line_count: 15
+    is_test: true
   file_path: tool_result_storage.rs
   start_line: 126
   signature: fn test_persist_and_preview()
@@ -23345,9 +23346,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 27
     decorators:
     - derive(clap::Subcommand, Debug)
-    line_count: 27
   file_path: main.rs
   start_line: 59
   signature: enum Commands
@@ -23358,9 +23359,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 44
     decorators:
     - derive(clap::Subcommand, Debug)
-    line_count: 44
   file_path: main.rs
   start_line: 88
   signature: enum DaemonCommands
@@ -23371,9 +23372,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 330
     decorators:
     - tokio::main
-    line_count: 330
   file_path: main.rs
   start_line: 134
   signature: async fn main() -> anyhow::Result<()>
@@ -23439,9 +23440,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 9
     decorators:
     - derive(Clone)
-    line_count: 9
   file_path: agent.rs
   start_line: 173
   signature: pub struct SubAgentOptions
@@ -23464,9 +23465,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 4
     decorators:
     - derive(Clone)
+    line_count: 4
   file_path: agent.rs
   start_line: 191
   signature: pub struct ContextBlock
@@ -24245,9 +24246,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 4
     decorators:
     - derive(Debug, Default)
+    line_count: 4
   file_path: tool_stats.rs
   start_line: 14
   signature: struct ToolStat
@@ -24259,9 +24260,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 3
     decorators:
     - derive(Debug, Default)
-    line_count: 3
   file_path: tool_stats.rs
   start_line: 21
   signature: pub struct ToolStatsTracker
@@ -24273,9 +24274,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 6
     decorators:
     - derive(Serialize, Clone, Debug)
-    line_count: 6
   file_path: tool_stats.rs
   start_line: 27
   signature: pub struct ToolStatSnapshot
@@ -24348,10 +24349,10 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 26
     decorators:
     - test
     is_test: true
-    line_count: 26
   file_path: tool_stats.rs
   start_line: 107
   signature: fn test_top_n()
@@ -24362,10 +24363,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 5
     decorators:
     - test
     is_test: true
+    line_count: 5
   file_path: tool_stats.rs
   start_line: 135
   signature: fn test_empty()
@@ -24423,9 +24424,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 20
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
+    line_count: 20
   file_path: orchestrator.rs
   start_line: 54
   signature: pub struct SpecialistAgent
@@ -24523,9 +24524,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 24
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
-    line_count: 24
   file_path: orchestrator.rs
   start_line: 152
   signature: pub struct Task
@@ -24585,9 +24586,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 8
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
+    line_count: 8
   file_path: orchestrator.rs
   start_line: 216
   signature: pub struct TaskResult
@@ -24943,10 +24944,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 16
-    is_test: true
     decorators:
     - test
+    is_test: true
+    line_count: 16
   file_path: orchestrator.rs
   start_line: 826
   signature: fn test_task_priority_sorting()
@@ -24971,8 +24972,8 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 20
     is_test: true
+    line_count: 20
     decorators:
     - test
   file_path: orchestrator.rs
@@ -24999,10 +25000,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
+    line_count: 20
     decorators:
     - test
-    line_count: 20
+    is_test: true
   file_path: orchestrator.rs
   start_line: 910
   signature: fn test_update_config_enabled_toggle()
@@ -25013,10 +25014,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     decorators:
     - test
     line_count: 12
+    is_test: true
   file_path: orchestrator.rs
   start_line: 932
   signature: fn test_update_config_no_changes()
@@ -25029,8 +25030,8 @@ nodes:
   metadata:
     decorators:
     - test
-    is_test: true
     line_count: 28
+    is_test: true
   file_path: orchestrator.rs
   start_line: 946
   signature: fn test_update_config_adds_specialist()
@@ -25041,10 +25042,10 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 27
     is_test: true
     decorators:
     - test
-    line_count: 27
   file_path: orchestrator.rs
   start_line: 976
   signature: fn test_update_config_removes_idle_specialist()
@@ -25055,10 +25056,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
-    line_count: 32
     decorators:
     - test
+    is_test: true
+    line_count: 32
   file_path: orchestrator.rs
   start_line: 1005
   signature: fn test_update_config_keeps_busy_specialist()
@@ -25112,8 +25113,8 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 6
     is_test: true
+    line_count: 6
     decorators:
     - test
   file_path: markdown.rs
@@ -25126,10 +25127,10 @@ nodes:
   status: done
   type: code
   metadata:
-    decorators:
-    - test
     is_test: true
     line_count: 6
+    decorators:
+    - test
   file_path: markdown.rs
   start_line: 213
   signature: fn test_inline_code()
@@ -25140,10 +25141,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
-    line_count: 7
     decorators:
     - test
+    is_test: true
+    line_count: 7
   file_path: markdown.rs
   start_line: 221
   signature: fn test_code_block()
@@ -25154,10 +25155,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
-    line_count: 5
     decorators:
     - test
+    is_test: true
+    line_count: 5
   file_path: markdown.rs
   start_line: 230
   signature: fn test_code_block_html_escape()
@@ -25169,9 +25170,9 @@ nodes:
   type: code
   metadata:
     is_test: true
+    line_count: 6
     decorators:
     - test
-    line_count: 6
   file_path: markdown.rs
   start_line: 237
   signature: fn test_heading_to_bold()
@@ -25182,10 +25183,10 @@ nodes:
   status: done
   type: code
   metadata:
-    decorators:
-    - test
     is_test: true
     line_count: 7
+    decorators:
+    - test
   file_path: markdown.rs
   start_line: 245
   signature: fn test_unordered_list()
@@ -25197,9 +25198,9 @@ nodes:
   type: code
   metadata:
     is_test: true
-    line_count: 7
     decorators:
     - test
+    line_count: 7
   file_path: markdown.rs
   start_line: 254
   signature: fn test_ordered_list()
@@ -25210,10 +25211,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 6
-    is_test: true
     decorators:
     - test
+    is_test: true
+    line_count: 6
   file_path: markdown.rs
   start_line: 263
   signature: fn test_link()
@@ -25224,10 +25225,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
-    line_count: 6
     decorators:
     - test
+    line_count: 6
+    is_test: true
   file_path: markdown.rs
   start_line: 271
   signature: fn test_blockquote()
@@ -25238,8 +25239,8 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     line_count: 6
+    is_test: true
     decorators:
     - test
   file_path: markdown.rs
@@ -25252,10 +25253,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
-    line_count: 6
     decorators:
     - test
+    is_test: true
+    line_count: 6
   file_path: markdown.rs
   start_line: 287
   signature: fn test_html_escape_in_text()
@@ -25266,10 +25267,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
-    line_count: 4
     decorators:
     - test
+    line_count: 4
+    is_test: true
   file_path: markdown.rs
   start_line: 295
   signature: fn test_horizontal_rule()
@@ -25280,8 +25281,8 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     line_count: 4
+    is_test: true
     decorators:
     - test
   file_path: markdown.rs
@@ -25294,10 +25295,10 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 7
     is_test: true
     decorators:
     - test
-    line_count: 7
   file_path: markdown.rs
   start_line: 307
   signature: fn test_nested_list()
@@ -25310,8 +25311,8 @@ nodes:
   metadata:
     decorators:
     - test
-    is_test: true
     line_count: 3
+    is_test: true
   file_path: markdown.rs
   start_line: 316
   signature: fn test_empty_input()
@@ -25322,10 +25323,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 6
+    is_test: true
     decorators:
     - test
-    is_test: true
+    line_count: 6
   file_path: markdown.rs
   start_line: 321
   signature: fn test_plain_text_passthrough()
@@ -25355,9 +25356,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 12
     decorators:
     - derive(Debug, Clone)
-    line_count: 12
   file_path: worktree.rs
   start_line: 27
   signature: pub struct WorktreeInfo
@@ -25610,8 +25611,8 @@ nodes:
   metadata:
     decorators:
     - tokio::test
-    line_count: 35
     is_test: true
+    line_count: 35
   file_path: worktree.rs
   start_line: 658
   signature: async fn test_commit_and_checkpoint()
@@ -25623,9 +25624,9 @@ nodes:
   type: code
   metadata:
     is_test: true
-    line_count: 7
     decorators:
     - tokio::test
+    line_count: 7
   file_path: worktree.rs
   start_line: 695
   signature: async fn test_worktree_path()
@@ -25655,9 +25656,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 14
     decorators:
     - derive(Debug, Clone)
-    line_count: 14
   file_path: search.rs
   start_line: 16
   signature: pub struct SearchResult
@@ -25814,10 +25815,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 7
-    is_test: true
     decorators:
     - tokio::test
+    line_count: 7
+    is_test: true
   file_path: search.rs
   start_line: 382
   signature: async fn test_session_search_new()
@@ -25828,10 +25829,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 33
-    is_test: true
     decorators:
     - tokio::test
+    is_test: true
+    line_count: 33
   file_path: search.rs
   start_line: 391
   signature: async fn test_index_and_search()
@@ -25842,10 +25843,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
+    line_count: 23
     decorators:
     - tokio::test
-    line_count: 23
+    is_test: true
   file_path: search.rs
   start_line: 426
   signature: async fn test_search_in_session()
@@ -25856,8 +25857,8 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 24
     is_test: true
+    line_count: 24
     decorators:
     - tokio::test
   file_path: search.rs
@@ -25884,10 +25885,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 5
     decorators:
     - test
     is_test: true
+    line_count: 5
   file_path: search.rs
   start_line: 501
   signature: fn test_escape_fts_term()
@@ -25898,9 +25899,9 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     decorators:
     - test
+    is_test: true
     line_count: 36
   file_path: search.rs
   start_line: 508
@@ -26357,8 +26358,8 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     line_count: 9
+    is_test: true
     decorators:
     - test
   file_path: sandbox.rs
@@ -26385,10 +26386,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     line_count: 10
     decorators:
     - test
+    is_test: true
   file_path: sandbox.rs
   start_line: 595
   signature: fn test_sandbox_exec_denied()
@@ -26399,9 +26400,9 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
     decorators:
     - test
-    is_test: true
     line_count: 20
   file_path: sandbox.rs
   start_line: 607
@@ -26414,9 +26415,9 @@ nodes:
   type: code
   metadata:
     line_count: 27
-    is_test: true
     decorators:
     - test
+    is_test: true
   file_path: sandbox.rs
   start_line: 629
   signature: fn test_sandbox_fs_read_path_check()
@@ -26434,9 +26435,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 12
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize)
+    line_count: 12
   file_path: dashboard.rs
   start_line: 33
   signature: pub struct DashboardConfig
@@ -26495,9 +26496,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 4
     decorators:
     - derive(Serialize)
+    line_count: 4
   file_path: dashboard.rs
   start_line: 88
   signature: struct MemoryStats
@@ -26521,9 +26522,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 4
     decorators:
     - derive(Serialize)
-    line_count: 4
   file_path: dashboard.rs
   start_line: 102
   signature: struct SessionsResponse
@@ -26534,9 +26535,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 5
     decorators:
     - derive(Serialize)
-    line_count: 5
   file_path: dashboard.rs
   start_line: 108
   signature: struct TaskInfo
@@ -26547,9 +26548,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 4
     decorators:
     - derive(Serialize)
+    line_count: 4
   file_path: dashboard.rs
   start_line: 115
   signature: struct TasksResponse
@@ -26612,9 +26613,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 5
     decorators:
     - derive(Serialize)
+    line_count: 5
   file_path: dashboard.rs
   start_line: 153
   signature: struct ChannelsConfigRedacted
@@ -26625,9 +26626,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 6
     decorators:
     - derive(Serialize)
+    line_count: 6
   file_path: dashboard.rs
   start_line: 160
   signature: struct MemoryConfigInfo
@@ -26638,9 +26639,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 5
     decorators:
     - derive(Deserialize)
-    line_count: 5
   file_path: dashboard.rs
   start_line: 168
   signature: struct MessageRequest
@@ -26651,9 +26652,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 5
     decorators:
     - derive(Serialize)
+    line_count: 5
   file_path: dashboard.rs
   start_line: 175
   signature: struct MessageResponse
@@ -26664,9 +26665,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 3
     decorators:
     - derive(Serialize)
+    line_count: 3
   file_path: dashboard.rs
   start_line: 182
   signature: struct ErrorResponse
@@ -26677,9 +26678,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 13
     decorators:
     - derive(Serialize)
-    line_count: 13
   file_path: dashboard.rs
   start_line: 187
   signature: struct TokensResponse
@@ -26690,9 +26691,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 7
     decorators:
     - derive(Serialize)
+    line_count: 7
   file_path: dashboard.rs
   start_line: 202
   signature: struct OrchestratorResponse
@@ -27254,8 +27255,8 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     line_count: 9
+    is_test: true
     decorators:
     - test
   file_path: browser.rs
@@ -27282,10 +27283,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     decorators:
     - test
     line_count: 9
+    is_test: true
   file_path: browser.rs
   start_line: 767
   signature: fn test_screenshot_result()
@@ -27581,9 +27582,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 8
     decorators:
     - derive(Debug)
-    line_count: 8
   file_path: context.rs
   start_line: 331
   signature: pub struct ProcessedResponse
@@ -27619,10 +27620,10 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 4
     decorators:
     - test
     is_test: true
-    line_count: 4
   file_path: context.rs
   start_line: 374
   signature: fn test_processed_response_no_reply()
@@ -27647,10 +27648,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 5
+    is_test: true
     decorators:
     - test
-    is_test: true
+    line_count: 5
   file_path: context.rs
   start_line: 386
   signature: fn test_processed_response_reply_tag()
@@ -27661,10 +27662,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 6
-    is_test: true
     decorators:
     - test
+    is_test: true
+    line_count: 6
   file_path: context.rs
   start_line: 393
   signature: fn test_processed_response_plain()
@@ -27703,10 +27704,10 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
     line_count: 16
     decorators:
     - test
-    is_test: true
   file_path: context.rs
   start_line: 427
   signature: fn test_message_context_prefix_with_reply()
@@ -27745,10 +27746,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 17
-    is_test: true
     decorators:
     - test
+    is_test: true
+    line_count: 17
   file_path: context.rs
   start_line: 480
   signature: fn test_channel_capabilities_format()
@@ -27759,10 +27760,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 13
     is_test: true
     decorators:
     - test
+    line_count: 13
   file_path: context.rs
   start_line: 499
   signature: fn test_runtime_context_format()
@@ -27773,10 +27774,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
-    line_count: 17
     decorators:
     - test
+    is_test: true
+    line_count: 17
   file_path: context.rs
   start_line: 516
   signature: fn test_telegram_reply_text_message()
@@ -27801,10 +27802,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 9
-    is_test: true
     decorators:
     - test
+    line_count: 9
+    is_test: true
   file_path: context.rs
   start_line: 549
   signature: fn test_telegram_reply_sticker()
@@ -27815,10 +27816,10 @@ nodes:
   status: done
   type: code
   metadata:
-    decorators:
-    - test
     is_test: true
     line_count: 9
+    decorators:
+    - test
   file_path: context.rs
   start_line: 560
   signature: fn test_telegram_reply_photo_no_caption()
@@ -27829,10 +27830,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
+    line_count: 9
     decorators:
     - test
-    line_count: 9
+    is_test: true
   file_path: context.rs
   start_line: 571
   signature: fn test_telegram_reply_voice()
@@ -27857,10 +27858,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
-    line_count: 9
     decorators:
     - test
+    is_test: true
+    line_count: 9
   file_path: context.rs
   start_line: 593
   signature: fn test_telegram_reply_video()
@@ -27887,8 +27888,8 @@ nodes:
   metadata:
     decorators:
     - test
-    is_test: true
     line_count: 8
+    is_test: true
   file_path: context.rs
   start_line: 615
   signature: fn test_telegram_reply_empty_message()
@@ -27899,10 +27900,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
-    line_count: 11
     decorators:
     - test
+    is_test: true
+    line_count: 11
   file_path: context.rs
   start_line: 625
   signature: fn test_telegram_reply_no_sender()
@@ -27913,10 +27914,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 7
-    is_test: true
     decorators:
     - test
+    line_count: 7
+    is_test: true
   file_path: context.rs
   start_line: 640
   signature: fn test_discord_reply_text()
@@ -27927,10 +27928,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 5
+    is_test: true
     decorators:
     - test
-    is_test: true
+    line_count: 5
   file_path: context.rs
   start_line: 649
   signature: fn test_discord_reply_empty_content()
@@ -27942,9 +27943,9 @@ nodes:
   type: code
   metadata:
     line_count: 11
+    is_test: true
     decorators:
     - test
-    is_test: true
   file_path: context.rs
   start_line: 658
   signature: fn test_truncated_short_text()
@@ -27955,8 +27956,8 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     line_count: 12
+    is_test: true
     decorators:
     - test
   file_path: context.rs
@@ -27969,10 +27970,10 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 27
+    is_test: true
     decorators:
     - test
-    is_test: true
-    line_count: 27
   file_path: context.rs
   start_line: 687
   signature: fn test_telegram_reply_context_integration()
@@ -27999,8 +28000,8 @@ nodes:
   metadata:
     decorators:
     - test
-    is_test: true
     line_count: 20
+    is_test: true
   file_path: context.rs
   start_line: 743
   signature: fn test_discord_reply_context_dm()
@@ -28018,9 +28019,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 8
     decorators:
     - derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)
-    line_count: 8
   file_path: message_queue.rs
   start_line: 11
   signature: pub enum Priority
@@ -28068,9 +28069,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 3
     decorators:
     - derive(Debug)
-    line_count: 3
   file_path: message_queue.rs
   start_line: 50
   signature: pub struct MessageQueue
@@ -28164,9 +28165,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 4
     decorators:
     - derive(Debug, Clone)
+    line_count: 4
   file_path: message_queue.rs
   start_line: 97
   signature: pub struct SessionQueues
@@ -28250,10 +28251,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
-    line_count: 12
     decorators:
     - tokio::test
+    is_test: true
+    line_count: 12
   file_path: message_queue.rs
   start_line: 159
   signature: async fn test_session_queues()
@@ -28283,9 +28284,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 6
     decorators:
     - derive(Debug, Clone)
+    line_count: 6
   file_path: distributed.rs
   start_line: 34
   signature: pub struct PeerInfo
@@ -28354,10 +28355,10 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 18
     decorators:
     - derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)
     - serde(rename_all = "snake_case")
-    line_count: 18
   file_path: distributed.rs
   start_line: 98
   signature: pub enum MessageType
@@ -28695,10 +28696,10 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 15
+    is_test: true
     decorators:
     - test
-    is_test: true
-    line_count: 15
   file_path: distributed.rs
   start_line: 509
   signature: fn test_message_serialization()
@@ -28723,10 +28724,10 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
     decorators:
     - test
     line_count: 16
-    is_test: true
   file_path: distributed.rs
   start_line: 539
   signature: fn test_custom_message_type()
@@ -28737,9 +28738,9 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     decorators:
     - test
+    is_test: true
     line_count: 8
   file_path: distributed.rs
   start_line: 557
@@ -28753,8 +28754,8 @@ nodes:
   metadata:
     decorators:
     - test
-    line_count: 8
     is_test: true
+    line_count: 8
   file_path: distributed.rs
   start_line: 567
   signature: fn test_task_result_payload()
@@ -28765,8 +28766,8 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     line_count: 5
+    is_test: true
     decorators:
     - test
   file_path: distributed.rs
@@ -28779,8 +28780,8 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
     line_count: 7
+    is_test: true
     decorators:
     - tokio::test
   file_path: distributed.rs
@@ -28793,9 +28794,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 12
     decorators:
     - tokio::test
+    line_count: 12
     is_test: true
   file_path: distributed.rs
   start_line: 593
@@ -28807,10 +28808,10 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
+    line_count: 28
     decorators:
     - tokio::test
-    line_count: 28
-    is_test: true
   file_path: distributed.rs
   start_line: 607
   signature: async fn test_inbox_operations()
@@ -28823,8 +28824,8 @@ nodes:
   metadata:
     decorators:
     - tokio::test
-    is_test: true
     line_count: 19
+    is_test: true
   file_path: distributed.rs
   start_line: 637
   signature: async fn test_stale_peer_detection()
@@ -28858,9 +28859,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 20
     decorators:
     - derive(Clone)
-    line_count: 20
   file_path: channels/telegram.rs
   start_line: 17
   signature: struct TelegramBot
@@ -29659,9 +29660,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 8
     decorators:
     - derive(Debug, Deserialize)
-    line_count: 8
   file_path: channels/signal.rs
   start_line: 300
   signature: struct SignalRpcMessage
@@ -29915,10 +29916,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 9
-    is_test: true
     decorators:
     - test
+    line_count: 9
+    is_test: true
   file_path: channels/whatsapp.rs
   start_line: 387
   signature: fn test_split_message()
@@ -29929,10 +29930,10 @@ nodes:
   status: done
   type: code
   metadata:
-    is_test: true
+    line_count: 6
     decorators:
     - test
-    line_count: 6
+    is_test: true
   file_path: channels/whatsapp.rs
   start_line: 398
   signature: fn test_split_message_at_boundary()
@@ -30142,9 +30143,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 4
     decorators:
     - derive(Debug, Deserialize)
+    line_count: 4
   file_path: channels/matrix.rs
   start_line: 501
   signature: struct SyncResponse
@@ -30156,9 +30157,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 4
     decorators:
     - derive(Debug, Deserialize)
-    line_count: 4
   file_path: channels/matrix.rs
   start_line: 507
   signature: struct RoomsResponse
@@ -30169,9 +30170,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 3
     decorators:
     - derive(Debug, Deserialize)
+    line_count: 3
   file_path: channels/matrix.rs
   start_line: 513
   signature: struct JoinedRoom
@@ -30182,9 +30183,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 3
     decorators:
     - derive(Debug, Deserialize)
+    line_count: 3
   file_path: channels/matrix.rs
   start_line: 518
   signature: struct Timeline
@@ -30233,10 +30234,10 @@ nodes:
   status: done
   type: code
   metadata:
+    is_test: true
     decorators:
     - test
     line_count: 16
-    is_test: true
   file_path: channels/matrix.rs
   start_line: 577
   signature: fn test_markdown_to_html()
@@ -30249,8 +30250,8 @@ nodes:
   metadata:
     decorators:
     - test
-    is_test: true
     line_count: 4
+    is_test: true
   file_path: channels/matrix.rs
   start_line: 595
   signature: fn test_default_config()
@@ -30496,10 +30497,10 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 5
-    is_test: true
     decorators:
     - derive(Debug, Deserialize)
+    line_count: 5
+    is_test: true
   file_path: channels/slack.rs
   start_line: 500
   signature: struct AuthTestResponse
@@ -30523,9 +30524,9 @@ nodes:
   status: done
   type: code
   metadata:
-    line_count: 4
     decorators:
     - derive(Debug, Deserialize)
+    line_count: 4
   file_path: channels/slack.rs
   start_line: 514
   signature: struct SlackResponse
@@ -30568,9 +30569,9 @@ nodes:
   status: done
   type: code
   metadata:
+    line_count: 13
     decorators:
     - async_trait
-    line_count: 13
   file_path: channels/mod.rs
   start_line: 22
   signature: 'pub trait Channel: Send + Sync'
@@ -30744,120 +30745,99 @@ nodes:
   - extractor
   priority: 10
   metadata:
-    project: engramai
     file: src/extractor.rs
-- id: infer:component:0
-  title: platform
+    project: engramai
+- id: engram-a3-sql-cleanup
+  title: 'A3: SQL 一次性清理 — 删存量重复 + 系统指令垃圾'
   status: todo
-  type: component
-  metadata:
-    size: 4
-    flow: 0.014756275162784133
-  source: infer
-- id: infer:component:1
-  title: channels
-  status: todo
-  type: component
-  metadata:
-    size: 54
-    flow: 0.9705518228587371
-  source: infer
-- id: infer:component:2
-  title: gid_storage
-  status: todo
-  type: component
-  metadata:
-    flow: 0.0
-    size: 1
-  source: infer
-- id: infer:component:3
-  title: gid_storage
-  status: todo
-  type: component
-  metadata:
-    flow: 0.0
-    size: 1
-  source: infer
-- id: infer:component:4
-  title: gid_storage
-  status: todo
-  type: component
-  metadata:
-    size: 1
-    flow: 0.0
-  source: infer
-- id: infer:component:5
-  title: gid_storage
-  status: todo
-  type: component
-  metadata:
-    flow: 0.0
-    size: 1
-  source: infer
-- id: ISS-007
-  title: Engram Memory Recall Quality — Three Bugs
-  status: done
-  description: Fix dual scoring (activation vs confidence), global singleton WM (no session isolation), and broken confidence in cached WM path.
+  description: |-
+    跑 SQL 脚本清理存量垃圾：
+    1. 删精确重复（105 条 content hash 相同）— 保留 access_count 最高的
+    2. 删系统指令垃圾（匹配 "你是 RustClaw"、"Read SOUL.md" 等 pattern）
+    3. 清理前先 backup DB
+    4. 清理后 PRAGMA integrity_check + 验证 recall 质量
+    必须先完成 A1+A2 堵住污染源，否则清理完又会写入新垃圾。
   tags:
   - engram
-  - memory
-  - bug
-  - critical
+  - cleanup
+  - one-time
+  priority: 15
+  metadata:
+    project: engramai
+- id: engram-b1-entity-index
+  title: 'B1: Entity 索引实现 — extraction + storage + recall (ISS-009)'
+  status: todo
+  description: |-
+    ISS-009 最大改动，需要 ritual 流程。
+    1. Entity extraction on write — extractor 返回 entities（人名/项目名/概念/工具名）
+    2. Entity storage — 写入 entities + memory_entities + entity_relations 三张表
+    3. Entity-aware recall — 第 4 路检索：query→entity→related memories
+    4. Entity dedup — 同名 entity 合并（fuzzy match）
+    估计 500-800 行新代码，跨 extractor.rs、storage.rs、memory.rs、hybrid_search.rs
+  tags:
+  - engram
+  - engramai
+  - entity
+  - recall-quality
   priority: 20
-  type: feature
   metadata:
-    design_doc: .gid/issues/ISS-007/design.md
-- id: ISS-007-1
-  title: 'Fix confidence mapping: r.activation → r.confidence'
-  status: done
-  description: Replace r.activation with r.confidence in recall(), session_recall(), and recall_associated() in src/memory.rs. 3 one-line changes.
+    iss: ISS-009
+    ritual: true
+    project: engramai
+- id: engram-b2-dedup
+  title: 'B2: Dedup on write — embedding similarity + merge (ISS-003)'
+  status: todo
+  description: |-
+    ISS-003。add_raw() 前做 embedding similarity check：
+    - cosine > 0.95 → 合并（不新增）
+    - 合并策略：access_count=sum, importance=max, created_at=min, content=最新版
+    - Hebbian links 去重合并
+    - 可选：content hash 精确 dedup 作为快速路径
+    约 200 行改动，主要在 memory.rs + storage.rs
   tags:
   - engram
-  - bug
-  - trivial
-  metadata:
-    design_ref: §2
-    files:
-    - src/memory.rs
-- id: ISS-007-2
-  title: Remove redundant probe in cached WM path (engramai)
-  status: done
-  description: Eliminate second recall_from_namespace call in session_recall_ns cached path. Capture initial probe ratio and reuse it.
-  tags:
-  - engram
-  - bug
   - engramai
+  - dedup
+  priority: 25
   metadata:
-    files:
-    - engramai/src/memory.rs
-    design_ref: §4
-- id: ISS-007-3
-  title: Restore confidence in cached WM path (engramai)
-  status: done
-  description: Add CachedScore to SessionWorkingMemory, store scores during full recall, reuse in cached path instead of zero-signal compute_query_confidence.
+    project: engramai
+    iss: ISS-003
+- id: engram-b3-confidence
+  title: 'B3: Confidence score — 多信号融合 recall confidence (ISS-007)'
+  status: todo
+  description: |-
+    ISS-007。confidence.rs 已有框架，需要：
+    1. 从 hybrid search 多路分数融合 confidence（embedding sim + FTS score + ACT-R activation + entity match）
+    2. 归一化到 0.0-1.0
+    3. recall 返回每个结果的 confidence
+    4. RustClaw auto-recall hook 按阈值过滤低 confidence 结果
+    约 100 行改动
   tags:
   - engram
-  - bug
   - engramai
-  - critical
+  - confidence
+  priority: 30
   metadata:
-    design_ref: §5
-    files:
-    - engramai/src/memory.rs
-    - engramai/src/session_wm.rs
-- id: ISS-007-4
-  title: Replace global WM with SessionRegistry
-  status: done
-  description: 'Replace wm: Mutex<SessionWorkingMemory> with wm_registry: Mutex<SessionRegistry> in MemoryManager. Thread session_key through session_recall() from engram_hooks.rs.'
+    project: engramai
+    iss: ISS-007
+- id: engram-b4-recency
+  title: 'B4: Recency 调参 — ACT-R decay analysis + tuning (ISS-002)'
+  status: todo
+  description: |-
+    ISS-002。需要先量化当前 ACT-R 分布：
+    1. 分析当前 decay parameter d 值及其效果
+    2. 对比新旧记忆的 activation 分布
+    3. 调整 d 值让 recency 权重更高
+    4. 或在 scoring 中加 recency bonus factor
+    约 20 行代码 + 分析工作
   tags:
   - engram
-  - bug
-  - critical
+  - engramai
+  - recency
+  priority: 35
   metadata:
-    files:
-    - src/memory.rs
-    - src/engram_hooks.rs
-    design_ref: §3
+    project: engramai
+    iss: ISS-002
 edges:
 - from: method:channels/telegram.rs:TelegramBot.handle_voice_message
   to: method:voice_mode.rs:VoiceMode.is_enabled
@@ -142732,331 +142712,42 @@ edges:
 - from: engram-phase-b
   to: engram-phase-a
   relation: depends_on
-- from: infer:component:0
-  to: file:platform/instance.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:0
-  to: file:platform/auth.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:0
-  to: file:platform/server.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:0
-  to: file:platform/mod.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:llm.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:tts.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:session.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:claude_cli.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:cron.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:events.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:tools.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:text_utils.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:ritual_runner.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:config.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:platform/db.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:user_model.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:memory.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:reload.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:skills.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:plugins.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:voice_mode.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:engram_hooks.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:serverless.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:autopilot.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:hooks.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:gid_storage/schema.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:auth_profiles.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:credential.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:stt.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:oauth.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:daemon.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:prompt/sections.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:prompt/mod.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:workspace.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:safety.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:tool_result_storage.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:heartbeat.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:main.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:agent.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:tool_stats.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:orchestrator.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:markdown.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:worktree.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:search.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:sandbox.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:dashboard.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:browser.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:ritual_adapter.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:context.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:message_queue.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:distributed.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:channels/telegram.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:channels/discord.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:channels/signal.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:channels/whatsapp.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:channels/matrix.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:channels/slack.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:1
-  to: file:channels/mod.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:2
-  to: file:gid_storage/types.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:3
-  to: file:gid_storage/error.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:4
-  to: file:gid_storage/graph_storage.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: infer:component:5
-  to: file:gid_storage/mod.rs
-  relation: contains
-  metadata:
-    source: infer
-- from: ISS-007-3
-  to: ISS-007-1
+- from: engram-a3-sql-cleanup
+  to: engram-a1-hook-filter
   relation: depends_on
-- from: ISS-007-4
-  to: ISS-007-1
+- from: engram-a3-sql-cleanup
+  to: engram-a2-extractor-negatives
   relation: depends_on
-- from: ISS-007-1
-  to: ISS-007
+- from: engram-b1-entity-index
+  to: engram-a3-sql-cleanup
+  relation: depends_on
+- from: engram-b2-dedup
+  to: engram-a3-sql-cleanup
+  relation: depends_on
+- from: engram-b3-confidence
+  to: engram-b1-entity-index
+  relation: depends_on
+- from: engram-b4-recency
+  to: engram-b3-confidence
+  relation: depends_on
+- from: engram-a1-hook-filter
+  to: engram-phase-a
   relation: subtask_of
-- from: ISS-007-2
-  to: ISS-007
+- from: engram-a2-extractor-negatives
+  to: engram-phase-a
   relation: subtask_of
-- from: ISS-007-3
-  to: ISS-007
+- from: engram-a3-sql-cleanup
+  to: engram-phase-a
   relation: subtask_of
-- from: ISS-007-4
-  to: ISS-007
+- from: engram-b1-entity-index
+  to: engram-phase-b
+  relation: subtask_of
+- from: engram-b2-dedup
+  to: engram-phase-b
+  relation: subtask_of
+- from: engram-b3-confidence
+  to: engram-phase-b
+  relation: subtask_of
+- from: engram-b4-recency
+  to: engram-phase-b
   relation: subtask_of

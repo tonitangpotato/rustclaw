@@ -1,0 +1,6 @@
+# Runtime artifacts — ephemeral, not part of project history
+*.json
+*.jsonl
+*.bak
+*.backup
+*.pre-*
