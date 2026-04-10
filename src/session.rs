@@ -305,8 +305,11 @@ impl SessionManager {
     }
 
     /// Get or create a session.
+    /// Sessions always start fresh — no restoration from SQLite.
+    /// Session continuity is handled by engram recall_recent at startup.
+    /// SQLite is used for persistence (crash recovery within same session) only.
     pub async fn get_or_create(&self, key: &str) -> Session {
-        // Check memory cache first
+        // Check memory cache first (same process, same session — keep it)
         {
             let sessions = self.sessions.read().await;
             if let Some(s) = sessions.get(key) {
@@ -314,35 +317,8 @@ impl SessionManager {
             }
         }
 
-        // Try loading from DB
-        if let Some(pool) = &self.pool {
-            if let Ok(row) = sqlx::query_as::<_, SessionRow>(
-                "SELECT key, messages, created_at, updated_at, total_tokens, channel, user_id FROM sessions WHERE key = ?",
-            )
-            .bind(key)
-            .fetch_one(pool)
-            .await
-            {
-                let messages: Vec<Message> =
-                    serde_json::from_str(&row.messages).unwrap_or_default();
-                let session = Session {
-                    key: row.key,
-                    messages,
-                    created_at: row.created_at,
-                    updated_at: row.updated_at,
-                    total_tokens: row.total_tokens as u64,
-                    channel: row.channel,
-                    user_id: row.user_id,
-                };
-
-                // Cache it
-                let mut sessions = self.sessions.write().await;
-                sessions.insert(key.to_string(), session.clone());
-                return session;
-            }
-        }
-
-        // Create new
+        // Create new — do NOT restore from DB.
+        // engram recall_recent handles cross-session continuity.
         let session = Session::new(key);
         let mut sessions = self.sessions.write().await;
         sessions.insert(key.to_string(), session.clone());

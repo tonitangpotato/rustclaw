@@ -13,7 +13,7 @@
 
 use engramai::{
     Memory, MemoryConfig, MemoryType, MemoryLayer, AnthropicExtractor, AnthropicExtractorConfig, TokenProvider,
-    SessionWorkingMemory, BaselineTracker,
+    SessionRegistry, BaselineTracker,
     EmotionalBus, EmotionalTrend, ActionStats, SoulUpdate, HeartbeatUpdate,
     bus::{mod_io::{parse_soul, Drive}, accumulator::EmotionalAccumulator, feedback::BehaviorFeedback},
 };
@@ -48,8 +48,8 @@ const WORKING_MEMORY_DECAY_SECS: u64 = 1800;
 /// Uses Mutex instead of async RwLock because rusqlite isn't Send+Sync.
 pub struct MemoryManager {
     engram: Mutex<Memory>,
-    /// Session working memory for topic continuity (Miller's Law: 7±2 items)
-    wm: Mutex<SessionWorkingMemory>,
+    /// Per-session working memory registry for topic continuity (Miller's Law: 7±2 items)
+    wm_registry: Mutex<SessionRegistry>,
     /// Anomaly detection for storage patterns
     anomaly_tracker: Mutex<BaselineTracker>,
     /// Drives from SOUL.md for importance boosting
@@ -133,15 +133,15 @@ impl MemoryManager {
             tracing::info!("Loaded {} drives for importance boosting", drives.len());
         }
 
-        // Initialize session working memory (15 items, 30 minute decay for longer continuity)
-        let wm = SessionWorkingMemory::new(15, WORKING_MEMORY_DECAY_SECS);
+        // Initialize session working memory registry (15 items per session, 30 minute decay)
+        let wm_registry = SessionRegistry::with_defaults(15, WORKING_MEMORY_DECAY_SECS);
         
         // Initialize anomaly tracker (100 sample window)
         let anomaly_tracker = BaselineTracker::new(100);
 
         Ok(Self {
             engram: Mutex::new(engram),
-            wm: Mutex::new(wm),
+            wm_registry: Mutex::new(wm_registry),
             anomaly_tracker: Mutex::new(anomaly_tracker),
             drives,
             emotional_bus,
@@ -273,7 +273,7 @@ impl MemoryManager {
             .map(|r| RecalledMemory {
                 content: r.record.content.clone(),
                 memory_type: format!("{:?}", r.record.memory_type),
-                confidence: r.activation,
+                confidence: r.confidence,
                 source: Some(r.record.source.clone()),
                 confidence_label: Some(r.confidence_label),
             })
@@ -328,17 +328,21 @@ impl MemoryManager {
     /// If the topic is continuous with recent recalls, returns cached working
     /// memory items. If topic changed, does full recall.
     ///
+    /// Each session_key gets its own working memory, preventing cross-session
+    /// memory pollution.
+    ///
     /// Returns (memories, full_recall_triggered).
-    pub fn session_recall(&self, query: &str) -> anyhow::Result<(Vec<RecalledMemory>, bool)> {
+    pub fn session_recall(&self, query: &str, session_key: &str) -> anyhow::Result<(Vec<RecalledMemory>, bool)> {
         if !self.auto_recall {
             return Ok((Vec::new(), false));
         }
 
         let mut engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        let mut wm = self.wm.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let mut registry = self.wm_registry.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let wm = registry.get_session(session_key);
 
         let result = engram
-            .session_recall(query, &mut wm, self.recall_limit, None, None)
+            .session_recall(query, wm, self.recall_limit, None, None)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         let memories = result
@@ -347,7 +351,7 @@ impl MemoryManager {
             .map(|r| RecalledMemory {
                 content: r.record.content.clone(),
                 memory_type: format!("{:?}", r.record.memory_type),
-                confidence: r.activation,
+                confidence: r.confidence,
                 source: Some(r.record.source.clone()),
                 confidence_label: Some(r.confidence_label),
             })
@@ -375,11 +379,20 @@ impl MemoryManager {
             .map(|r| RecalledMemory {
                 content: r.record.content.clone(),
                 memory_type: format!("{:?}", r.record.memory_type),
-                confidence: r.activation,
+                confidence: r.confidence,
                 source: Some(r.record.source.clone()),
                 confidence_label: Some(r.confidence_label),
             })
             .collect())
+    }
+
+    /// Remove empty sessions from the working memory registry.
+    /// Called during heartbeat to prevent unbounded growth.
+    pub fn prune_sessions(&self) -> anyhow::Result<usize> {
+        let mut registry = self.wm_registry.lock()
+            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        registry.prune_all();
+        Ok(registry.remove_empty_sessions())
     }
 
     /// Run memory consolidation (during heartbeats).

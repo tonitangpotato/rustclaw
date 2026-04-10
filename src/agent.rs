@@ -1535,11 +1535,11 @@ CRITICAL CONSTRAINTS:
             guard.clone_boxed()
         };
 
-        // Give all sub-agents the full tool set. Safety is enforced via system prompt
-        // guidance (e.g., "you are a reviewer — focus on review"), not by removing tools.
-        // The old `for_agent_type()` whitelist caused failures: REVIEWER couldn't exec,
-        // PLANNER couldn't write files, etc. Sub-agents need tools to do their job.
-        let tools = ToolRegistry::for_subagent(&workspace_dir);
+        // Give all sub-agents the full tool set + shared engram memory.
+        // Safety is enforced via system prompt guidance (e.g., "you are a reviewer —
+        // focus on review"), not by removing tools. Sub-agents need tools to do their job.
+        // Memory sharing lets sub-agents recall context and checkpoint progress.
+        let tools = ToolRegistry::for_subagent_with_memory(&workspace_dir, self.memory.clone());
         let workspace = match Workspace::load(&workspace_dir) {
             Ok(w) => w,
             Err(e) => return fail(format!("Failed to load workspace '{}': {}", workspace_dir, e)),
@@ -1664,8 +1664,8 @@ CRITICAL CONSTRAINTS:
         llm_config.request_timeout_secs = llm_config.request_timeout_secs.max(300);
         let llm_client = llm::create_client(&llm_config)?;
 
-        // Create sub-agent's own tool registry scoped to its workspace
-        let tools = ToolRegistry::for_subagent(workspace_dir);
+        // Create sub-agent's own tool registry scoped to its workspace + shared engram
+        let tools = ToolRegistry::for_subagent_with_memory(workspace_dir, self.memory.clone());
 
         let session_prefix = format!("agent:{}:", agent_config.id);
         let name = agent_config
@@ -1781,6 +1781,33 @@ CRITICAL CONSTRAINTS:
                 loop_exit = LoopExit::Cancelled;
                 break;
             }
+            // Iteration awareness: inject a warning when approaching the limit.
+            // At 75% of max iterations, tell the sub-agent to checkpoint progress.
+            // This is the "mirror" — the sub-agent can see itself running out of time
+            // and act accordingly (store partial results to engram, wrap up).
+            let iteration_warning_turn = (max_turns as f64 * 0.75) as usize;
+            if turn == iteration_warning_turn && turn > 0 {
+                tracing::info!(
+                    "Sub-agent '{}' turn {}/{}: injecting iteration budget warning",
+                    subagent.name, turn, max_turns
+                );
+                session.messages.push(Message::text(
+                    "user",
+                    &format!(
+                        "⚠️ ITERATION BUDGET WARNING: You are on turn {}/{} ({:.0}% used). \
+                         You have {} turns remaining. If you cannot complete the task in the \
+                         remaining turns:\n\
+                         1. Use `engram_store` to save your progress (what you've done, what remains, key findings)\n\
+                         2. Write any partial results to files\n\
+                         3. Provide a clear summary of completed vs remaining work\n\
+                         Do NOT waste remaining turns on low-value actions. Focus on the most critical remaining work.",
+                        turn, max_turns,
+                        (turn as f64 / max_turns as f64) * 100.0,
+                        max_turns - turn
+                    ),
+                ));
+            }
+
             // Token-based auto-compact check before each LLM call.
             //
             // IMPORTANT: session.estimate_tokens() only counts message content chars/4.
@@ -2003,6 +2030,27 @@ CRITICAL CONSTRAINTS:
                 max_turns
             );
             loop_exit = LoopExit::MaxIterations;
+
+            // Auto-checkpoint: store partial progress to engram so the main agent
+            // can resume or delegate to a new sub-agent with context.
+            let checkpoint_summary = format!(
+                "Sub-agent '{}' hit max iterations ({}) on task: {}... | Files modified: {:?} | Completed turns: {}",
+                subagent.name,
+                max_turns,
+                { let end = user_message.len().min(200); let end = user_message.floor_char_boundary(end); &user_message[..end] },
+                files_modified,
+                completed_turns
+            );
+            if let Err(e) = self.memory.store(
+                &checkpoint_summary,
+                engramai::MemoryType::Episodic,
+                0.7,
+                Some("sub-agent-checkpoint"),
+            ) {
+                tracing::warn!("Failed to store sub-agent checkpoint to engram: {}", e);
+            } else {
+                tracing::info!("Stored sub-agent checkpoint to engram for '{}'", subagent.name);
+            }
         }
 
         // Update session
