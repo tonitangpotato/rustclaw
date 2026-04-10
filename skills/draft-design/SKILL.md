@@ -38,9 +38,10 @@ Design documents define **HOW** the system is built. Every section is numbered s
 ## Prerequisites
 
 - Requirements must exist in one of these locations:
-  - Single doc: `.gid/requirements.md` or `REQUIREMENTS.md`
-  - Multi-doc: `.gid/requirements.md` (master with GUARDs) + `.gid/features/{feature}/requirements.md` (per-feature GOALs)
-- **Read ALL requirements first** — check both master and feature-level docs if `.gid/features/` exists
+  - Master doc: `.gid/docs/requirements.md` (GUARDs + feature index)
+  - Feature docs: `.gid/features/{feature}/requirements.md` (per-feature GOALs)
+  - Simple project (single feature): `.gid/features/{feature}/requirements.md` only
+- **Read ALL requirements first** — check both master (`.gid/docs/`) and feature-level docs (`.gid/features/`) if they exist
 - Every design decision should trace back to a GOAL
 
 ## Document Size Rule: Feature-Level Splitting
@@ -53,14 +54,15 @@ Design documents define **HOW** the system is built. Every section is numbered s
 
 ```
 .gid/
-├── design.md                    ← Master: architecture overview, cross-cutting concerns, component index
+├── docs/
+│   └── architecture.md          ← Master: architecture overview, cross-cutting concerns, component index
 └── features/
     ├── auth/design.md           ← 4-6 components for auth
     ├── pipeline/design.md       ← 4-6 components for pipeline
     └── cli/design.md            ← 4-6 components for CLI
 ```
 
-**Master design.md contains:**
+**Master architecture.md (in `.gid/docs/`) contains:**
 - §1 Overview (architecture summary, key trade-offs)
 - §2 Architecture (high-level diagram showing feature boundaries)
 - §3 Cross-cutting concerns (shared types, error handling, config)
@@ -83,11 +85,11 @@ Design documents define **HOW** the system is built. Every section is numbered s
 ## Output Location
 
 Depends on project structure:
-- **Simple project (≤8 components):** `.gid/design.md`
-- **Multi-feature project:** Master at `.gid/design.md` + features at `.gid/features/{feature-name}/design.md`
-- **Internal/draft designs:** `docs/DESIGN-{name}.md` (gitignored, use `git add -f`)
+- **Single feature (≤8 components):** `.gid/features/{feature-name}/design.md`
+- **Multi-feature project:** Architecture overview at `.gid/docs/architecture.md` + features at `.gid/features/{feature-name}/design.md`
+- **Issue fix designs:** `.gid/issues/{ISS-NNN}/design.md`
 
-The `.gid/` location is canonical — `assemble_task_context()` resolves design docs from there via the feature node's `design_doc` metadata.
+The `.gid/features/` location is canonical — `assemble_task_context()` resolves design docs from there via the feature node's `design_doc` metadata.
 
 ## The HOW Boundary
 
@@ -391,8 +393,61 @@ See 3.1 for the struct definitions.
 - Complete interface signatures in the target language
 - Add Mermaid diagrams for architecture (§2) and data flow (§5)
 
-### Step 4: Self-Review Checklist
+### Step 4: Ground Truth Verification ⚠️ CRITICAL
+
+**This step prevents the #1 source of multi-round review cycles: unverified assumptions about existing code.**
+
+Before finalizing, for EVERY reference to existing code in the design:
+
+#### 4a. Verify existing APIs/functions
+For every function, struct, trait, or method the design references from the existing codebase:
+- **Read the actual source file** — use `search_files` or `read_file` to find it
+- **Record the actual signature** — params, return type, generics, trait bounds
+- **Cite the source**: add `(verified: src/foo.rs:123)` after the reference in the design doc
+
+```markdown
+### ❌ BAD — unverified assumption
+"calls `merge_project_layer()` which handles deduplication"
+
+### ✅ GOOD — verified against source
+"calls `merge_project_layer(graph: &mut Graph, incoming: Vec<Node>, edges: Vec<Edge>)` 
+which replaces all project-layer nodes and edges (verified: src/unified.rs:89). 
+Note: does NOT deduplicate edges — caller must handle dedup."
+```
+
+#### 4b. Verify behavior assumptions
+If the design says "function X does Y" or "feature X supports Y":
+- **Read the implementation**, not just the signature
+- **Check for what it does NOT do** — missing behavior is where bugs hide
+- Things to verify: Does it handle edge cases? Does it deduplicate? Does it validate input? Does it preserve existing data?
+
+#### 4c. Verify dependencies exist
+For every external crate, library, or tool the design assumes:
+- Check `Cargo.toml` / `package.json` — is it already a dependency?
+- If not, explicitly note: "Requires adding `notify` crate to Cargo.toml"
+
+#### 4d. Verify effort estimates
+If the design says "~20 lines" or "small change":
+- **Read the file that needs changing** — how many lines is the function? What else calls it?
+- **Check for hidden complexity** — does the "small change" require updating 5 call sites?
+- Be honest about effort. Underestimating causes "just a quick fix" to become a multi-hour rabbit hole.
+
+#### 4e. Cite sources
+Every verified claim gets a citation:
+- `(verified: src/graph.rs:245)` — line number
+- `(verified: Cargo.toml, notify not present)` — absence
+- `(verified: search for "merge_feature" returned 0 results)` — function doesn't exist yet
+
+**If you cannot verify a claim (no access to source, function doesn't exist yet, etc.), explicitly mark it as unverified:**
+```markdown
+⚠️ UNVERIFIED: Assumes `extract_incremental()` preserves the code layer.
+   Need to verify: does it merge or overwrite?
+```
+
+### Step 5: Self-Review Checklist
 Before presenting, verify:
+- [ ] **Ground truth**: Every reference to existing code has been verified against source (Step 4)
+- [ ] **No unverified assumptions**: Any unverified claims are explicitly marked with ⚠️
 - [ ] **Coverage**: Every GOAL (across all feature docs) is addressed by at least one component (`Satisfies:` line)
 - [ ] **Guards**: Every GUARD (from master doc) is accounted for (error handling, component constraints, or §7 guard checks)
 - [ ] **Signatures complete**: No `...`, no `TODO`, no pseudocode
@@ -404,12 +459,12 @@ Before presenting, verify:
 - [ ] **HOW not WHAT**: No requirements restated without implementation detail added
 - [ ] **Decomposition**: No component maps to >4 tasks (split if so)
 
-### Step 5: Present for Review
+### Step 6: Present for Review
 - Show the complete document
 - Ask: "Does this architecture make sense? Any components missing?"
 - Iterate until approved
 
-### Step 6: Save
+### Step 7: Save
 - Write to `DESIGN.md` (or `docs/DESIGN.md` for internal)
 - Store in engram: `engram add --type factual --importance 0.7 "Design written for {project}: {N} components, sections 3.1-3.{N}"`
 - Log in daily memory file

@@ -153,8 +153,11 @@ Read the entire requirements document, then run the checks applicable to your re
 
 **ALWAYS write the full review to a file**, not just respond in chat. This preserves the review for human approval and enables the apply phase.
 
-1. Write the review to `.gid/reviews/<document-name>-review.md` (e.g., `.gid/reviews/requirements-gepa-core-review.md`)
-2. Create `.gid/reviews/` directory if it doesn't exist
+1. Write the review to the feature's reviews directory: `.gid/features/{feature}/reviews/requirements-r{N}.md`
+   - Determine the feature from the document path (e.g., `.gid/features/auth/requirements.md` → feature is `auth`)
+   - Determine round number N by checking existing review files (r1, r2, etc.) and incrementing
+   - For master requirements (`.gid/docs/requirements.md`), write to `.gid/docs/reviews/requirements-r{N}.md`
+2. Create the `reviews/` directory if it doesn't exist
 3. Each finding must have a unique ID: `FINDING-1`, `FINDING-2`, etc.
 4. For each finding that suggests a change, include a `Suggested fix:` block with the concrete change
 

@@ -47,14 +47,15 @@ Requirements documents define **WHAT** the system must do (not HOW). Every crite
 
 ```
 .gid/
-├── requirements.md              ← Master: overview + feature index + GUARDs only
+├── docs/
+│   └── requirements.md          ← Master: overview + feature index + GUARDs only
 └── features/
     ├── auth/requirements.md     ← 10-15 GOALs for auth
     ├── pipeline/requirements.md ← 10-15 GOALs for pipeline
     └── cli/requirements.md      ← 10-15 GOALs for CLI
 ```
 
-**Master requirements.md contains:**
+- **Master requirements.md (in `.gid/docs/`) contains:**
 - Project overview
 - Feature index with brief descriptions and references to feature docs
 - **GUARDs only** (cross-cutting constraints apply to all features)
@@ -79,8 +80,8 @@ Requirements documents define **WHAT** the system must do (not HOW). Every crite
 ## Output Location
 
 Depends on project structure:
-- **Simple project (single feature, ≤15 GOALs):** `.gid/requirements.md`
-- **Multi-feature project (>15 GOALs total):** Master at `.gid/requirements.md` + features at `.gid/features/{feature-name}/requirements.md`
+- **Single feature (≤15 GOALs):** `.gid/features/{feature-name}/requirements.md`
+- **Multi-feature project (>15 GOALs total):** Master at `.gid/docs/requirements.md` (GUARDs + index) + features at `.gid/features/{feature-name}/requirements.md`
 
 The `.gid/` location is canonical — `assemble_task_context()` resolves requirements from there via the feature node's `design_doc` metadata. Task nodes' `satisfies` references (e.g., `GOAL-1.1`) are resolved against their parent feature's requirements.md.
 

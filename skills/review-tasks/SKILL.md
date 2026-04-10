@@ -84,8 +84,7 @@ Read the graph YAML (`.gid/graph.yml`), the design document, and requirements (i
 
 **ALWAYS write the full review to a file**, not just respond in chat.
 
-1. Write the review to `.gid/reviews/<document-name>-review.md`
-2. Create `.gid/reviews/` directory if it doesn't exist
+1. Write the review to the appropriate reviews directory:\n   - Feature tasks: `.gid/features/{feature}/reviews/tasks-r{N}.md`\n   - Issue tasks: `.gid/issues/{ISS-NNN}/reviews/tasks-r{N}.md`\n   - General graph review: `.gid/docs/reviews/tasks-r{N}.md`\n   - Determine round number N by checking existing review files\n2. Create the `reviews/` directory if it doesn't exist
 3. Each finding must have a unique ID: `FINDING-1`, `FINDING-2`, etc.
 4. For each finding that suggests a change, include a `Suggested fix:` block
 

@@ -25,18 +25,18 @@ max_body_size: 4096
 
 ## Purpose
 
-After a review skill (review-design, review-requirements) writes findings to `.gid/reviews/`, the human approves specific findings. This skill applies only the approved ones.
+After a review skill (review-design, review-requirements) writes findings to `.gid/features/{feature}/reviews/` or `.gid/issues/{ISS-NNN}/reviews/`, the human approves specific findings. This skill applies only the approved ones.
 
 ## Input
 
 The user message will contain:
 - Which findings to apply (e.g., "apply FINDING-1,3,5" or "apply all")
-- The review file path (or infer from `.gid/reviews/`)
+- The review file path (e.g., `.gid/features/{feature}/reviews/design-r1.md`)
 - The target document path (or infer from the review file header)
 
 ## Process
 
-1. **Read the review file** from `.gid/reviews/<name>-review.md`
+1. **Read the review file** from `.gid/features/{feature}/reviews/{type}-r{N}.md` (or `.gid/issues/{ISS-NNN}/reviews/`)
 2. **Read the target document** completely — you need full context to make correct edits
 3. **For each approved finding**, apply the suggested fix:
    - Use `Edit` tool for targeted changes (preferred — preserves surrounding context)

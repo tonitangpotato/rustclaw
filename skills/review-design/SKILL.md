@@ -18,6 +18,7 @@ tags:
   - quality
 priority: 55
 always_load: false
+recommended_iterations: 50
 max_body_size: 8192
 ---
 # SKILL: Design Document Reviewer
@@ -34,6 +35,16 @@ Design docs reviewed by LLMs tend to need 5-6 iterative rounds because each pass
 - Before starting implementation of a design
 - When a design has been revised and needs re-verification
 
+## Sub-Agent Configuration
+
+This skill is iteration-heavy — reading the full design, running 29 checks, and verifying code references all consume tool calls. When spawning a sub-agent for this skill:
+
+- **full review**: `max_iterations: 50` minimum (29 checks + code verification = 40-50 tool calls)
+- **standard review**: `max_iterations: 35` minimum
+- **quick review**: `max_iterations: 20` minimum
+
+Under-provisioned iterations are the #1 cause of incomplete reviews — the agent runs out mid-Phase-7 and never writes the review file.
+
 ## Review Process
 
 ### Review Depth (Triage-Driven)
@@ -44,7 +55,7 @@ Check the beginning of your prompt for a `[REVIEW_DEPTH: quick|standard|full]` d
 |---|---|---|---|
 | **quick** | small | Phase 0 + Phase 1 + Phase 4 | 0-4, 13-16 (9 checks) |
 | **standard** | medium | Phase 0-5 | 0-20 (21 checks) |
-| **full** | large (default) | Phase 0-7 | All 28 checks |
+| **full** | large (default) | Phase 0-7 | All 29 checks |
 
 **If no `[REVIEW_DEPTH]` directive is present, default to `full`.**
 
@@ -117,11 +128,18 @@ Read the design document completely, then run the checks applicable to your revi
 24. **Migration path** — If this replaces existing code, is the replacement scope clear? What's kept, what's deleted, what's adapted?
 25. **Testability** — Can the core logic be unit-tested in isolation? Is the design structured so that tests don't need complex setup or mocking? Pure functions > stateful objects for testability.
 
-### Phase 7: Existing Code Alignment
+### Phase 7: Existing Code Alignment & Ground Truth
 
 26. **Does similar functionality already exist in the codebase?** — Search for existing implementations before designing new ones. Duplicate solutions are a maintenance burden.
 27. **API compatibility** — Does the new design break existing callers? If yes, is the migration plan documented?
 28. **Feature flag / gradual rollout** — Can the new design be introduced behind a feature flag? Is there a rollback plan if the implementation doesn't work?
+29. **Ground truth verification** — For every reference to existing code (function calls, API usage, behavior assumptions), **read the actual source code** and verify:
+    - Does the function/struct actually exist? With the assumed signature?
+    - Does the function actually do what the design claims? (Read implementation, not just name)
+    - Are effort estimates grounded? ("~20 lines" — is the target file 50 lines or 2000?)
+    - Does the design say "function X handles Y" when it actually doesn't? (e.g., "merge handles dedup" when merge just overwrites)
+    - **Use `search_files` and `read_file` to verify.** Don't trust the design author's memory of the codebase.
+    - Every unverified assumption about existing code → 🔴 Critical finding. This is the #1 source of multi-round review cycles.
 
 
 
@@ -159,8 +177,12 @@ Edge case 1: Skip from X → ... ✅
 
 **ALWAYS write the full review to a file**, not just respond in chat. This preserves the review for human approval and enables the apply phase.
 
-1. Write the review to `.gid/reviews/<document-name>-review.md` (e.g., `.gid/reviews/DESIGN-review.md`)
-2. Create `.gid/reviews/` directory if it doesn't exist
+1. Write the review to the feature's reviews directory: `.gid/features/{feature}/reviews/design-r{N}.md`
+   - Determine the feature from the document path (e.g., `.gid/features/auth/design.md` → feature is `auth`)
+   - Determine round number N by checking existing review files (r1, r2, etc.) and incrementing
+   - For issue designs (`.gid/issues/{ISS-NNN}/design.md`), write to `.gid/issues/{ISS-NNN}/reviews/design-r{N}.md`
+   - For master architecture (`.gid/docs/architecture.md`), write to `.gid/docs/reviews/architecture-r{N}.md`
+2. Create the `reviews/` directory if it doesn't exist
 3. Each finding must have a unique ID: `FINDING-1`, `FINDING-2`, etc.
 4. For each finding that suggests a change, include a `Suggested fix:` block with the concrete change
 
@@ -171,7 +193,7 @@ After writing the review file, report a **brief summary** to the user:
 
 ## Rules
 
-- **Run ALL 28 checks.** Don't skip checks even if the first few find nothing.
+- **Run ALL 29 checks.** Don't skip checks even if the first few find nothing.
 - **No "looks good" without evidence.** For each passed check, briefly note what you verified.
 - **Find the ROOT issue, not symptoms.** If check #5 and #12 both flag the same underlying problem, consolidate into one finding with the root cause.
 - **Suggest concrete fixes.** Not "this could be improved" — show the actual code/spec change.
