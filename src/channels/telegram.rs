@@ -12,6 +12,28 @@ use crate::text_utils;
 
 const TELEGRAM_API: &str = "https://api.telegram.org";
 
+/// RAII guard that removes a session key from active_sessions on drop.
+/// Guarantees cleanup even if the handler panics or returns early.
+struct ActiveSessionGuard {
+    active_sessions: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+    key: String,
+}
+
+impl Drop for ActiveSessionGuard {
+    fn drop(&mut self) {
+        // try_lock to avoid blocking in drop; if contended, spawn async cleanup
+        if let Ok(mut active) = self.active_sessions.try_lock() {
+            active.remove(&self.key);
+        } else {
+            let active_sessions = self.active_sessions.clone();
+            let key = std::mem::take(&mut self.key);
+            tokio::spawn(async move {
+                active_sessions.lock().await.remove(&key);
+            });
+        }
+    }
+}
+
 /// Telegram bot client.
 #[derive(Clone)]
 struct TelegramBot {
@@ -37,7 +59,11 @@ struct TelegramBot {
 
 impl TelegramBot {
     async fn new(config: TelegramConfig, runner: Arc<AgentRunner>) -> anyhow::Result<Self> {
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(45))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .tcp_keepalive(std::time::Duration::from_secs(15))
+            .build()?;
         let token = config.bot_token.clone();
         
         // Fetch bot username via getMe
@@ -427,11 +453,15 @@ impl TelegramBot {
             return Ok(());
         }
 
-        // Mark session as active
+        // Mark session as active (with drop guard to guarantee cleanup)
         {
             let mut active = self.active_sessions.lock().await;
             active.insert(session_key.clone());
         }
+        let _session_guard = ActiveSessionGuard {
+            active_sessions: self.active_sessions.clone(),
+            key: session_key.clone(),
+        };
 
         // Prepend message context as prefix
         let channel_caps = self.runner.channel_caps.read().await;
@@ -511,11 +541,7 @@ impl TelegramBot {
         // Stop typing
         typing_handle.abort();
 
-        // Mark session as no longer active
-        {
-            let mut active = self.active_sessions.lock().await;
-            active.remove(&session_key);
-        }
+        // session_guard drop will remove from active_sessions automatically
 
         // Send final response
         if !final_response.is_empty() {
@@ -2222,6 +2248,7 @@ Choose a model:", current),
     /// Run the long-polling loop.
     async fn run(&self) -> anyhow::Result<()> {
         let mut offset: i64 = 0;
+        let mut consecutive_errors: u32 = 0;
         tracing::info!("Telegram bot started. Polling for updates...");
 
         loop {
@@ -2238,6 +2265,7 @@ Choose a model:", current),
 
             match resp {
                 Ok(r) => {
+                    consecutive_errors = 0;
                     let body: serde_json::Value = match r.json().await {
                         Ok(b) => b,
                         Err(e) => {
@@ -2264,7 +2292,8 @@ Choose a model:", current),
                     }
                 }
                 Err(e) => {
-                    tracing::error!("Polling error: {}. Retrying in 5s...", e);
+                    consecutive_errors += 1;
+                    tracing::warn!("Polling error (#{consecutive_errors}): {e}. Retrying in 5s...");
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 }
             }
