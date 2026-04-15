@@ -1018,14 +1018,29 @@ CRITICAL CONSTRAINTS:
                 self.sessions.update(session.clone()).await;
             }
 
-            // Race LLM call against cancellation token
+            // Use streaming + collect to avoid HTTP timeout on large contexts.
+            // Non-streaming `chat()` has a fixed 120s timeout for the entire response,
+            // which fails when context is large + model is slow (Opus). Streaming keeps
+            // the connection alive as chunks arrive — no generation-time timeout.
             let llm_guard = self.llm_client.read().await;
-            let llm_future = llm_guard.chat(&system_prompt, &session.messages, &tool_defs);
+            let stream_future = llm_guard.chat_stream(&system_prompt, &session.messages, &tool_defs);
             let response = tokio::select! {
-                res = llm_future => {
+                res = stream_future => {
                     drop(llm_guard);
                     match res {
-                        Ok(r) => r,
+                        Ok(rx) => {
+                            let resp = crate::llm::collect_stream(rx).await?;
+                            if resp.stop_reason == "refusal" {
+                                // Streaming refusal: fall back to non-streaming
+                                tracing::warn!("Turn {}: streaming refusal detected, falling back to non-streaming", turn);
+                                let llm_guard = self.llm_client.read().await;
+                                let fallback = llm_guard.chat(&system_prompt, &session.messages, &tool_defs).await;
+                                drop(llm_guard);
+                                fallback?
+                            } else {
+                                resp
+                            }
+                        }
                         Err(e) if self.config.context.reactive_compact && crate::llm::is_prompt_too_long(&e) => {
                             // 413 recovery: reactive compact
                             tracing::warn!("Turn {}: 413 prompt too long — reactive compact", turn);
@@ -1034,11 +1049,11 @@ CRITICAL CONSTRAINTS:
                                     let _ = tx.send(AgentEvent::Text(
                                         "📦 Context overflow — compacted and retrying...".to_string()
                                     )).await;
-                                    // Retry the LLM call
+                                    // Retry with streaming
                                     let llm_guard = self.llm_client.read().await;
-                                    let retry = llm_guard.chat(&system_prompt, &session.messages, &tool_defs).await;
+                                    let rx = llm_guard.chat_stream(&system_prompt, &session.messages, &tool_defs).await?;
                                     drop(llm_guard);
-                                    retry?
+                                    crate::llm::collect_stream(rx).await?
                                 }
                                 _ => return Err(e),
                             }

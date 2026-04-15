@@ -13,6 +13,7 @@
 
 use engramai::{
     Memory, MemoryConfig, MemoryType, MemoryLayer, AnthropicExtractor, AnthropicExtractorConfig, TokenProvider,
+    SynthesisSettings, SynthesisLlmProvider,
     SessionRegistry, BaselineTracker,
     EmotionalBus, EmotionalTrend, ActionStats, SoulUpdate, HeartbeatUpdate,
     bus::{mod_io::{parse_soul, Drive}, accumulator::EmotionalAccumulator, feedback::BehaviorFeedback},
@@ -38,6 +39,87 @@ impl TokenProvider for ManagedTokenProvider {
             self.runtime.block_on(self.manager.get_token())
         })
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })
+    }
+}
+
+/// LLM provider for synthesis insight generation.
+/// Reuses the same OAuth token manager as the memory extractor (Claude Max plan).
+struct ManagedSynthesisProvider {
+    manager: Arc<OAuthTokenManager>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl SynthesisLlmProvider for ManagedSynthesisProvider {
+    fn generate(
+        &self,
+        prompt: &str,
+        config: &engramai::synthesis::types::SynthesisConfig,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let token = tokio::task::block_in_place(|| {
+            self.runtime.block_on(self.manager.get_token())
+        })
+        .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+
+        let model = if config.model.is_empty() {
+            "claude-sonnet-4-20250514".to_string()
+        } else {
+            config.model.clone()
+        };
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()?;
+
+        let body = serde_json::json!({
+            "model": model,
+            "max_tokens": config.max_tokens,
+            "temperature": config.temperature,
+            "messages": [{
+                "role": "user",
+                "content": prompt
+            }]
+        });
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
+        headers.insert("content-type", "application/json".parse().unwrap());
+        headers.insert(
+            "anthropic-beta",
+            "claude-code-20250219,oauth-2025-04-20".parse().unwrap(),
+        );
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", token).parse().unwrap(),
+        );
+        headers.insert(
+            reqwest::header::USER_AGENT,
+            "claude-cli/2.1.39 (external, cli)".parse().unwrap(),
+        );
+        headers.insert("x-app", "cli".parse().unwrap());
+        headers.insert(
+            "anthropic-dangerous-direct-browser-access",
+            "true".parse().unwrap(),
+        );
+
+        let response = client
+            .post("https://api.anthropic.com/v1/messages")
+            .headers(headers)
+            .json(&body)
+            .send()?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().unwrap_or_default();
+            return Err(format!("Anthropic API error {}: {}", status, body).into());
+        }
+
+        let resp: serde_json::Value = response.json()?;
+        let text = resp["content"][0]["text"]
+            .as_str()
+            .ok_or("No text in Anthropic response")?
+            .to_string();
+
+        Ok(text)
     }
 }
 
@@ -83,17 +165,33 @@ impl MemoryManager {
         // Set up LLM extraction using managed OAuth (Claude Max plan).
         // TokenProvider refreshes automatically — no more expired token errors.
         if let Ok(oauth_mgr) = OAuthTokenManager::from_keychain() {
-            let provider = Box::new(ManagedTokenProvider {
-                manager: Arc::new(oauth_mgr),
-                runtime: tokio::runtime::Handle::current(),
+            let oauth_arc = Arc::new(oauth_mgr);
+            let runtime = tokio::runtime::Handle::current();
+
+            // Set up LLM extraction (Haiku for fact extraction)
+            let extractor_provider = Box::new(ManagedTokenProvider {
+                manager: oauth_arc.clone(),
+                runtime: runtime.clone(),
             });
             let extractor = AnthropicExtractor::with_token_provider(
-                provider,
+                extractor_provider,
                 true, // is_oauth
                 AnthropicExtractorConfig::default(),
             );
             engram.set_extractor(Box::new(extractor));
             tracing::info!("Engram extractor: Anthropic Haiku (managed OAuth, auto-refresh)");
+
+            // Set up synthesis engine (Sonnet for insight generation)
+            let synthesis_provider = Box::new(ManagedSynthesisProvider {
+                manager: oauth_arc,
+                runtime,
+            });
+            let mut synthesis_settings = SynthesisSettings::default();
+            synthesis_settings.enabled = true;
+            synthesis_settings.max_llm_calls_per_run = 3; // conservative budget per cycle
+            engram.set_synthesis_settings(synthesis_settings);
+            engram.set_synthesis_llm_provider(synthesis_provider);
+            tracing::info!("Engram synthesis: enabled (Sonnet, OAuth, max 3 insights/cycle)");
         } else {
             // Fallback: auto_configure_extractor checks env vars and config file
             tracing::debug!("No Keychain OAuth, relying on engram auto-config");
@@ -395,12 +493,24 @@ impl MemoryManager {
         Ok(registry.remove_empty_sessions())
     }
 
-    /// Run memory consolidation (during heartbeats).
+    /// Run memory consolidation + synthesis (during heartbeats/auto-schedule).
+    /// Uses sleep_cycle() which runs consolidation first, then synthesis if enabled.
     pub fn consolidate(&self) -> anyhow::Result<()> {
         let mut engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        engram
-            .consolidate(7.0)
+        let report = engram
+            .sleep_cycle(7.0, None)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
+        
+        if let Some(ref synth) = report.synthesis {
+            tracing::info!(
+                "Synthesis: {} clusters found, {} synthesized, {} deferred, {} skipped, {} errors",
+                synth.clusters_found,
+                synth.clusters_synthesized,
+                synth.clusters_deferred,
+                synth.clusters_skipped,
+                synth.errors.len(),
+            );
+        }
         Ok(())
     }
 
@@ -454,7 +564,7 @@ impl MemoryManager {
             .map(|r| RecalledMemory {
                 content: r.record.content.clone(),
                 memory_type: format!("{:?}", r.record.memory_type),
-                confidence: r.activation,
+                confidence: r.confidence,
                 source: Some(r.record.source.clone()),
                 confidence_label: Some(r.confidence_label),
             })

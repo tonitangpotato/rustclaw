@@ -2529,8 +2529,9 @@ pub fn is_prompt_too_long(err: &anyhow::Error) -> bool {
         // Google-specific error
         || msg.contains("exceeds the maximum number of tokens")
         || msg.contains("resource_exhausted")
-        // "error sending request" after retries often means request body too large
-        || msg.contains("error sending request")
+        // NOTE: "error sending request" was removed — it also matches timeout errors,
+        // causing timeout → compact → retry → timeout infinite loops.
+        // Genuine 413 errors are caught by the patterns above.
 }
 
 /// Get the context window size (in tokens) for a given model name.

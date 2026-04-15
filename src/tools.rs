@@ -28,7 +28,7 @@ use gid_core::{
     complexity,
     working_mem,
     ignore,
-    infer::{self, InferConfig, InferLevel, OutputFormat as InferOutputFormat, merge_into_graph, format_output as infer_format_output},
+    infer::{self, InferConfig, InferLevel, OutputFormat as InferOutputFormat, merge_into_graph, format_output as infer_format_output, rollback_infer_batch},
     ritual::scope::{default_scope_for_phase, ToolScope},
     harness::{
         assemble_task_context,
@@ -4717,6 +4717,33 @@ impl Tool for GidScopeTool {
 
 // ── gid_infer: run infer pipeline (clustering → labeling → merge) ──
 
+/// Bridge: SimpleLlm trait → claude CLI for the infer pipeline.
+/// Same approach as gid-cli's CliSimpleLlm.
+struct CliSimpleLlm {
+    model: String,
+}
+
+#[async_trait]
+impl infer::SimpleLlm for CliSimpleLlm {
+    async fn complete(&self, prompt: &str) -> anyhow::Result<String> {
+        let output = tokio::process::Command::new("claude")
+            .arg("-p")
+            .arg(prompt)
+            .arg("--model")
+            .arg(&self.model)
+            .output()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to run claude CLI (is it installed?): {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("claude CLI failed: {}", stderr);
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+}
+
 struct GidInferTool {
     mgr: Arc<GraphManager>,
 }
@@ -4751,7 +4778,7 @@ impl Tool for GidInferTool {
                 },
                 "format": {
                     "type": "string",
-                    "description": "Output format: 'summary', 'yaml', 'json'. Default: summary",
+                    "description": "Output format for dry-run preview file: 'summary', 'yaml', 'json'. Default: summary",
                     "enum": ["summary", "yaml", "json"]
                 },
                 "min_community_size": {
@@ -4766,6 +4793,10 @@ impl Tool for GidInferTool {
                     "type": "integer",
                     "description": "Maximum files per component. Clusters exceeding this are sub-clustered. Default: auto = max(20, total_files/5)"
                 },
+                "rollback_batch": {
+                    "type": "string",
+                    "description": "Batch ID to rollback (removes all infer nodes from that batch)"
+                },
                 proj_key: proj_val,
             }
         })
@@ -4773,6 +4804,21 @@ impl Tool for GidInferTool {
 
     async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
         use infer::ClusterConfig;
+
+        // Handle rollback first
+        if let Some(batch_id) = input["rollback_batch"].as_str() {
+            let (graph_arc, path) = self.mgr.resolve(&input).await?;
+            let mut graph = graph_arc.write().await;
+            let (nodes_removed, edges_removed) = rollback_infer_batch(&mut graph, batch_id);
+            save_gid_graph(&graph, &path)?;
+            return Ok(ToolResult {
+                output: format!(
+                    "🔄 Rollback batch '{}': removed {} nodes, {} edges\nSaved to: {}",
+                    batch_id, nodes_removed, edges_removed, path
+                ),
+                is_error: false,
+            });
+        }
 
         let level = match input["level"].as_str().unwrap_or("component") {
             "component" => InferLevel::Component,
@@ -4820,13 +4866,17 @@ impl Tool for GidInferTool {
         // Run infer on a snapshot of the graph (infer::run doesn't mutate)
         let (graph_arc, path) = self.mgr.resolve(&input).await?;
         let graph = graph_arc.read().await;
-        let result = infer::run(&graph, &config, None).await.map_err(|e| {
+
+        // Build LLM client for labeling (uses `claude` CLI, same as gid-cli)
+        let llm_client: Option<CliSimpleLlm> = if level == InferLevel::Component {
+            None
+        } else {
+            Some(CliSimpleLlm { model: "sonnet".to_string() })
+        };
+        let result = infer::run(&graph, &config, llm_client.as_ref().map(|c| c as &dyn infer::SimpleLlm)).await.map_err(|e| {
             anyhow::anyhow!("Infer pipeline failed: {}", e)
         })?;
         drop(graph);
-
-        // Format output
-        let output_text = infer_format_output(&result, config.format);
 
         // Merge if not dry-run
         if !dry_run {
@@ -4834,16 +4884,65 @@ impl Tool for GidInferTool {
             let stats = merge_into_graph(&mut graph, &result, true);
             save_gid_graph(&graph, &path)?;
 
+            // Count code files (approximate - count unique "contains" edges from components)
+            let code_file_count = result.edges.iter()
+                .filter(|e| e.relation == "contains")
+                .map(|e| e.to.as_str())
+                .collect::<std::collections::HashSet<_>>()
+                .len();
+
             Ok(ToolResult {
                 output: format!(
-                    "{}\n\n✅ Merged: +{} components, +{} features, +{} edges, -{} old nodes removed\nSaved to: {}",
-                    output_text, stats.components_added, stats.features_added, stats.edges_added, stats.old_nodes_removed, path
+                    "✅ Infer complete (batch: {})\n\
+                     • {} components, {} features merged\n\
+                     • {} edges added\n\
+                     • {} old nodes removed, {} skipped (user-owned)\n\
+                     • {} code files clustered\n\
+                     • Saved to: {}\n\
+                     \nUse gid_read or gid_tasks to inspect results. To rollback: gid_infer with rollback_batch=\"{}\"",
+                    stats.batch_id,
+                    stats.components_added, stats.features_added,
+                    stats.edges_added,
+                    stats.old_nodes_removed, stats.nodes_skipped,
+                    code_file_count,
+                    path,
+                    stats.batch_id,
                 ),
                 is_error: false,
             })
         } else {
+            // Write full output to file for human/LLM review
+            let preview_ext = match config.format {
+                InferOutputFormat::Yaml => "yml",
+                InferOutputFormat::Json => "json",
+                InferOutputFormat::Summary => "txt",
+            };
+            let preview_path = {
+                let gid_dir = std::path::Path::new(&*path).parent().unwrap_or(std::path::Path::new("."));
+                gid_dir.join(format!("infer-preview.{}", preview_ext))
+            };
+            let output_text = infer_format_output(&result, config.format);
+            std::fs::write(&preview_path, &output_text)?;
+
+            // Return concise summary
+            let num_components = result.component_nodes.len();
+            let num_features = result.feature_nodes.len();
+            let num_edges = result.edges.len();
+
             Ok(ToolResult {
-                output: format!("{}\n\n(dry-run: no changes written)", output_text),
+                output: format!(
+                    "🔍 Dry-run complete (no changes written)\n\
+                     • {} components, {} features discovered\n\
+                     • {} edges\n\
+                     • Clustering: {} communities, codelength = {:.3}\n\
+                     \nFull preview written to: {}\n\
+                     Use read_file to inspect if needed. Run without dry_run to merge.",
+                    num_components, num_features,
+                    num_edges,
+                    result.cluster_metrics.num_communities,
+                    result.cluster_metrics.codelength,
+                    preview_path.display(),
+                ),
                 is_error: false,
             })
         }
