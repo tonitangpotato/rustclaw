@@ -30,7 +30,7 @@ impl Default for AutopilotConfig {
     fn default() -> Self {
         Self {
             task_file: PathBuf::from("HEARTBEAT.md"),
-            max_turns_per_task: 60,
+            max_turns_per_task: 3,
             max_total_turns: 300,
             session_key: String::new(),
         }
@@ -277,6 +277,7 @@ pub async fn run(
 
             let mut task_turns: u32 = 0;
             let mut task_completed = false;
+            let max_attempts = config.max_turns_per_task;
 
             loop {
                 if !handle_clone.running.load(Ordering::Relaxed) {
@@ -291,22 +292,39 @@ pub async fn run(
                     }
                     tracing::info!("Autopilot: resumed");
                 }
-                if task_turns >= config.max_turns_per_task {
+                if task_turns >= max_attempts {
                     tracing::warn!(
-                        "Autopilot: task hit max turns ({}): {}",
-                        config.max_turns_per_task,
+                        "Autopilot: task hit max attempts ({}): {}",
+                        max_attempts,
                         task_desc,
                     );
                     break;
                 }
 
+                let attempt = task_turns + 1;
+                notify(&format!("Attempt {}/{} for task: {}", attempt, max_attempts, task_desc));
+
                 let msg = if task_turns == 0 {
+                    // First attempt: full prompt, let the agent's internal tool loop handle multi-step work
                     prompt.clone()
-                } else {
+                } else if task_turns == 1 {
+                    // Second attempt: inform the agent the previous attempt didn't complete
                     format!(
-                        "Continue working on: **{}**\n\
-                         Update the checkbox when done.",
-                        task_desc
+                        "Your previous attempt on this task did not result in the checkbox being updated. \
+                         Please complete: {}\n\
+                         Update the checkbox in `{}` from `- [ ]` to `- [x]` when done.",
+                        task_desc,
+                        task_file.display(),
+                    )
+                } else {
+                    // Third (final) attempt: stronger language
+                    format!(
+                        "FINAL ATTEMPT. The task is still incomplete and the checkbox is still unchecked.\n\n\
+                         Task: {}\n\n\
+                         You MUST complete this task NOW and update the checkbox in `{}` from `- [ ]` to `- [x]`.\n\
+                         If you cannot complete it, explain why in the daily log.",
+                        task_desc,
+                        task_file.display(),
                     )
                 };
 
@@ -337,21 +355,13 @@ pub async fn run(
                         let delta = tokens_after.saturating_sub(tokens_before);
                         handle_clone.total_tokens.fetch_add(delta, Ordering::Relaxed);
 
-                        // Progress report every 10 turns
-                        if task_turns % 10 == 0 {
-                            notify(&format!(
-                                "Progress: {} turns on '{}' ({} total turns)",
-                                task_turns, task_desc, total_turns,
-                            ));
-                        }
-
                         // Check if task was marked done — match by description, not line number
                         if let Ok(updated_content) = std::fs::read_to_string(&task_file) {
                             let updated_tasks = parse_tasks(&updated_content);
                             if let Some(updated) = find_task_by_description(&updated_tasks, &task_desc) {
                                 if updated.completed {
                                     notify(&format!(
-                                        "Task completed in {} turns: {}",
+                                        "Task completed in {} attempt(s): {}",
                                         task_turns, task_desc,
                                     ));
                                     task_completed = true;
@@ -380,7 +390,7 @@ pub async fn run(
 
             if !task_completed {
                 let reason = if task_turns >= config.max_turns_per_task {
-                    format!("hit max turns ({})", config.max_turns_per_task)
+                    format!("hit max attempts ({})", config.max_turns_per_task)
                 } else {
                     "agent error or stopped".to_string()
                 };
