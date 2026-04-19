@@ -1014,7 +1014,7 @@ dependencies = [
 
 [[package]]
 name = "engramai"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3595,6 +3595,7 @@ dependencies = [
  "hex",
  "hound",
  "jsonwebtoken",
+ "libc",
  "mime_guess",
  "notify",
  "ort",

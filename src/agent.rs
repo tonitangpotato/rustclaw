@@ -380,6 +380,8 @@ pub struct AgentRunner {
     pub subagent_events: tokio::sync::broadcast::Sender<crate::events::SubAgentEvent>,
     /// Tool call frequency and duration statistics
     pub tool_stats: Arc<crate::tool_stats::ToolStatsTracker>,
+    /// Interoceptive signal emitter (Layer 1: runtime metric collection)
+    pub signal_emitter: Arc<crate::interoceptive::SignalEmitter>,
 }
 
 /// Persist large tool results to disk, replacing content with preview.
@@ -449,6 +451,10 @@ impl AgentRunner {
         let mut tools = tools;
         tools.subagent_event_tx = Some(subagent_tx.clone());
 
+        // Initialize interoceptive signal emitter with hourly token budget
+        let hourly_budget = 2_000_000u64; // default, can be overridden
+        let signal_emitter = Arc::new(crate::interoceptive::SignalEmitter::new(hourly_budget));
+
         Self {
             config,
             workspace,
@@ -469,6 +475,7 @@ impl AgentRunner {
             subagent_children: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             subagent_events: subagent_tx,
             tool_stats: Arc::new(crate::tool_stats::ToolStatsTracker::new()),
+            signal_emitter,
         }
     }
 
@@ -987,6 +994,10 @@ CRITICAL CONSTRAINTS:
         let mut sent_response = false;
         let mut max_tokens_recovery_count = 0u32;
         let cancel_token = self.get_cancellation_token(session_key).await;
+        let request_start = std::time::Instant::now();
+
+        // Track loop entry for interoceptive system
+        self.signal_emitter.execution_stress.enter_loop();
 
         for turn in 0..max_turns {
             // Check for cancellation before each turn
@@ -1235,7 +1246,24 @@ CRITICAL CONSTRAINTS:
             }
         }
 
-        
+        // Track loop exit + latency for interoceptive system
+        self.signal_emitter.execution_stress.exit_loop();
+        self.signal_emitter.cognitive_flow.record_latency(request_start.elapsed());
+        // Record task outcome: if we sent a response, it's a success
+        self.signal_emitter.cognitive_flow.record_task(sent_response);
+
+        // Feed all signals to the InteroceptiveHub
+        {
+            let tracker = crate::llm::token_tracker();
+            let total = tracker.total_input() + tracker.total_output();
+            let hourly = tracker.hourly_tokens();
+            let (signals, _somatic) = self.signal_emitter.sample_all(total, hourly);
+            for sig in signals {
+                if let Err(e) = self.memory.feed_interoceptive_signal(sig) {
+                    tracing::debug!("Interoceptive signal feed failed (non-fatal): {}", e);
+                }
+            }
+        }
 
         // Safety net: if loop exhausted max_turns without sending Response, send now
         if !sent_response {
@@ -1444,6 +1472,9 @@ CRITICAL CONSTRAINTS:
                         tracing::debug!("Behavior logging failed (non-fatal): {}", e);
                     }
 
+                    // Feed interoceptive signal emitter
+                    self.signal_emitter.execution_stress.record_tool_outcome(!tool_result.is_error);
+
                     let output = if tc.name == "web_fetch" {
                         wrap_external_content("web_fetch", &sanitized.content)
                     } else {
@@ -1467,6 +1498,9 @@ CRITICAL CONSTRAINTS:
                     if let Err(log_e) = self.memory.log_behavior(&tc.name, false) {
                         tracing::debug!("Behavior logging failed (non-fatal): {}", log_e);
                     }
+
+                    // Feed interoceptive signal emitter
+                    self.signal_emitter.execution_stress.record_tool_outcome(false);
 
                     let _ = tx.send(AgentEvent::ToolDone {
                         name: tc.name.clone(),

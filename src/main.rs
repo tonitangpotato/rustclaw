@@ -19,6 +19,7 @@ mod heartbeat;
 mod hooks;
 mod llm;
 mod markdown;
+mod interoceptive;
 mod memory;
 mod oauth;
 mod orchestrator;

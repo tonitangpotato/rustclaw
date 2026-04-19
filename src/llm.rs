@@ -309,6 +309,19 @@ impl TokenTracker {
         self.total_requests.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Get total tokens consumed in the last hour (sliding window).
+    pub fn hourly_tokens(&self) -> u64 {
+        if let Ok(window) = self.window.lock() {
+            let one_hour_ago = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+            window.entries.iter()
+                .filter(|e| e.timestamp >= one_hour_ago)
+                .map(|e| e.input_tokens + e.output_tokens)
+                .sum()
+        } else {
+            0
+        }
+    }
+
     /// Get total cache read tokens.
     pub fn total_cache_read(&self) -> u64 {
         self.total_cache_read.load(std::sync::atomic::Ordering::Relaxed)

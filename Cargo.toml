@@ -14,6 +14,9 @@ categories = ["command-line-utilities", "development-tools"]
 # Core async runtime
 tokio = { version = "1", features = ["full"] }
 
+# System
+libc = "0.2"
+
 # HTTP
 axum = "0.8"
 reqwest = { version = "0.12", features = ["json", "multipart", "stream", "blocking"] }

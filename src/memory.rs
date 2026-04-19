@@ -892,6 +892,16 @@ impl MemoryManager {
         Ok(())
     }
 
+    /// Feed an external interoceptive signal into the hub.
+    ///
+    /// Used by RustClaw's SignalEmitter (Layer 1) to inject runtime signals
+    /// into engram's InteroceptiveHub (Layer 2).
+    pub fn feed_interoceptive_signal(&self, signal: engramai::interoceptive::InteroceptiveSignal) -> anyhow::Result<()> {
+        let mut engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        engram.feed_interoceptive_signal(signal);
+        Ok(())
+    }
+
     /// Evaluate the current interoceptive state and generate regulation actions.
     ///
     /// Returns advisory actions (soul updates, retrieval adjustments, behavior shifts, alerts).
