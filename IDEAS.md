@@ -3,6 +3,638 @@
 > All ideas captured by RustClaw's Idea Intake pipeline.
 > Format: newest first. Each idea has a unique ID for cross-referencing.
 
+## IDEA-20260417-01: OSINT Profile Dossier — 社工背调产品
+- **Date**: 2026-04-17
+- **Triggered by**: potato 收到 cold email，RustClaw 用公开信息交叉验证对方身份，效果惊人
+- **Category**: product / SaaS
+- **Tags**: osint, due-diligence, background-check, social-engineering, profiling, trust-scoring
+
+### The Idea
+给一个名字/邮件/社交 handle → 自动生成一份 **profile dossier**：
+- 社交账号关联（Twitter、GitHub、LinkedIn、个人网站交叉匹配）
+- 项目真实状态（有没有代码、有没有 traction、repo stars vs 实际 commit 活跃度）
+- 言行一致性分析（声称做了什么 vs 实际做了什么）
+- Red flags 检测（GitHub suspended、项目全 404、scope 过大无产出）
+- Credibility score（综合评分）
+- 关联人脉网络（谁和谁互动、mutual connections）
+
+### Origin Story
+potato 收到一封 cold email，声称在建 "bounded AGI cognitive architecture"。RustClaw 用几步公开信息查询就完成了一次完整的背调：
+1. 名字 → Twitter 搜索 → 找到账号 → 发现是 17 岁高中生
+2. GitHub → 账号被 suspended
+3. 网站 → 花哨但无实质内容
+4. 推文分析 → 典型 "building in public" 鸡汤，技术深度浅
+5. 声称的 benchmark 数字无法验证
+
+整个过程 < 2 分钟，几个 API 调用。**这个流程产品化就是一个 SaaS。**
+
+### Use Cases
+1. **投资人 founder due diligence** — VC 看 deck 前先跑一次，5 分钟知道 founder 靠不靠谱
+2. **招聘背调** — HR 验证候选人简历 vs 实际 GitHub/项目经历
+3. **BD/Partnership 评估** — 合作前了解对方公司/个人真实状况
+4. **开源维护者** — 评估贡献者可信度（是真的开发者还是 spam PR）
+5. **反诈/反骗** — 验证网络身份真伪
+6. **Influencer 验证** — 品牌合作前确认 KOL 是否注水
+
+### 已有基础设施
+- **xinfluencer** crawler — 已有 Twitter 爬取能力
+- **bird CLI** — Twitter 搜索和数据获取
+- **RustClaw agent** — 多步骤自动化 + LLM 分析
+- **engram** — 存储和关联已查询的 profile 数据
+
+### 数据源
+
+**Tier 1 — Core（MVP 必须）：**
+- Twitter/X — 发言、互动、bio、关注网络、发帖频率
+- GitHub — repos、commit 活跃度、contribution graph、账号状态、stars vs 实际代码量
+- LinkedIn — 职业经历、教育、endorsements、connections
+- 个人网站/博客 — 域名 whois、内容分析、技术栈检测
+- Google search — 名字 + 关键词，公开信息汇总
+
+**Tier 2 — Enhanced（Pro 版）：**
+- Crunchbase — 创业/融资记录
+- ProductHunt — 产品发布记录、upvotes
+- HackerNews — 发帖/评论历史（Algolia API 免费）
+- Reddit — 发言历史、karma
+- Google Scholar — 学术论文验证
+- Medium / Substack — 写作内容、followers
+- YouTube — 技术演讲、demo 视频
+- npm / crates.io / PyPI — 发布过的包、下载量
+- Stack Overflow — 技术回答、reputation
+- Domain WHOIS — 网站注册时间、注册人
+- Wayback Machine — 历史快照（验证时间线声称）
+- Discord / Telegram 公开群 — 社区参与度
+- PGP keyservers / Keybase — 身份关联
+- Gravatar — 邮件关联头像和其他账号
+
+**Tier 3 — Deep（Enterprise 版）：**
+- 公司注册信息（SEC, Companies House, 天眼查）
+- 专利数据库
+- 法院/诉讼记录（公开的）
+- App Store / Play Store — 发布的 app、评分
+- 学历验证 API
+
+### 交叉验证引擎（Cross-Validation Engine）
+
+**核心原理：不是看单一数据源，而是看多源信息的一致性。**
+
+每个数据源产出的是 **claims（声称）**，交叉验证就是检查 claims 之间有没有矛盾。
+
+#### Phase 1: Claim Extraction（提取声称）
+每个数据源提取结构化 claims：
+```
+Source: LinkedIn
+  claim: "Senior Engineer at Google, 2020-2023"
+  claim: "MS Computer Science, Stanford, 2019"
+  claim: "Built ML pipeline serving 1M users"
+
+Source: Twitter bio
+  claim: "Ex-Google | Stanford CS | Building AGI"
+
+Source: GitHub
+  claim: account_created: 2018
+  claim: total_repos: 47
+  claim: commits_last_year: 342
+  claim: orgs: [google] → NOT FOUND
+```
+
+#### Phase 2: Claim Pairing（配对同类声称）
+把来自不同源的同类 claims 配对：
+```
+Pair 1: LinkedIn "Senior Engineer at Google" ↔ GitHub org membership
+  → GitHub 没有 @google org → ⚠️ UNVERIFIED (不一定是假的，但无法证实)
+
+Pair 2: LinkedIn "Stanford CS 2019" ↔ Google Scholar publications
+  → 没有找到 Stanford 相关论文 → ⚠️ UNVERIFIED
+
+Pair 3: Twitter "Building AGI" ↔ GitHub repos
+  → repos 全是 tutorial forks, 0 original ML code → 🚩 INCONSISTENT
+
+Pair 4: LinkedIn "2020-2023 at Google" ↔ GitHub commit timeline
+  → 2020-2023 commit 都是白天(PST) → ✅ CONSISTENT (上班时间 commit 符合湾区)
+```
+
+#### Phase 3: Consistency Scoring（一致性评分）
+每对 claims 给一个状态：
+- ✅ **VERIFIED** — 多源互相证实（权重 +2）
+- ☑️ **CONSISTENT** — 不矛盾，间接支持（权重 +1）
+- ⚠️ **UNVERIFIED** — 只有单一来源，无法证实（权重 0）
+- 🚩 **INCONSISTENT** — 多源矛盾（权重 -3）
+- ❌ **FALSIFIED** — 明确证伪（权重 -5）
+
+最终 credibility score = Σ(claim_weights) 归一化到 0-100
+
+#### Phase 4: Pattern Detection（模式检测）
+超越单条 claims，看整体模式：
+- **Scope inflation** — 声称做的东西远超实际产出（RAVANA case）
+- **Timeline gaps** — 简历说在 Google 但那段时间 GitHub 完全沉默
+- **Vanity metrics** — 很多 followers 但 engagement rate 极低
+- **Echo chamber** — 互动的人全是同一批 "building in public" 圈子
+- **Ghost projects** — 声称创办/维护的项目全是 404
+
+#### 刚才那个 case 的实际交叉验证过程：
+```
+Input: Likhith, email, oxiverse.com
+
+Step 1: Name → Twitter search → @ItxLikhith
+  claims: "17yo", "building privacy-first search", "oxiverse.com"
+
+Step 2: Twitter → GitHub link → github.com/itxLikhith
+  claims: account SUSPENDED → 🚩 RED FLAG
+
+Step 3: oxiverse.com → website content
+  claims: "RAVANA cognitive architecture", "ARC 94.7%"
+
+Step 4: Cross-validate
+  - "RAVANA" code repo → GitHub suspended → ❌ CANNOT VERIFY
+  - "ARC 94.7%" → no paper, no benchmark link → ⚠️ UNVERIFIED
+  - Website claims many products → all "coming soon" → 🚩 SCOPE INFLATION
+  - Age 17 + claim "bounded AGI" → 🚩 EXTRAORDINARY CLAIM, MINIMAL EVIDENCE
+
+Score: ~25/100 (low credibility, many unverifiable claims)
+```
+
+### 产品架构
+```
+Input: name / email / @handle / URL
+    ↓
+┌─────────────────────────────┐
+│  Discovery Layer            │
+│  - Identity resolution      │
+│    (一个 handle → 找到所有   │
+│     关联账号)               │
+│  - Tier 1/2/3 数据采集      │
+└────────────┬────────────────┘
+             ↓
+┌─────────────────────────────┐
+│  Claim Extraction (LLM)     │
+│  - 每个源 → 结构化 claims   │
+│  - entity: person/org/proj  │
+│  - type: employment/edu/    │
+│    project/skill/metric     │
+└────────────┬────────────────┘
+             ↓
+┌─────────────────────────────┐
+│  Cross-Validation Engine    │
+│  - Claim pairing            │
+│  - Consistency scoring      │
+│  - Pattern detection        │
+│  - Timeline analysis        │
+└────────────┬────────────────┘
+             ↓
+┌─────────────────────────────┐
+│  Report Generator           │
+│  - Profile dossier          │
+│  - Credibility score 0-100  │
+│  - Red flags list           │
+│  - Confidence per claim     │
+│  - Evidence links           │
+└─────────────────────────────┘
+```
+
+### 盈利模式
+- **Freemium**: 每月 5 次免费查询，之后按次收费（$2-5/query）
+- **Pro**: $29/mo unlimited queries
+- **Enterprise**: API access + batch queries + CRM 集成
+- **Premium reports**: 深度报告 $20-50/份（包含人工审核）
+
+### Competitive Landscape
+- **Clearbit** — 公司级 enrichment，偏 B2B sales
+- **Hunter.io** — 邮件查找，不做 credibility analysis
+- **Pipl** — 人物搜索，贵，偏执法/企业
+- **差异化**: 我们的核心是 **credibility/consistency analysis**（LLM 分析言行一致性），不只是 data aggregation
+
+### Risks
+- 隐私法规（GDPR, CCPA）— 只用公开信息，但需要注意合规
+- Platform ToS — Twitter/GitHub API 使用条款限制
+- 准确性 — LLM 分析可能有误判，需要 confidence scoring
+
+### 社工方法论应用（Social Engineering Techniques）
+
+**1. Pivot 技术（轴心跳转）— 社工最核心技能**
+- 邮件 → 用户名规律（likhith.seemala → likhith_seemala → itxlikhith）
+- 用户名 → 全平台搜同名（Sherlock/Maigret 思路，300+ 平台枚举）
+- 头像 → 反向图片搜索 → 找到其他账号
+- 域名 whois → 注册邮箱 → 这个邮箱还注册了什么
+- 手机号 → Telegram/WhatsApp/Signal 头像泄露
+
+**2. Sock Puppet / 伪装检测**
+- 账号创建时间聚集（同一周创 5 个平台 = 刻意打造人设）
+- 写作风格分析（stylometry/NLP）— 两个"不同的人"用词习惯一样
+- 时区泄露 — 声称在硅谷但发帖时间全是印度时区
+
+**3. OSINT 情报循环**
+- Collection → Processing → Analysis → Dissemination
+- 关键是 **tasking**：带假设去验证，不是漫无目的收集
+- 刚才对 Likhith 的调查就是这个流程的自然展现
+
+**4. Digital Footprint Mapping**
+- 被动足迹（别人提到你的）vs 主动足迹（你自己发的）
+- 两者不一致 = red flag（自称 influencer 但从来没人主动 @你）
+
+**5. Temporal Analysis（时间分析）**
+- commit 时间 → 推断时区 → 验证声称的地理位置
+- 发帖间隔 → 人 vs bot 判断
+- 简历时间线 vs 实际活动时间线 → 找 gap
+
+**6. Pretexting 反向应用**
+- 检测别人的 pretext：声称的身份有没有对应的数字痕迹？
+- 一个"CTO"从来没出现在公司公开材料里？
+- 一个"researcher"没有任何学术 footprint？
+
+**可直接产品化的技术模块：**
+- Sherlock/Maigret 式用户名枚举（handle → 300+ 平台查存在）
+- Stylometry NLP 分析（写作风格指纹，检测小号）
+- 时区推断引擎（活动时间 → 地理位置）
+- Pivot graph 可视化（证据链图谱）
+
+**差异化洞察：** Maltego, SpiderFoot, Recon-ng 都是工具箱，需要专业人士操作。没有人做成「一键出报告 + LLM 分析一致性」的产品。AI + OSINT 几乎是蓝海——OSINT 社区和 AI 社区不重叠，传统工具面向专业人士（Maltego $999/yr），大公司怕 GDPR 不敢做 credibility scoring，LLM 推理能力刚刚成熟到可以做交叉验证。
+
+### 产品进化：从背调工具到人脉情报系统
+
+三层架构（独立产品，不并入 The Unusual）：
+
+**Layer 1: Profile Dossier（可信度验证）**
+→ 这个人是不是他说的那样？
+- 多源数据采集 + LLM 交叉验证
+- Credibility score 0-100
+- Red flags + 证据链
+
+**Layer 2: Social Graph（关系网络）**
+→ 这个人认识谁？谁认识他？影响力链条是什么？
+- Neo4j 知识图谱存储
+- 节点：Person / Org / Skill / Project / Repo
+- 关系边：WORKED_AT, COLLABORATED_WITH, ENDORSED_BY, EXPERT_IN, INVESTED_IN, FOLLOWS, CONTRIBUTED_TO
+- PageRank / centrality 算影响力
+- 最短路径查询（"我和目标之间隔几个人"）
+
+**Layer 3: Strategic Value（对我的价值匹配）**
+→ 这个人在什么方面对我有用？合作机会在哪？
+- 技能/兴趣 overlap 分析
+- 引荐路径发现（"谁能帮我连到 Anthropic"）
+- Deal flow scoring（VC 尽调场景）
+
+### Neo4j Graph 示例查询
+```cypher
+// 谁能引荐我到某公司？
+MATCH (me)-[:KNOWS*1..3]-(target)
+WHERE target.company = "Anthropic"
+RETURN path
+
+// 在 causal inference 领域谁最有影响力？
+MATCH (p:Person)-[:EXPERT_IN]->(s:Skill {name:"causal inference"})
+RETURN p ORDER BY p.pagerank DESC
+
+// 这个人对我有什么价值？
+MATCH (target)-[:EXPERT_IN]->(s)<-[:INTERESTED_IN]-(me)
+RETURN s.name AS overlap_area
+```
+
+### 技术架构
+```
+┌─────────────────────────────┐
+│  Data Layer                 │
+│  Sherlock枚举 + API采集     │
+│  (Twitter/GitHub/LinkedIn)  │
+└────────────┬────────────────┘
+             ↓
+┌─────────────────────────────┐
+│  Knowledge Graph (Neo4j)    │
+│  Person/Org/Skill/Project   │
+│  关系边 + 属性              │
+└────────────┬────────────────┘
+             ↓
+┌─────────────────────────────┐
+│  Analysis Engine            │
+│  - Credibility scoring      │
+│  - PageRank/centrality      │
+│  - Value matching           │
+│  - LLM cross-validation     │
+└────────────┬────────────────┘
+             ↓
+┌─────────────────────────────┐
+│  Output                     │
+│  - Profile dossier (PDF/web)│
+│  - Graph visualization      │
+│  - Strategic brief          │
+│  - API                      │
+└─────────────────────────────┘
+```
+
+### 产品形态
+
+**面向个人（PLG, self-serve）:**
+- 输入 @handle → 出 dossier + 社交图谱
+- "你和这个人的最短路径"
+- "这个人在哪些方面对你有价值"
+- 像 LinkedIn "共同联系人"，但基于公开数据 + 跨平台
+
+**面向机构（sales/BD/VC）:**
+- 批量 vetting（投资前尽调）
+- 关系映射（"我们团队和目标公司之间有哪些桥梁"）
+- Deal flow scoring（"这个创始人的 credibility score"）
+
+### 与 The Unusual 的关系
+- 独立产品，不并入 The Unusual
+- 共享底层技术可能性：实体解析、LLM 交叉验证 pipeline
+- The Unusual 分析事件/市场信号，本产品分析人/组织
+- 两者未来可能通过 "谁在这个事件中是关键人物" 打通
+
+### 面向个人 C 端场景（核心 GTM 切入点）
+
+**场景 1: Online Dating 防骗（首选 MVP 切入点）**
+- 输入对方的名字 / @handle / 手机号 → 出可信度报告
+- 检测 catfish 信号：照片反向搜索、社交账号年龄、活跃度异常、声称身份 vs 数字足迹不一致
+- "这个人说他是 Google 工程师" → 没有 LinkedIn、没有 GitHub、没有任何技术社区足迹 → 🚩
+- 目标用户：约会 app 用户（Hinge/Bumble/Tinder），特别是女性用户（安全需求强烈）
+- 竞品几乎为零：Social Catfish ($6/search) 但只做反向图片搜索，不做 LLM 一致性分析
+- 美国 online dating 用户 3 亿+，romance scam 每年损失 $1.3B
+
+**场景 2: 陌生人 Reach Out 筛选**
+- 有人 cold DM / email / LinkedIn 联系你 → 30 秒出这个人的背景摘要
+- 适用场景：freelancer 接单、投资人找创始人、合作方 BD、社交媒体互动
+- "这个人说他是某 VC 的 partner" → 查 Crunchbase + LinkedIn + Twitter → 确认或 flag
+- "有人想跟我合作开源项目" → 查 GitHub contributions + 技术社区 footprint
+
+**场景 3: 加密/Web3 防骗**
+- "这个项目方创始人是真人吗？" — 匿名文化 = 诈骗温床，rug pull 每年数十亿美元
+- 查 Discord mod / Twitter KOL / 项目 founder 的真实身份一致性
+- 用户：散户投资者、DAO 成员
+- 比 dating 付费意愿更高（涉及真金白银）
+
+**场景 4: Freelancer/远程雇佣验证**
+- Upwork/Fiverr 上接单或发单前查对方
+- "这个开发者说他 10 年经验" → GitHub 只有 3 个 repo，全是 fork
+- "这个客户靠谱吗" → 查过往评价 + 公司是否真实存在
+
+**场景 5: 社交媒体 KOL/网红验证**
+- 品牌方找 influencer 合作前查真实影响力
+- 粉丝/互动是不是买的？内容是不是 AI 生成的？
+- 跟 xinfluencer 高度重合，可以直接复用
+
+**场景 6: 个人安全 / 反诈**
+- 二手交易对手方验证（Craigslist / Facebook Marketplace）
+- 合租/室友背景（"这个人真的是 NYU 学生吗"）
+- 子女社交对象快速筛查
+- 不是"背调"，是"公开信息一致性检查"
+
+**场景 7: 实体可信度分析（查人以外的延伸）**
+- **餐厅验证** — 综合各平台 review（Google Maps / Yelp / 小红书 / TikTok），查卫生检查记录（政府公开数据库），查厨师/负责人公开纠纷，LLM 刷单评论检测
+- **公寓/租房验证** — 多平台交叉比对（StreetEasy / Reddit / Apartments.com），法院投诉记录，管理公司诉讼历史
+- **商品/品牌验证** — 查评论真实性，溯源到生产厂商，查负责人背景
+- ⚠️ 这些场景共享同一套引擎（多源采集 + LLM 交叉验证），但用户群和获客渠道不同，不适合同时做 MVP
+
+**场景 8: 隐藏的 B2B 场景（伪装成 C 端进入）**
+- 小企业主招聘 — 请不起正规背调公司但需要验证简历（⚠️ ToS 写明 "not for employment decisions"）
+- 记者/自媒体信源验证 — 爆料人可信度、"专家"资质验证（用户量小但单价高）
+- 律师/诉讼前摸底 — 公开信息汇总，不是 legal discovery
+
+**MVP 场景优先级：**
+1. Dating 防骗 — 最大市场、最强传播、付费意愿强
+2. Crypto 防骗 — 最高客单价
+3. Freelance 验证 — 最贴近 potato 自身场景
+4. KOL 验证 — 直接复用 xinfluencer
+5. 合租/二手交易 — 高频但付费意愿较低
+
+**关键洞察：场景 1-5 共享同一个技术 pipeline，只是输出报告的模板和重点不同。MVP 做一个，其余几乎免费拓展。**
+
+**C 端定价策略：**
+- 免费：每月 3 次 quick scan（基础信息汇总，无深度分析）
+- $4.99/次：单次深度报告（交叉验证 + 一致性分析 + 时间线）
+- $9.99/月：无限次 quick scan + 5 次深度报告
+- 对标：Social Catfish $5.73/search，BeenVerified $26.89/月
+- **MVP 先做单次付费，不做订阅** — 信任没建立时让人包月很难，$5 查一个人心理门槛低
+
+**为什么 C 端是最好的切入点：**
+1. **FCRA 完全不适用** — FCRA 只管雇佣/信贷/租房决策，个人查人不在范围内
+2. **用户自发传播** — "我用这个查了约会对象发现是 catfish" 这种故事自带病毒性
+3. **付费意愿明确** — 安全需求 + 即时满足 = 高转化
+4. **数据量小** — 每次查一个人，不需要批量处理基础设施
+5. **产品简单** — 输入 handle → 等 2 分钟 → 出报告，MVP 可以很快做出来
+
+### 数据源策略（按场景分层）
+
+**Dating / 个人场景优先数据源：**
+1. **反向图片搜索**（Google Images / Yandex / TinEye）— dating 防骗最有力武器，照片出现在别人 Instagram 或是 stock photo = 直接实锤
+2. **Instagram 公开信息** — 即使私密账号，头像/bio/用户名/粉丝数仍公开；账号是否存在本身就是信号
+3. **Google 搜索（名字 + 变体）** — 名字+城市、名字+公司、名字+学校、手机号、邮箱、用户名
+4. **手机号查询** — 公开 caller ID 数据库查注册地区/运营商（声称在洛杉矶但号码是尼日利亚运营商 = 🚩）
+5. **Facebook 元数据** — 朋友数/账号创建时间/生活事件（即使账号私密也有部分公开信息）
+6. **职业执照公开数据库**（杀手级特性，普通人不知道这些存在）：
+   - 医生 → NPI Registry + 各州 Medical Board
+   - 律师 → 各州 Bar Association
+   - 房产经纪 → 各州 Real Estate Commission
+   - CPA/护士/教师 → 各有公开执照数据库
+   - "他说自己是医生但 NPI 查不到" = 硬证据
+7. **公开记录** — 房产记录（county assessor，免费）、婚姻/离婚记录（county clerk）、薪资估算（Glassdoor/Levels.fyi）
+
+**Professional / Tech 场景优先数据源：**
+1. Twitter — bio/发帖历史/关注关系（已有 xinfluencer crawler）
+2. GitHub — profile/repo/contribution 频率/commit 时间分布（API 公开免费）
+3. LinkedIn — Google site:linkedin.com 搜索获取公开摘要（不直接爬）
+4. Crunchbase — 投资/创业记录
+
+**竞品分析（为什么是蓝海）：**
+- **数据库查询型**（BeenVerified / Spokeo / Whitepages）— 只从公共记录库拉数据，无 AI 分析，不能判断一致性
+- **专业工具箱型**（Maltego / SpiderFoot）— 很强大但需要培训，普通人用不了，也无 AI 推理层
+- **单点型**（Social Catfish / Sherlock）— 每个只做一件事，没人串起来形成完整分析
+- **空白地带**：没有人做到"输入名字 → 2分钟 → AI 交叉验证的完整报告"，LLM 推理能力最近一两年才成熟到可以做可靠交叉验证
+
+### 深度分析功能
+
+**📸 照片关系分析（Vision LLM）**
+- 身体距离、姿势分析（搂腰 vs 礼貌合影）
+- 表情同步度（genuine smile vs posed）
+- 戒指检测（左手无名指）
+- 同一人反复出现在多张照片中 → 可能的伴侣
+- 照片 EXIF 数据（如果未 strip）→ 时间地点
+- 用户上传 5 张对方照片 → 系统："照片 2 和照片 4 中出现同一女性，肢体语言显示亲密关系"
+
+**💬 聊天记录谎言检测（LLM 分析）**
+- **内部一致性** — 三月说在波士顿出差，四月说三月一直在家
+- **与公开信息交叉验证** — 聊天里说"我在 Google 工作"，LinkedIn 写的是某小公司
+- **语言模式分析** — 回避型回答频率、细节突然变少、前后说辞微妙变化
+- **时间线重建** — 提取所有事实性陈述，排列时间线，高亮矛盾点
+- **Romance scam 话术识别** — 已知骗术模式（快速表白、急于转平台、编造紧急情况要钱）
+- **婚姻状况验证** — 交叉比对婚姻/离婚公开记录 + 照片分析（戒指、情侣合照）+ 社媒蛛丝马迹
+- **收入/财产画像** — 职业执照 → 薪资范围（Glassdoor）+ 房产记录（county assessor）
+
+**示例报告输出：**
+```
+⚠️ 发现 3 处不一致：
+1. 3/15 说在波士顿出差 ↔ 3/18 照片地理标签显示在迈阿密
+2. 声称是外科医生 ↔ NPI 数据库无匹配记录
+3. 2月和4月对学历描述不同（MIT vs Stanford）
+
+🚩 风险信号：
+- 认识 2 周即表白（匹配 romance scam 模式）
+- 3 次拒绝视频通话
+- 婚姻记录：2023 年登记结婚，无离婚记录
+```
+
+### 聊天记录上传方案
+
+**问题：聊天平台碎片化，不是所有平台都支持导出**
+
+**原生支持导出：** WhatsApp (.txt) / Telegram (JSON/HTML) / Facebook Messenger / Instagram DM / LINE (.txt)
+**不支持导出：** iMessage / Hinge / Bumble / Tinder / 微信 — 只能截图
+
+**两条处理管道：**
+- **管道 A: 文本解析** — .txt/.json/.html，写 parser 适配各平台格式（快、便宜）
+- **管道 B: 截图 OCR** — Vision LLM 读截图提取对话 + 时间戳（通用但贵）
+
+**MVP 用户体验（分层设计）：**
+- **层 1（MVP）：用户截图重要片段** — 产品引导："请上传你觉得对方说过可疑内容的聊天截图，比如关于职业、住所、感情状态的描述"。5-10 张截图，Vision LLM 通吃，不需要任何 platform-specific parser
+- **层 2（后期）：全量导出 + 自动摘要** — 用户传 .txt，系统先跑快速扫描提取所有事实性陈述，再送大模型交叉验证
+- **层 3（终极）：浏览器插件自动采集** — 用户在网页版聊天界面打开插件，自动滚动 + 采集全部对话
+
+**用户提供私域数据的法律优势：**
+- 用户主动上传 = 不是我们采集，法律上完全没问题
+- 私域数据（对方发的消息/照片）+ 公开数据 = 交叉验证质量大幅提升
+- 也是定价分层依据：免费版只用公开数据，付费版支持上传做深度分析
+
+### 法律合规设计
+
+**核心原则：卖的是「公开信息结构化呈现 + 一致性分析」，不是「背景调查」**
+
+**已验证的合法模式（ZoomInfo $1.2B ARR 在做类似的事）：**
+- ✅ 只采集公开数据 — 不 scrape 需要登录的内容
+- ✅ 不输出 "credibility score" — 改称 "consistency analysis"（一致性分析），避免 scoring 法律定义
+- ✅ ToS 明确禁止用于雇佣/信贷/租房决策 — 直接绕开 FCRA
+- ✅ opt-out 机制 — 任何人可请求删除自己的数据
+- ✅ 先不碰欧洲市场 — MVP 只面向美国用户，避免 GDPR
+- ✅ 报告加 disclaimer — "For informational purposes only, based on publicly available data"
+- ✅ 不长期存储 PII — 按需生成报告，设过期自动删除
+
+**C 端额外优势：**
+- 个人用途不触发 FCRA（只管 "permissible purposes"：employment, credit, housing）
+- 不需要成为 Consumer Reporting Agency
+- hiQ Labs v. LinkedIn (2022) 判例确认公开数据 scraping 在美国合法
+
+**需要注意的红线：**
+- ❌ 不做"这个人是不是罪犯"之类的判断 — 那是背调
+- ❌ 不采集非公开信息（私信、加密通讯、付费数据库）
+- ❌ 不做自动化"好人/坏人"二分结论 — 只展示事实 + 不一致处
+- ⚠️ 加州 CCPA 要求提供数据删除渠道（opt-out 已覆盖）
+- ⚠️ 如果未来进欧洲：需要 GDPR Data Protection Impact Assessment
+
+### 候选名字
+- **Dossier** — 直接，情报感
+- **Veritas** — 拉丁语"真相"
+- **Prism** — 多角度看一个人
+- **Nexus** — 连接点
+- **CheckMate** — dating 场景强相关，好记
+- **Veil** — "揭开面纱"
+
+### Connections
+- 直接复用 **xinfluencer** 基础设施（crawler, scoring）
+- 关联 IDEA-20260406-06（Agent IAM）— trust scoring 可以喂进 agent 权限系统
+- 关联 **engram** — profile 数据可以持久化为知识图谱
+- 底层技术与 **The Unusual** 可共享（实体解析、交叉验证 pipeline）
+
+### Next Steps
+- [ ] MVP scope: 只做 Twitter + GitHub，给一个 @handle 输出 dossier
+- [ ] 验证：先在 RustClaw 里做成一个 skill，手动触发
+- [ ] 调研隐私法规红线 ✅ 初步完成 — C端个人用途 FCRA 不适用，合法
+- [ ] 测试 10 个真实 case 验证准确率
+- [ ] 调研 Sherlock/Maigret 的用户名枚举数据库，看能否直接复用
+- [ ] 评估 Neo4j vs 轻量替代（SurrealDB, TypeDB, 或直接 SQLite + adjacency list）
+- [ ] 设计 Layer 3 value matching 算法原型
+- [ ] 调研 dating app 场景竞品（Social Catfish, Spokeo, BeenVerified）
+- [ ] 设计 C 端 landing page 文案 + 价值主张测试
+
+### Status: 💡 New
+---
+
+## IDEA-20260416-01: GitHub Trending AI Weekly — 自动化周报 + 流量机器
+- **Date**: 2026-04-16
+- **Triggered by**: https://x.com/seelffff/status/2044868944830644317 (twitter)
+- **Category**: content / growth / product
+- **Tags**: github-trending, content-automation, twitter-growth, weekly-roundup, ai-tools
+
+### The Idea
+做一个自动化的 **GitHub Trending AI/Dev Tools 周报**，格式参考 @seelffff 的 "X repos replacing $Y/mo tools"。
+
+**为什么这个格式 viral：**
+- "省钱" hook — 人人都想省 $1500/mo
+- 列表格式 — 易消化、易 bookmark
+- 每个 repo mention 都能从那个社区获得 engagement
+- 可重复、可自动化
+
+**自动化 pipeline：**
+1. RustClaw 每周 scrape GitHub trending (language: all/python/rust/ts, period: weekly)
+2. 过滤 AI/dev tools 相关的 repos
+3. 分析每个 repo：它替代了什么付费工具？省多少钱？
+4. 生成 tweet thread draft
+5. potato 审核 → 发布
+
+**额外价值：**
+- 每周产出 = 持续内容，不是一次性
+- 过程中我们自己也发现好工具/机会
+- 建立 "AI tools curator" 的个人品牌
+- 可以扩展到 newsletter / blog
+
+### Why This Matters
+- 内容是流量，流量是变现的前提
+- 自动化程度高，potato 几乎不需要花时间
+- @seelffff 一条推 292 likes — 说明需求真实存在
+- 同时帮我们保持对 AI 生态的 awareness
+
+### 飞轮效应（potato 洞察）
+周报不只是内容产品，是整个 idea 生态的**进料口**：
+- **内容层**：周报本身 = 流量（省钱 hook 天然 viral）
+- **Idea 层**：每个 repo 都可能触发新 idea → 喂进 IDEAS.md
+- **情报层**：持续追踪竞品动态（cognee/claude-mem/etc）→ 喂进 engram
+- **工具层**：发现可集成的项目 → RustClaw/engram 生态扩展
+- **二次内容**：周报发现 → 深度对比文章（如 "engram vs claude-mem"）→ 更多流量
+- **正反馈**：更多关注 → 更多信息源 → 更好的周报 → 更多关注
+
+一次 scrape，四个方向产出。
+
+### Next Steps
+- [ ] 写一个 GitHub trending scraper skill
+- [ ] 定义 "AI/dev tool" 的过滤标准
+- [ ] 设计 tweet thread 模板
+- [ ] 先手动做一期验证格式
+- [ ] 设计 intake 联动：周报 scrape → 自动触发 idea intake pipeline
+
+### Source Context
+See: intake/twitter/seelffff-github-trending-ai-tools.md
+
+### Status: 💡 New
+---
+
+## IDEA-20260416-02: Polymarket Copy Trading — Kreo 模式调研
+- **Date**: 2026-04-16
+- **Triggered by**: https://x.com/seelffff/status/2044868944830644317 (twitter)
+- **Category**: trading / money
+- **Tags**: polymarket, copy-trading, prediction-markets, passive-income
+
+### The Idea
+@seelffff 提到 Kreo 是列表里唯一付费的工具，因为 "it makes more than it costs"。追踪 Polymarket 上 top wallet 并自动 copy trade。
+
+值得调研的点：
+1. Kreo 的具体策略和表现
+2. Polymarket 的 copy trading 生态
+3. 我们能不能自己建一个（用 RustClaw 监控 + 执行）
+4. 或者直接用 Kreo，如果 ROI 正
+
+### Why This Matters
+- 直接的被动收入机会
+- 预测市场 + AI 分析是我们的能力圈
+- 如果 ROI 好，这是最直接的 "赚钱" 路径
+
+### Next Steps
+- [ ] 调研 Kreo — 功能、定价、历史表现
+- [ ] 了解 Polymarket API — 能否自建
+- [ ] 评估风险和资金量要求
+
+### Source Context
+See: intake/twitter/seelffff-github-trending-ai-tools.md
+
+### Status: 💡 New
+---
+
 ## IDEA-20260406-06: AI Agent IAM — Identity & Access Management for Agent Ecosystems
 - **Date**: 2026-04-06
 - **Source**: potato insight (Telegram)
