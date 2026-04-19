@@ -80,6 +80,43 @@ pub async fn start_heartbeat(
 
             tracing::debug!("Heartbeat tick");
 
+            // Run interoceptive cycle: tick (pull signals) + evaluate (generate actions)
+            if let Some(ref mem) = runner.memory() {
+                match mem.interoceptive_cycle() {
+                    Ok(actions) => {
+                        if !actions.is_empty() {
+                            tracing::info!("Interoceptive regulation: {} actions", actions.len());
+                            for action in &actions {
+                                match action {
+                                    engramai::interoceptive::RegulationAction::SoulUpdateSuggestion { domain, reason, .. } => {
+                                        tracing::info!("🧠 Soul suggestion [{}]: {}", domain, reason);
+                                    }
+                                    engramai::interoceptive::RegulationAction::RetrievalAdjustment { reason, .. } => {
+                                        tracing::info!("🔍 Retrieval adjustment: {}", reason);
+                                    }
+                                    engramai::interoceptive::RegulationAction::BehaviorShift { action, recommendation, .. } => {
+                                        tracing::info!("⚡ Behavior shift [{}]: {}", action, recommendation);
+                                    }
+                                    engramai::interoceptive::RegulationAction::Alert { severity, message, .. } => {
+                                        tracing::warn!("🚨 Alert [{}]: {}", severity, message);
+                                        // High-severity alerts route to Telegram
+                                        if matches!(severity, engramai::interoceptive::AlertSeverity::High) {
+                                            let alert_msg = format!("🧠 Interoceptive Alert [{}]: {}", severity, message);
+                                            if let Err(e) = route_to_telegram(&client, &config, &alert_msg).await {
+                                                tracing::warn!("Failed to route interoceptive alert: {}", e);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("Interoceptive cycle failed (non-fatal): {}", e);
+                    }
+                }
+            }
+
             // TODO: If model override is set, temporarily switch the agent's model
             // For now, the model override is logged but not yet wired into process_message
             if let Some(ref m) = model {

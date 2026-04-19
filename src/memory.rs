@@ -17,6 +17,7 @@ use engramai::{
     SessionRegistry, BaselineTracker,
     EmotionalBus, EmotionalTrend, ActionStats, SoulUpdate, HeartbeatUpdate,
     bus::{mod_io::{parse_soul, Drive}, accumulator::EmotionalAccumulator, feedback::BehaviorFeedback},
+    interoceptive::{InteroceptiveState, RegulationAction, regulation::{self, RegulationConfig}},
 };
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -514,6 +515,14 @@ impl MemoryManager {
         Ok(())
     }
 
+    /// Run rumination: synthesis only, no consolidation.
+    /// Discovers clusters and generates insights without decaying memory strength.
+    pub fn synthesize(&self) -> anyhow::Result<engramai::synthesis::types::SynthesisReport> {
+        let mut engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let report = engram.synthesize().map_err(|e| anyhow::anyhow!("{}", e))?;
+        Ok(report)
+    }
+
     /// Get memory stats.
     pub fn stats(&self) -> anyhow::Result<serde_json::Value> {
         let engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
@@ -894,6 +903,48 @@ impl MemoryManager {
         }
 
         Ok(result)
+    }
+
+    // ─── Interoceptive Layer (L3) ───────────────────────────────────────
+
+    /// Get a snapshot of the current interoceptive state.
+    ///
+    /// Returns the integrated feeling-state across all domains.
+    /// Used by EngramRecallHook to inject into system prompts.
+    pub fn interoceptive_snapshot(&self) -> anyhow::Result<InteroceptiveState> {
+        let engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        Ok(engram.interoceptive_snapshot())
+    }
+
+    /// Run an interoceptive tick: pull signals from all subsystems into the hub.
+    ///
+    /// Call during heartbeats or periodically to keep the interoceptive state current.
+    /// This pulls from EmotionalAccumulator and BehaviorFeedback DB tables.
+    pub fn interoceptive_tick(&self) -> anyhow::Result<()> {
+        let mut engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        engram.interoceptive_tick();
+        Ok(())
+    }
+
+    /// Evaluate the current interoceptive state and generate regulation actions.
+    ///
+    /// Returns advisory actions (soul updates, retrieval adjustments, behavior shifts, alerts).
+    /// The caller decides how to act on them (log, send to Telegram, apply automatically).
+    pub fn interoceptive_regulate(&self) -> anyhow::Result<Vec<RegulationAction>> {
+        let engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let state = engram.interoceptive_snapshot();
+        let config = RegulationConfig::default();
+        Ok(regulation::evaluate(&state, &config))
+    }
+
+    /// Run a full interoceptive cycle: tick + evaluate.
+    ///
+    /// Convenience method for heartbeat use. Returns regulation actions.
+    pub fn interoceptive_cycle(&self) -> anyhow::Result<Vec<RegulationAction>> {
+        // Tick first: pull fresh signals into the hub
+        self.interoceptive_tick()?;
+        // Then evaluate: generate regulation actions from the updated state
+        self.interoceptive_regulate()
     }
 
     // ─── Formatting ─────────────────────────────────────────────────────

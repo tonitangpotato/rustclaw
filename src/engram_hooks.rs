@@ -92,6 +92,37 @@ impl Hook for EngramRecallHook {
                         );
                     }
                 }
+
+                // Inject interoceptive state snapshot into metadata.
+                // The agent picks this up and appends it to the system prompt.
+                match self.memory.interoceptive_snapshot() {
+                    Ok(state) => {
+                        let prompt_section = state.to_prompt_section();
+                        // Only inject if there's actual data (skip "no data yet")
+                        if !state.domain_states.is_empty() {
+                            if let Some(obj) = ctx.metadata.as_object_mut() {
+                                obj.insert(
+                                    "interoceptive_state".to_string(),
+                                    serde_json::json!({
+                                        "formatted": prompt_section,
+                                        "global_arousal": state.global_arousal,
+                                        "domain_count": state.domain_states.len(),
+                                        "buffer_size": state.buffer_size,
+                                    }),
+                                );
+                            }
+                            tracing::debug!(
+                                "Interoceptive snapshot: {} domains, arousal {:.2}",
+                                state.domain_states.len(),
+                                state.global_arousal,
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("Interoceptive snapshot failed (non-fatal): {}", e);
+                    }
+                }
+
                 Ok(HookOutcome::Continue(None))
             }
             Err(e) => {

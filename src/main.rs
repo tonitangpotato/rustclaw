@@ -163,12 +163,16 @@ async fn main() -> anyhow::Result<()> {
                 .or(cfg.workspace.clone())
                 .unwrap_or_else(|| ".".to_string());
 
-            let ws = workspace::Workspace::load(&workspace_dir)?;
-            tracing::info!("Workspace loaded: {}", workspace_dir);
+            let persona = cfg.persona.as_deref();
+            let ws = workspace::Workspace::load_with_persona(&workspace_dir, persona)?;
+            tracing::info!("Workspace loaded: {} (persona: {})", workspace_dir, persona.unwrap_or("default"));
             tracing::info!("Agent: {}", ws.identity_name().unwrap_or("unnamed"));
 
             // Initialize memory (wrap in Arc for tool sharing)
-            let mem = std::sync::Arc::new(memory::MemoryManager::new(&cfg, &workspace_dir).await?);
+            let persona_name = persona.unwrap_or("default");
+            let mut mem = memory::MemoryManager::new(&cfg, &workspace_dir).await?;
+            mem = mem.with_namespace(persona_name);
+            let mem = std::sync::Arc::new(mem);
             tracing::info!("Memory initialized");
 
             // Initialize hooks with safety checks
@@ -333,6 +337,7 @@ async fn main() -> anyhow::Result<()> {
 
             // Start auto-consolidation background task (every 6 hours)
             let mem_for_reflection = mem_for_consolidation.clone();
+            let mem_for_rumination = mem_for_reflection.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
                 loop {
@@ -344,6 +349,30 @@ async fn main() -> anyhow::Result<()> {
                 }
             });
             tracing::info!("Engram auto-consolidation scheduled (every 6 hours)");
+
+            // Start rumination background task (every 2 hours)
+            // Synthesis only — discovers clusters and generates insights without decaying memory
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(2 * 3600));
+                interval.tick().await; // skip first immediate tick
+                loop {
+                    interval.tick().await;
+                    match mem_for_rumination.synthesize() {
+                        Ok(report) => {
+                            if report.clusters_found > 0 {
+                                tracing::info!(
+                                    "Synthesis: {} clusters, {} synthesized, {} skipped",
+                                    report.clusters_found,
+                                    report.clusters_synthesized,
+                                    report.clusters_skipped,
+                                );
+                            }
+                        }
+                        Err(e) => tracing::warn!("Synthesis failed: {}", e),
+                    }
+                }
+            });
+            tracing::info!("Synthesis scheduled (every 2 hours)");
 
             // Start self-reflection background task (every 24 hours)
             // Decays emotional trends, prunes old logs, logs suggestions

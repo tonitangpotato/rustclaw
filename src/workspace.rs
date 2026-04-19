@@ -113,6 +113,11 @@ pub struct SkillFrontmatter {
     pub tags: Vec<String>,
     #[serde(default = "default_max_body_size")]
     pub max_body_size: usize,
+    /// Optional preamble injected when this skill runs in a sub-agent context.
+    /// Overrides generic sub-agent rules with skill-specific guidance (e.g., "don't re-read
+    /// requirements, they're pre-loaded — start writing the design file immediately").
+    #[serde(default)]
+    pub subagent_preamble: Option<String>,
 }
 
 fn default_priority() -> u8 {
@@ -359,8 +364,20 @@ impl Clone for Workspace {
 
 impl Workspace {
     /// Load workspace files from a directory.
+    ///
+    /// If `persona` is provided, persona-specific files (SOUL.md, AGENTS.md,
+    /// HEARTBEAT.md) are loaded from `{dir}/personas/{persona}/` with fallback
+    /// to `{dir}/`. Shared files (USER.md, TOOLS.md, MEMORY.md, etc.) always
+    /// load from workspace root.
     pub fn load(dir: &str) -> anyhow::Result<Self> {
+        Self::load_with_persona(dir, None)
+    }
+
+    /// Load workspace with a specific persona.
+    pub fn load_with_persona(dir: &str, persona: Option<&str>) -> anyhow::Result<Self> {
         let root = Path::new(dir).to_path_buf();
+        let persona_name = persona.unwrap_or("default");
+        let persona_dir = root.join("personas").join(persona_name);
 
         // Load skills from skills/ directory
         let skills_dir = root.join("skills");
@@ -381,14 +398,28 @@ impl Workspace {
             None
         };
 
+        // Persona-specific files: check personas/{name}/ first, fallback to root
+        let read_persona_file = |filename: &str| -> Option<String> {
+            Self::read_optional(&persona_dir, filename)
+                .or_else(|| Self::read_optional(&root, filename))
+        };
+
+        if persona_dir.is_dir() {
+            tracing::info!("Loading persona '{}' from {}", persona_name, persona_dir.display());
+        } else {
+            tracing::info!("Persona dir not found ({}), using workspace root", persona_dir.display());
+        }
+
         Ok(Self {
-            soul: Self::read_optional(&root, "SOUL.md"),
-            agents: Self::read_optional(&root, "AGENTS.md"),
+            // Persona-specific files (identity, behavior, tasks)
+            soul: read_persona_file("SOUL.md"),
+            agents: read_persona_file("AGENTS.md"),
+            heartbeat: read_persona_file("HEARTBEAT.md"),
+            identity: read_persona_file("IDENTITY.md"),
+            // Shared files (user info, environment, memory)
             user: Self::read_optional(&root, "USER.md"),
             tools: Self::read_optional(&root, "TOOLS.md"),
-            heartbeat: Self::read_optional(&root, "HEARTBEAT.md"),
             memory: Self::read_optional(&root, "MEMORY.md"),
-            identity: Self::read_optional(&root, "IDENTITY.md"),
             bootstrap: Self::read_optional(&root, "BOOTSTRAP.md"),
             model: None,
             skill_registry,

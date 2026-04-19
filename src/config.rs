@@ -107,6 +107,11 @@ pub struct Config {
     #[serde(default)]
     pub safety: crate::safety::SafetyConfig,
 
+    /// Persona name — loads persona-specific files (SOUL.md, AGENTS.md, HEARTBEAT.md)
+    /// from `{workspace}/personas/{persona}/`. Also used as engram namespace.
+    /// Defaults to "default" if not set.
+    pub persona: Option<String>,
+
     /// Web search configuration.
     #[serde(default)]
     pub web_search: WebSearchConfig,
