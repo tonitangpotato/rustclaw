@@ -3,11 +3,11 @@
 //! Unlike OpenClaw (MCP overhead) or Hermes (FTS only),
 //! RustClaw uses engramai as a direct Rust dependency — zero IPC overhead.
 //!
-//! ## EmotionBus Integration
+//! ## EmpathyBus Integration
 //!
-//! Full emotional feedback loop:
-//! - EmotionalBus for drive alignment and importance boosting
-//! - EmotionalAccumulator for tracking emotional valence per domain
+//! Empathy feedback loop (observing *user's* emotional state):
+//! - EmpathyBus for drive alignment and importance boosting
+//! - EmpathyAccumulator for tracking user empathy valence per domain
 //! - BehaviorFeedback for tracking tool success/failure rates
 //! - Auto-suggestions for SOUL.md and HEARTBEAT.md updates
 
@@ -15,8 +15,8 @@ use engramai::{
     Memory, MemoryConfig, MemoryType, MemoryLayer, AnthropicExtractor, AnthropicExtractorConfig, TokenProvider,
     SynthesisSettings, SynthesisLlmProvider,
     SessionRegistry, BaselineTracker,
-    EmotionalBus, EmotionalTrend, ActionStats, SoulUpdate, HeartbeatUpdate,
-    bus::{mod_io::{parse_soul, Drive}, accumulator::EmotionalAccumulator, feedback::BehaviorFeedback},
+    EmpathyBus, EmpathyTrend, ActionStats, SoulUpdate, HeartbeatUpdate,
+    bus::{mod_io::{parse_soul, Drive}, accumulator::EmpathyAccumulator, feedback::BehaviorFeedback},
     interoceptive::{InteroceptiveState, RegulationAction, regulation::{self, RegulationConfig}},
 };
 use std::path::Path;
@@ -137,11 +137,11 @@ pub struct MemoryManager {
     anomaly_tracker: Mutex<BaselineTracker>,
     /// Drives from SOUL.md for importance boosting
     drives: Vec<Drive>,
-    /// EmotionalBus for full emotional feedback loop (optional, requires workspace_dir)
-    emotional_bus: Option<EmotionalBus>,
-    /// Workspace directory for EmotionalBus operations
+    /// EmpathyBus for full empathy feedback loop (optional, requires workspace_dir)
+    empathy_bus: Option<EmpathyBus>,
+    /// Workspace directory for EmpathyBus operations
     workspace_dir: String,
-    /// Database path for creating EmotionalBus connection
+    /// Database path for creating EmpathyBus connection
     db_path: String,
     auto_recall: bool,
     auto_store: bool,
@@ -198,10 +198,10 @@ impl MemoryManager {
             tracing::debug!("No Keychain OAuth, relying on engram auto-config");
         }
 
-        // Initialize EmotionalBus for drive alignment and emotional tracking
-        let emotional_bus = match EmotionalBus::new(workspace_dir, engram.connection()) {
+        // Initialize EmpathyBus for drive alignment and empathy tracking
+        let empathy_bus = match EmpathyBus::new(workspace_dir, engram.connection()) {
             Ok(mut bus) => {
-                tracing::info!("EmotionalBus initialized with {} drives", bus.drives().len());
+                tracing::info!("EmpathyBus initialized with {} drives", bus.drives().len());
                 // Initialize embedding-based alignment if embedding provider is available
                 if let Some(ref emb) = engram.embedding_provider() {
                     bus.init_embeddings(emb);
@@ -212,13 +212,13 @@ impl MemoryManager {
                 Some(bus)
             }
             Err(e) => {
-                tracing::warn!("Failed to initialize EmotionalBus: {}", e);
+                tracing::warn!("Failed to initialize EmpathyBus: {}", e);
                 None
             }
         };
 
-        // Load drives - prefer EmotionalBus drives, fall back to config/SOUL.md
-        let drives = if let Some(ref bus) = emotional_bus {
+        // Load drives - prefer EmpathyBus drives, fall back to config/SOUL.md
+        let drives = if let Some(ref bus) = empathy_bus {
             if !bus.drives().is_empty() {
                 bus.drives().to_vec()
             } else {
@@ -243,7 +243,7 @@ impl MemoryManager {
             wm_registry: Mutex::new(wm_registry),
             anomaly_tracker: Mutex::new(anomaly_tracker),
             drives,
-            emotional_bus,
+            empathy_bus,
             workspace_dir: workspace_dir.to_string(),
             db_path,
             auto_recall: config.memory.auto_recall,
@@ -253,7 +253,7 @@ impl MemoryManager {
         })
     }
 
-    /// Load drives from config or SOUL.md (fallback when EmotionalBus not available).
+    /// Load drives from config or SOUL.md (fallback when EmpathyBus not available).
     fn load_drives_fallback(config: &Config, workspace_dir: &str) -> Vec<Drive> {
         if !config.memory.drives.is_empty() {
             // Use drives from config (converted to engramai Drive type)
@@ -313,9 +313,9 @@ impl MemoryManager {
 
     // ─── Importance & Layer Calculation ─────────────────────────────────
 
-    /// Calculate importance boost using EmotionalBus (or direct calculation fallback).
+    /// Calculate importance boost using EmpathyBus (or direct calculation fallback).
     fn calculate_importance(&self, content: &str, base_importance: f64) -> f64 {
-        let boost = if let Some(ref bus) = self.emotional_bus {
+        let boost = if let Some(ref bus) = self.empathy_bus {
             bus.align_importance(content)
         } else if !self.drives.is_empty() {
             engramai::bus::alignment::calculate_importance_boost(content, &self.drives)
@@ -639,7 +639,7 @@ impl MemoryManager {
         lines.join("\n")
     }
 
-    // ─── EmotionalAccumulator (process_interaction) ─────────────────────
+    // ─── EmpathyAccumulator (process_interaction) ─────────────────────
 
     /// Take emotion data from the most recent LLM extraction.
     ///
@@ -650,20 +650,20 @@ impl MemoryManager {
         engram.take_last_emotions()
     }
 
-    /// Process an interaction with emotional content.
+    /// Process an interaction with empathic content.
     ///
-    /// Tracks emotional valence per domain for trend analysis.
-    /// Call this after storing memories to build emotional patterns.
+    /// Tracks empathy valence per domain for trend analysis.
+    /// Call this after storing memories to build empathy patterns.
     ///
     /// # Arguments
     ///
     /// * `content` - The interaction content (used for context, not stored separately)
-    /// * `emotion` - Emotional valence (-1.0 to 1.0)
+    /// * `emotion` - Empathy valence (-1.0 to 1.0)
     /// * `domain` - Domain/topic (e.g., "coding", "research", "trading")
     pub fn process_interaction(&self, _content: &str, emotion: f64, domain: &str) -> anyhow::Result<()> {
         let engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        let acc = EmotionalAccumulator::new(engram.connection())
-            .map_err(|e| anyhow::anyhow!("EmotionalAccumulator error: {}", e))?;
+        let acc = EmpathyAccumulator::new(engram.connection())
+            .map_err(|e| anyhow::anyhow!("EmpathyAccumulator error: {}", e))?;
         acc.record_emotion(domain, emotion)
             .map_err(|e| anyhow::anyhow!("Record emotion error: {}", e))?;
         tracing::debug!("Recorded emotion {:.2} for domain '{}'", emotion, domain);
@@ -710,11 +710,11 @@ impl MemoryManager {
 
     // ─── SOUL & HEARTBEAT Suggestions ───────────────────────────────────
 
-    /// Get suggested SOUL.md updates based on emotional trends.
+    /// Get suggested SOUL.md updates based on empathy trends.
     ///
-    /// Analyzes accumulated emotional patterns and suggests drive adjustments.
+    /// Analyzes accumulated empathy patterns and suggests drive adjustments.
     pub fn suggest_soul_updates(&self) -> anyhow::Result<Vec<SoulUpdate>> {
-        if let Some(ref bus) = self.emotional_bus {
+        if let Some(ref bus) = self.empathy_bus {
             let engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
             bus.suggest_soul_updates(engram.connection())
                 .map_err(|e| anyhow::anyhow!("Suggest soul updates error: {}", e))
@@ -727,7 +727,7 @@ impl MemoryManager {
     ///
     /// Suggests which tasks to deprioritize or boost based on success rates.
     pub fn suggest_heartbeat_updates(&self) -> anyhow::Result<Vec<HeartbeatUpdate>> {
-        if let Some(ref bus) = self.emotional_bus {
+        if let Some(ref bus) = self.empathy_bus {
             let engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
             bus.suggest_heartbeat_updates(engram.connection())
                 .map_err(|e| anyhow::anyhow!("Suggest heartbeat updates error: {}", e))
@@ -738,7 +738,7 @@ impl MemoryManager {
 
     /// Apply a SOUL update (modify a field in SOUL.md).
     pub fn apply_soul_update(&self, key: &str, value: &str) -> anyhow::Result<bool> {
-        if let Some(ref bus) = self.emotional_bus {
+        if let Some(ref bus) = self.empathy_bus {
             bus.update_soul(key, value)
                 .map_err(|e| anyhow::anyhow!("Apply soul update error: {}", e))
         } else {
@@ -748,7 +748,7 @@ impl MemoryManager {
 
     /// Add a new drive to SOUL.md.
     pub fn add_soul_drive(&self, key: &str, value: &str) -> anyhow::Result<()> {
-        if let Some(ref bus) = self.emotional_bus {
+        if let Some(ref bus) = self.empathy_bus {
             bus.add_soul_drive(key, value)
                 .map_err(|e| anyhow::anyhow!("Add soul drive error: {}", e))
         } else {
@@ -758,7 +758,7 @@ impl MemoryManager {
 
     /// Apply a HEARTBEAT update (mark task completed/incomplete).
     pub fn apply_heartbeat_update(&self, task: &str, completed: bool) -> anyhow::Result<bool> {
-        if let Some(ref bus) = self.emotional_bus {
+        if let Some(ref bus) = self.empathy_bus {
             bus.update_heartbeat_task(task, completed)
                 .map_err(|e| anyhow::anyhow!("Apply heartbeat update error: {}", e))
         } else {
@@ -766,25 +766,25 @@ impl MemoryManager {
         }
     }
 
-    /// Get all emotional trends by domain.
-    pub fn get_emotional_trends(&self) -> anyhow::Result<Vec<EmotionalTrend>> {
+    /// Get all empathy trends by domain.
+    pub fn get_empathy_trends(&self) -> anyhow::Result<Vec<EmpathyTrend>> {
         let engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        let acc = EmotionalAccumulator::new(engram.connection())
-            .map_err(|e| anyhow::anyhow!("EmotionalAccumulator error: {}", e))?;
+        let acc = EmpathyAccumulator::new(engram.connection())
+            .map_err(|e| anyhow::anyhow!("EmpathyAccumulator error: {}", e))?;
         acc.get_all_trends()
-            .map_err(|e| anyhow::anyhow!("Get emotional trends error: {}", e))
+            .map_err(|e| anyhow::anyhow!("Get empathy trends error: {}", e))
     }
 
     // ─── Periodic Maintenance ───────────────────────────────────────────
 
-    /// Decay emotional trends toward neutral (prevents stale data).
+    /// Decay empathy trends toward neutral (prevents stale data).
     ///
-    /// Call periodically (e.g., every 24 hours) to prevent old emotional
+    /// Call periodically (e.g., every 24 hours) to prevent old empathy
     /// patterns from dominating.
     pub fn decay_trends(&self, factor: f64) -> anyhow::Result<usize> {
         let engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        let acc = EmotionalAccumulator::new(engram.connection())
-            .map_err(|e| anyhow::anyhow!("EmotionalAccumulator error: {}", e))?;
+        let acc = EmpathyAccumulator::new(engram.connection())
+            .map_err(|e| anyhow::anyhow!("EmpathyAccumulator error: {}", e))?;
         acc.decay_trends(factor)
             .map_err(|e| anyhow::anyhow!("Decay trends error: {}", e))
     }
@@ -803,7 +803,7 @@ impl MemoryManager {
     /// Run full self-reflection cycle.
     ///
     /// Performs all periodic maintenance:
-    /// - Decays emotional trends
+    /// - Decays empathy trends
     /// - Prunes old behavior logs
     /// - Logs any SOUL/HEARTBEAT suggestions
     ///
@@ -811,12 +811,12 @@ impl MemoryManager {
     pub fn self_reflect(&self) -> anyhow::Result<SelfReflectionResult> {
         let mut result = SelfReflectionResult::default();
 
-        // Decay emotional trends (0.9 = 10% decay toward neutral)
+        // Decay empathy trends (0.9 = 10% decay toward neutral)
         match self.decay_trends(0.9) {
             Ok(count) => {
                 result.trends_decayed = count;
                 if count > 0 {
-                    tracing::info!("Decayed {} emotional trends", count);
+                    tracing::info!("Decayed {} empathy trends", count);
                 }
             }
             Err(e) => tracing::warn!("Failed to decay trends: {}", e),
@@ -885,7 +885,7 @@ impl MemoryManager {
     /// Run an interoceptive tick: pull signals from all subsystems into the hub.
     ///
     /// Call during heartbeats or periodically to keep the interoceptive state current.
-    /// This pulls from EmotionalAccumulator and BehaviorFeedback DB tables.
+    /// This pulls from EmpathyAccumulator and BehaviorFeedback DB tables.
     pub fn interoceptive_tick(&self) -> anyhow::Result<()> {
         let mut engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
         engram.interoceptive_tick();
@@ -949,7 +949,7 @@ pub struct RecalledMemory {
 /// Result of a self-reflection cycle.
 #[derive(Debug, Default)]
 pub struct SelfReflectionResult {
-    /// Number of emotional trends decayed
+    /// Number of empathy trends decayed
     pub trends_decayed: usize,
     /// Number of behavior logs pruned
     pub logs_pruned: usize,
@@ -1005,14 +1005,14 @@ Be curious. Write great code. Ship fast.
         // Create engram Memory directly
         let engram = engramai::Memory::new(db_path.to_str().unwrap(), None).unwrap();
 
-        // Test 1: EmotionalBus can be created
-        let bus = EmotionalBus::new(workspace, engram.connection());
-        assert!(bus.is_ok(), "EmotionalBus creation failed: {:?}", bus.err());
+        // Test 1: EmpathyBus can be created
+        let bus = EmpathyBus::new(workspace, engram.connection());
+        assert!(bus.is_ok(), "EmpathyBus creation failed: {:?}", bus.err());
         let bus = bus.unwrap();
-        println!("✅ EmotionalBus created with {} drives", bus.drives().len());
+        println!("✅ EmpathyBus created with {} drives", bus.drives().len());
 
-        // Test 2: process_interaction (EmotionalAccumulator)
-        let acc = engramai::bus::accumulator::EmotionalAccumulator::new(engram.connection()).unwrap();
+        // Test 2: process_interaction (EmpathyAccumulator)
+        let acc = engramai::bus::accumulator::EmpathyAccumulator::new(engram.connection()).unwrap();
         acc.record_emotion("coding", 0.7).unwrap();
         acc.record_emotion("coding", 0.8).unwrap();
         acc.record_emotion("trading", -0.5).unwrap();
@@ -1023,7 +1023,7 @@ Be curious. Write great code. Ship fast.
         assert!(coding.valence > 0.0, "Coding valence should be positive: {}", coding.valence);
         let trading = trends.iter().find(|t| t.domain == "trading").unwrap();
         assert!(trading.valence < 0.0, "Trading valence should be negative: {}", trading.valence);
-        println!("✅ EmotionalAccumulator: coding={:.2}, trading={:.2}", coding.valence, trading.valence);
+        println!("✅ EmpathyAccumulator: coding={:.2}, trading={:.2}", coding.valence, trading.valence);
 
         // Test 3: BehaviorFeedback
         let feedback = engramai::bus::feedback::BehaviorFeedback::new(engram.connection()).unwrap();
@@ -1079,7 +1079,7 @@ Be curious. Write great code. Ship fast.
         println!("✅ Soul suggestions: {} (after 15 negative events in 'failing_area')", suggestions.len());
 
         // Test 6: decay_trends
-        let acc2 = engramai::bus::accumulator::EmotionalAccumulator::new(engram.connection()).unwrap();
+        let acc2 = engramai::bus::accumulator::EmpathyAccumulator::new(engram.connection()).unwrap();
         let before = acc2.get_trend("coding").unwrap().unwrap().valence;
         acc2.decay_trends(0.9).unwrap();
         let after = acc2.get_trend("coding").unwrap().unwrap().valence;

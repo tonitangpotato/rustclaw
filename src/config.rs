@@ -502,13 +502,13 @@ pub struct MemoryConfig {
     #[serde(default = "default_recent_memory_limit")]
     pub recent_memory_limit: usize,
 
-    /// Optional drives for importance boosting (EmotionalBus integration).
+    /// Optional drives for importance boosting (EmpathyBus integration).
     /// Memories aligned with these drives get automatic importance boosts.
     #[serde(default)]
     pub drives: Vec<DriveConfig>,
 }
 
-/// Drive configuration for EmotionalBus integration.
+/// Drive configuration for EmpathyBus integration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DriveConfig {
     /// Drive name (e.g., "financial_freedom", "technical_depth")

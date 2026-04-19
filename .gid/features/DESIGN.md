@@ -49,7 +49,7 @@ RustClaw is a **Rust-native AI agent framework** that needs to provide a single-
     ┌─────────▼──┐   ┌────▼──────────┐
     │ MemoryMgr  │   │ Orchestrator  │
     │ (engramai) │   │ (CEO → subs)  │
-    │ EmotionBus │   │ spawn_agent() │
+    │ EmpathyBus │   │ spawn_agent() │
     └────────────┘   └───────────────┘
 ```
 
@@ -87,7 +87,7 @@ RustClaw is a **Rust-native AI agent framework** that needs to provide a single-
 
 1. **Single binary** — no IPC, no sidecar processes. Everything compiles into one `rustclaw` binary (~35MB).
 
-2. **Native Engram memory** — uses `engramai` crate directly (not MCP). Recall is ~5ms vs ~200ms for MCP-based memory. Includes ACT-R activation, Hebbian learning, Ebbinghaus decay, and EmotionBus drive alignment.
+2. **Native Engram memory** — uses `engramai` crate directly (not MCP). Recall is ~5ms vs ~200ms for MCP-based memory. Includes ACT-R activation, Hebbian learning, Ebbinghaus decay, and EmpathyBus drive alignment.
 
 3. **Auth profile rotation** — multi-token with round-robin (oldest-first), exponential backoff cooldown on 429/529, automatic failover. Supports API keys, OAuth tokens, and macOS Keychain dynamic refresh.
 

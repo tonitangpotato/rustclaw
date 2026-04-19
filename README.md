@@ -133,7 +133,7 @@ Native [engramai](https://crates.io/crates/engramai) integration — neuroscienc
 - **Ebbinghaus** forgetting curves
 - **Hybrid Search** — 15% FTS + 60% embedding + 25% ACT-R
 - **LLM Extraction** — Claude Haiku extracts key facts at store time
-- **EmotionBus** — drive alignment, behavior feedback, emotional trends
+- **EmpathyBus** — drive alignment, behavior feedback, emotional trends
 - **Cross-language alignment** — Chinese SOUL drives align with English content via embeddings
 - **Auto-recall** before each LLM call (~5ms)
 - **Auto-store** after each LLM response (with fact extraction)
@@ -157,14 +157,14 @@ Drive alignment is **multilingual by design** — embeddings capture semantic me
 
 - [x] Core agent loop with tool execution
 - [x] Telegram channel (long polling)
-- [x] Native Engram memory (full EmotionBus integration)
+- [x] Native Engram memory (full EmpathyBus integration)
 - [x] 6-point hook system
 - [x] Auth profile rotation (multi-token, cooldown tracking)
 - [x] Cron system (standard cron expressions + timezone)
 - [x] Multi-agent orchestration (orchestrator + specialist sub-agents)
 - [x] Safety layer (prompt injection detection, sensitive leak check)
 - [x] GID integration (30 tools — code intelligence, task tracking, impact analysis)
-- [x] EmotionBus (drive alignment, behavior feedback, emotional trends, self-reflection)
+- [x] EmpathyBus (drive alignment, behavior feedback, emotional trends, self-reflection)
 - [x] Cross-language drive alignment (embedding-based)
 - [x] Voice I/O — whisper.cpp STT (local, ~3s for 40s audio) + edge-tts TTS (Telegram voice messages)
 - [x] Config hot-reload (FSEvents file watcher)

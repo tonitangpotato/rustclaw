@@ -336,15 +336,19 @@ async fn main() -> anyhow::Result<()> {
             }
 
             // Start auto-consolidation background task (every 6 hours)
+            // Uses spawn_blocking to avoid blocking the tokio runtime with CPU-intensive work.
             let mem_for_reflection = mem_for_consolidation.clone();
             let mem_for_rumination = mem_for_reflection.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
+                interval.tick().await; // skip first immediate tick
                 loop {
                     interval.tick().await;
-                    match mem_for_consolidation.consolidate() {
-                        Ok(()) => tracing::info!("Engram auto-consolidation completed"),
-                        Err(e) => tracing::warn!("Engram auto-consolidation failed: {}", e),
+                    let mem = mem_for_consolidation.clone();
+                    match tokio::task::spawn_blocking(move || mem.consolidate()).await {
+                        Ok(Ok(())) => tracing::info!("Engram auto-consolidation completed"),
+                        Ok(Err(e)) => tracing::warn!("Engram auto-consolidation failed: {}", e),
+                        Err(e) => tracing::warn!("Engram auto-consolidation panicked: {}", e),
                     }
                 }
             });
@@ -357,8 +361,9 @@ async fn main() -> anyhow::Result<()> {
                 interval.tick().await; // skip first immediate tick
                 loop {
                     interval.tick().await;
-                    match mem_for_rumination.synthesize() {
-                        Ok(report) => {
+                    let mem = mem_for_rumination.clone();
+                    match tokio::task::spawn_blocking(move || mem.synthesize()).await {
+                        Ok(Ok(report)) => {
                             if report.clusters_found > 0 {
                                 tracing::info!(
                                     "Synthesis: {} clusters, {} synthesized, {} skipped",
@@ -368,7 +373,8 @@ async fn main() -> anyhow::Result<()> {
                                 );
                             }
                         }
-                        Err(e) => tracing::warn!("Synthesis failed: {}", e),
+                        Ok(Err(e)) => tracing::warn!("Synthesis failed: {}", e),
+                        Err(e) => tracing::warn!("Synthesis panicked: {}", e),
                     }
                 }
             });
@@ -378,10 +384,12 @@ async fn main() -> anyhow::Result<()> {
             // Decays emotional trends, prunes old logs, logs suggestions
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+                interval.tick().await; // skip first immediate tick
                 loop {
                     interval.tick().await;
-                    match mem_for_reflection.self_reflect() {
-                        Ok(result) => {
+                    let mem = mem_for_reflection.clone();
+                    match tokio::task::spawn_blocking(move || mem.self_reflect()).await {
+                        Ok(Ok(result)) => {
                             tracing::info!(
                                 "Engram self-reflection completed: {} trends decayed, {} logs pruned, {} soul suggestions, {} deprioritized actions",
                                 result.trends_decayed,
@@ -390,7 +398,8 @@ async fn main() -> anyhow::Result<()> {
                                 result.deprioritized_actions
                             );
                         }
-                        Err(e) => tracing::warn!("Engram self-reflection failed: {}", e),
+                        Ok(Err(e)) => tracing::warn!("Engram self-reflection failed: {}", e),
+                        Err(e) => tracing::warn!("Engram self-reflection panicked: {}", e),
                     }
                 }
             });

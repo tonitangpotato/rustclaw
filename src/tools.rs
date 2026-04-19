@@ -157,7 +157,7 @@ impl ToolRegistry {
         registry.register(Box::new(EngramRecallTool::new(memory.clone())));
         registry.register(Box::new(EngramStoreTool::new(memory.clone())));
         registry.register(Box::new(EngramRecallAssociatedTool::new(memory.clone())));
-        // EmotionBus tools for introspection
+        // EmpathyBus tools for introspection
         registry.register(Box::new(EngramTrendsTool::new(memory.clone())));
         registry.register(Box::new(EngramBehaviorStatsTool::new(memory.clone())));
         registry.register(Box::new(EngramSoulSuggestionsTool::new(memory)));
@@ -1689,7 +1689,7 @@ impl Tool for EngramRecallAssociatedTool {
 
 // ─── Engram Trends Tool ──────────────────────────────────────
 
-/// Show emotional trends per domain.
+/// Show empathy trends per domain (observed user emotional patterns).
 pub struct EngramTrendsTool {
     memory: Arc<MemoryManager>,
 }
@@ -1718,11 +1718,11 @@ impl Tool for EngramTrendsTool {
     }
 
     async fn execute(&self, _input: Value) -> anyhow::Result<ToolResult> {
-        match self.memory.get_emotional_trends() {
+        match self.memory.get_empathy_trends() {
             Ok(trends) => {
                 if trends.is_empty() {
                     return Ok(ToolResult {
-                        output: "No emotional trends recorded yet.".to_string(),
+                        output: "No empathy trends recorded yet.".to_string(),
                         is_error: false,
                     });
                 }
@@ -1753,7 +1753,7 @@ impl Tool for EngramTrendsTool {
                 })
             }
             Err(e) => Ok(ToolResult {
-                output: format!("Failed to get emotional trends: {}", e),
+                output: format!("Failed to get empathy trends: {}", e),
                 is_error: true,
             }),
         }
@@ -1850,7 +1850,7 @@ impl Tool for EngramBehaviorStatsTool {
 
 // ─── Engram Soul Suggestions Tool ────────────────────────────
 
-/// Get SOUL.md update suggestions based on emotional patterns.
+/// Get SOUL.md update suggestions based on empathy patterns.
 pub struct EngramSoulSuggestionsTool {
     memory: Arc<MemoryManager>,
 }

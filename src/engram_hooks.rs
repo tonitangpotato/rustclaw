@@ -377,7 +377,7 @@ impl Hook for EngramStoreHook {
             Some(emotions) => {
                 for (valence, domain) in &emotions {
                     if let Err(e) = self.memory.process_interaction(&store_content, *valence, domain) {
-                        tracing::warn!("Emotion recording failed for domain '{}': {}", domain, e);
+                        tracing::warn!("Empathy recording failed for domain '{}': {}", domain, e);
                     }
                 }
                 if !emotions.is_empty() {

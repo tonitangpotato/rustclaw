@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Claude Code — 3D Architecture Explorer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { 
+    background: #0a0a1a; 
+    color: #e0e0e0; 
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    overflow: hidden;
+  }
+  #graph-container { width: 100vw; height: 100vh; }
+  
+  /* HUD overlay */
+  #hud {
+    position: fixed;
+    top: 20px;
+    left: 20px;
+    z-index: 100;
+    pointer-events: none;
+  }
+  #hud h1 {
+    font-size: 18px;
+    font-weight: 600;
+    color: #fff;
+    text-shadow: 0 0 20px rgba(100, 150, 255, 0.5);
+    margin-bottom: 4px;
+  }
+  #hud .subtitle {
+    font-size: 12px;
+    color: #888;
+  }
+  #hud .stats {
+    margin-top: 12px;
+    font-size: 11px;
+    color: #666;
+    line-height: 1.6;
+  }
+  #hud .stats span { color: #aaa; }
+  
+  /* Info panel */
+  #info-panel {
+    position: fixed;
+    bottom: 20px;
+    left: 20px;
+    z-index: 100;
+    background: rgba(15, 15, 30, 0.92);
+    border: 1px solid rgba(100, 150, 255, 0.25);
+    border-radius: 10px;
+    padding: 16px 20px;
+    max-width: 380px;
+    backdrop-filter: blur(12px);
+    font-size: 12px;
+    line-height: 1.6;
+  }
+  #info-panel .stat-label { color: #666; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
+  #info-panel .stat-value { color: #fff; font-size: 16px; font-weight: 600; margin-bottom: 6px; }
+
+  /* Search */
+  #search-box {
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 100;
+  }
+  #search-input {
+    background: rgba(15, 15, 30, 0.9);
+    border: 1px solid rgba(100, 150, 255, 0.3);
+    color: #e0e0e0;
+    padding: 8px 16px;
+    border-radius: 20px;
+    font-family: inherit;
+    font-size: 12px;
+    width: 300px;
+    outline: none;
+    backdrop-filter: blur(10px);
+  }
+  #search-input:focus { border-color: #6af; }
+  #search-input::placeholder { color: #555; }
+
+  /* Breadcrumb */
+  #breadcrumb {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    z-index: 100;
+    font-size: 12px;
+    color: #888;
+  }
+  #breadcrumb .crumb { color: #6af; cursor: pointer; }
+  #breadcrumb .crumb:hover { color: #fff; }
+
+  /* Toolbar */
+  #toolbar {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 100;
+    display: flex;
+    gap: 8px;
+  }
+  .tb-btn {
+    background: rgba(15, 15, 30, 0.85);
+    border: 1px solid rgba(100, 150, 255, 0.3);
+    color: #aaa;
+    padding: 7px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    backdrop-filter: blur(10px);
+    transition: all 0.2s;
+  }
+  .tb-btn:hover { border-color: #6af; color: #fff; }
+  .tb-btn.active { border-color: #6af; color: #6af; }
+
+  /* Layer indicator */
+  #layer-ind {
+    position: fixed;
+    top: 58px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 100;
+    font-size: 11px;
+    color: #555;
+  }
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <h1>🔬 Claude Code Architecture</h1>
+  <div class="subtitle">380K lines TypeScript · 3D Explorer</div>
+</div>
+
+<div id="breadcrumb">
+  <span class="crumb" id="bc-home" onclick="goHome()">🌌 Universe</span>
+  <span id="bc-feat" style="display:none"></span>
+  <span id="bc-comp" style="display:none"></span>
+</div>
+
+<div id="search-box">
+  <input id="search-input" type="text" placeholder="Search files, classes, functions..." />
+</div>
+
+<div id="layer-ind">Layer 0 — Feature Overview</div>
+
+<div id="info-panel">
+  <div class="stat-label">Loading...</div>
+</div>
+
+<div id="toolbar">
+  <button class="tb-btn" id="btn-home" onclick="goHome()">🏠 Home</button>
+  <button class="tb-btn" id="btn-labels" onclick="toggleLabels()">🏷 Labels</button>
+  <button class="tb-btn" id="btn-edges" onclick="toggleEdges()">⟶ Edges</button>
+  <button class="tb-btn" id="btn-all" onclick="toggleAll()">🌐 All</button>
+</div>
+
+<div id="graph-container"></div>
+
+<!-- CRITICAL: three@0.160.0 (UMD build) — compatible with 3d-force-graph@1.73.0 (needs >=0.118 <1) -->
+<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+<script src="https://unpkg.com/three-spritetext@1.10.0/dist/three-spritetext.min.js"></script>
+<script src="https://unpkg.com/3d-force-graph@1.73.0/dist/3d-force-graph.min.js"></script>
+
+<script>
+// ============================================================
+// DEBUG
+// ============================================================
+console.log('[INIT] THREE version:', THREE.REVISION);
+console.log('[INIT] ForceGraph3D:', typeof ForceGraph3D);
+console.log('[INIT] SpriteText:', typeof SpriteText);
+
+// ============================================================
+// DATA — embedded from SQLite graph
+// ============================================================
+const GRAPH_DATA = __GRAPH_DATA_PLACEHOLDER__;
+
+console.log('[DATA] Features:', GRAPH_DATA.features.length);
+console.log('[DATA] Feature edges:', (GRAPH_DATA.feature_edges || []).length);
+console.log('[DATA] Total components:', GRAPH_DATA.features.reduce((s, f) => s + f.components.length, 0));
+
+// ============================================================
+// STATE
+// ============================================================
+let currentLayer = 0;
+let expandedFeature = null;
+let expandedComponent = null;
+let showLabels = true;
+let showEdges = true;
+let allNodesMode = false;
+
+// ============================================================
+// COLOR — golden ratio HSL for max distinction
+// ============================================================
+const colorCache = {};
+let hueIndex = 0;
+function getColor(name) {
+  if (colorCache[name]) return colorCache[name];
+  const hue = (hueIndex * 137.508) % 360;  // golden angle
+  hueIndex++;
+  const color = `hsl(${hue}, 70%, 60%)`;
+  colorCache[name] = color;
+  return color;
+}
+
+// Pre-assign colors to features
+GRAPH_DATA.features.forEach(f => getColor(f.name));
+
+// ============================================================
+// LAYER 0 — Feature overview (44 nodes)
+// ============================================================
+function buildLayer0() {
+  const nodes = [];
+  const links = [];
+
+  GRAPH_DATA.features.forEach(feat => {
+    const color = getColor(feat.name);
+    nodes.push({
+      id: feat.id,
+      name: feat.name,
+      type: 'feature',
+      fileCount: feat.file_count,
+      componentCount: feat.components.length,
+      color: color,
+      val: Math.log2(feat.file_count + 1) * 2 + 5,
+      _feat: feat
+    });
+  });
+
+  if (GRAPH_DATA.feature_edges) {
+    GRAPH_DATA.feature_edges.forEach(fe => {
+      if (!nodes.find(n => n.id === fe.source) || !nodes.find(n => n.id === fe.target)) return;
+      const opacity = Math.min(0.2 + fe.count / 100, 0.7);
+      const width = Math.max(0.3, Math.log2(fe.count + 1));
+      links.push({
+        source: fe.source,
+        target: fe.target,
+        color: `rgba(150, 180, 255, ${opacity})`,
+        width: width
+      });
+    });
+  }
+
+  console.log('[L0] nodes:', nodes.length, 'links:', links.length);
+  return { nodes, links };
+}
+
+// ============================================================
+// LAYER 1 — Components of a feature (+ dimmed other features)
+// ============================================================
+function buildLayer1(feature) {
+  const nodes = [];
+  const links = [];
+  const featColor = getColor(feature.name);
+
+  // The expanded feature's components
+  feature.components.forEach(comp => {
+    nodes.push({
+      id: comp.id,
+      name: comp.name,
+      type: 'component',
+      fileCount: comp.file_count,
+      color: featColor,
+      val: Math.log2(comp.file_count + 1) * 2 + 3,
+      _comp: comp,
+      _parentFeature: feature
+    });
+  });
+
+  // Links between components (hub from feature center)
+  const hubId = feature.id + '_hub';
+  nodes.push({
+    id: hubId,
+    name: feature.name,
+    type: 'feature',
+    fileCount: feature.file_count,
+    componentCount: feature.components.length,
+    color: featColor,
+    val: Math.log2(feature.file_count + 1) * 2 + 6,
+    _feat: feature
+  });
+
+  feature.components.forEach(comp => {
+    links.push({
+      source: hubId,
+      target: comp.id,
+      color: featColor + '60',
+      width: 0.6
+    });
+  });
+
+  // Dimmed other features
+  GRAPH_DATA.features.forEach(f => {
+    if (f.id === feature.id) return;
+    const c = getColor(f.name);
+    nodes.push({
+      id: f.id,
+      name: f.name,
+      type: 'feature',
+      fileCount: f.file_count,
+      color: c,
+      val: Math.log2(f.file_count + 1) + 2,
+      _feat: f,
+      _dimmed: true
+    });
+  });
+
+  console.log('[L1]', feature.name, '- nodes:', nodes.length, 'links:', links.length);
+  return { nodes, links };
+}
+
+// ============================================================
+// LAYER 2 — Files inside a component
+// ============================================================
+function buildLayer2(component, feature) {
+  const nodes = [];
+  const links = [];
+  const featColor = getColor(feature.name);
+
+  // Component hub
+  nodes.push({
+    id: component.id,
+    name: component.name,
+    type: 'component',
+    fileCount: component.file_count,
+    color: featColor,
+    val: 6,
+    _comp: component,
+    _parentFeature: feature
+  });
+
+  // File nodes
+  component.files.forEach((fileName, i) => {
+    const fileId = `file_${component.id}_${i}`;
+    nodes.push({
+      id: fileId,
+      name: fileName,
+      type: 'file',
+      color: featColor,
+      val: 1.5
+    });
+    links.push({
+      source: component.id,
+      target: fileId,
+      color: featColor + '40',
+      width: 0.3
+    });
+  });
+
+  // Keep other components dimmed
+  feature.components.forEach(c => {
+    if (c.id === component.id) return;
+    nodes.push({
+      id: c.id,
+      name: c.name,
+      type: 'component',
+      fileCount: c.file_count,
+      color: featColor,
+      val: Math.log2(c.file_count + 1) + 1,
+      _comp: c,
+      _parentFeature: feature,
+      _dimmed: true
+    });
+  });
+
+  console.log('[L2]', component.name, '- nodes:', nodes.length, 'links:', links.length);
+  return { nodes, links };
+}
+
+// ============================================================
+// ALL NODES VIEW
+// ============================================================
+function buildAllNodes() {
+  const nodes = [];
+  const links = [];
+
+  GRAPH_DATA.features.forEach(feat => {
+    const color = getColor(feat.name);
+    nodes.push({
+      id: feat.id,
+      name: feat.name,
+      type: 'feature',
+      fileCount: feat.file_count,
+      color: color,
+      val: Math.log2(feat.file_count + 1) * 2 + 4,
+      _feat: feat
+    });
+
+    feat.components.forEach(comp => {
+      nodes.push({
+        id: comp.id,
+        name: comp.name,
+        type: 'component',
+        fileCount: comp.file_count,
+        color: color,
+        val: Math.log2(comp.file_count + 1) * 1.5 + 2,
+        _comp: comp,
+        _parentFeature: feat
+      });
+      links.push({
+        source: feat.id,
+        target: comp.id,
+        color: color + '30',
+        width: 0.4
+      });
+    });
+  });
+
+  if (GRAPH_DATA.feature_edges) {
+    GRAPH_DATA.feature_edges.forEach(fe => {
+      links.push({
+        source: fe.source,
+        target: fe.target,
+        color: `rgba(100, 150, 255, ${Math.min(0.2 + fe.count/100, 0.6)})`,
+        width: Math.max(0.3, Math.log2(fe.count + 1) * 0.8)
+      });
+    });
+  }
+
+  console.log('[ALL] nodes:', nodes.length, 'links:', links.length);
+  return { nodes, links };
+}
+
+// ============================================================
+// RENDER
+// ============================================================
+function renderGraph(data) {
+  Graph.graphData(data);
+  setTimeout(() => Graph.zoomToFit(800, 60), 600);
+}
+
+// ============================================================
+// INFO PANEL
+// ============================================================
+function updateInfoPanel(node) {
+  const panel = document.getElementById('info-panel');
+  const totalFiles = GRAPH_DATA.features.reduce((s, f) => s + f.file_count, 0);
+  const totalComps = GRAPH_DATA.features.reduce((s, f) => s + f.components.length, 0);
+
+  if (!node) {
+    panel.innerHTML = `
+      <div class="stat-label">Claude Code Architecture</div>
+      <div class="stat-value">${totalFiles.toLocaleString()} files</div>
+      <div class="stat-label">${GRAPH_DATA.features.length} features · ${totalComps} components</div>
+      <div class="stat-value">${(GRAPH_DATA.feature_edges || []).length} cross-feature edges</div>
+    `;
+    return;
+  }
+
+  if (node.type === 'feature') {
+    panel.innerHTML = `
+      <div class="stat-label">Feature</div>
+      <div class="stat-value" style="color:${node.color}">${node.name}</div>
+      <div class="stat-label">${node.fileCount} files · ${node.componentCount || node._feat?.components?.length || '?'} components</div>
+      <div class="stat-label" style="margin-top:8px; opacity:0.6">${node._dimmed ? 'Click to expand' : 'Click to drill into components →'}</div>
+    `;
+  } else if (node.type === 'component') {
+    panel.innerHTML = `
+      <div class="stat-label">Component</div>
+      <div class="stat-value" style="color:${node.color}">${node.name}</div>
+      <div class="stat-label">${node.fileCount} files</div>
+      <div class="stat-label" style="margin-top:8px; opacity:0.6">${node._dimmed ? '' : 'Click to see files →'}</div>
+    `;
+  } else if (node.type === 'file') {
+    panel.innerHTML = `
+      <div class="stat-label">File</div>
+      <div class="stat-value" style="color:${node.color}">${node.name}</div>
+    `;
+  }
+}
+
+// ============================================================
+// BREADCRUMB
+// ============================================================
+function updateBreadcrumb() {
+  const ind = document.getElementById('layer-ind');
+  const bcFeat = document.getElementById('bc-feat');
+  const bcComp = document.getElementById('bc-comp');
+
+  if (currentLayer === 0) {
+    ind.textContent = 'Layer 0 — Feature Overview';
+    bcFeat.style.display = 'none';
+    bcComp.style.display = 'none';
+  } else if (currentLayer === 1 && expandedFeature) {
+    ind.textContent = 'Layer 1 — Components';
+    bcFeat.style.display = 'inline';
+    bcFeat.innerHTML = ` → <span class="crumb" onclick="goHome()">${expandedFeature.name}</span>`;
+    bcComp.style.display = 'none';
+  } else if (currentLayer === 2 && expandedComponent) {
+    ind.textContent = 'Layer 2 — Files';
+    bcFeat.style.display = 'inline';
+    bcFeat.innerHTML = ` → <span class="crumb" onclick="goToFeature()">${expandedFeature.name}</span>`;
+    bcComp.style.display = 'inline';
+    bcComp.innerHTML = ` → ${expandedComponent.name}`;
+  }
+}
+
+// ============================================================
+// NAVIGATION
+// ============================================================
+function goHome() {
+  currentLayer = 0;
+  expandedFeature = null;
+  expandedComponent = null;
+  allNodesMode = false;
+  document.getElementById('btn-all').classList.remove('active');
+  renderGraph(buildLayer0());
+  updateInfoPanel(null);
+  updateBreadcrumb();
+}
+
+function goToFeature() {
+  if (!expandedFeature) return goHome();
+  currentLayer = 1;
+  expandedComponent = null;
+  renderGraph(buildLayer1(expandedFeature));
+  updateInfoPanel(null);
+  updateBreadcrumb();
+}
+
+function toggleLabels() {
+  showLabels = !showLabels;
+  document.getElementById('btn-labels').classList.toggle('active', showLabels);
+  Graph.nodeThreeObject(Graph.nodeThreeObject()); // force re-render
+}
+
+function toggleEdges() {
+  showEdges = !showEdges;
+  document.getElementById('btn-edges').classList.toggle('active', showEdges);
+  Graph.linkWidth(link => showEdges ? (link.width || 0.5) : 0)
+       .linkOpacity(showEdges ? 0.6 : 0);
+}
+
+function toggleAll() {
+  allNodesMode = !allNodesMode;
+  document.getElementById('btn-all').classList.toggle('active', allNodesMode);
+  if (allNodesMode) {
+    renderGraph(buildAllNodes());
+  } else {
+    goHome();
+  }
+  updateInfoPanel(null);
+}
+
+// ============================================================
+// GRAPH INIT
+// ============================================================
+const container = document.getElementById('graph-container');
+
+console.log('[GRAPH] Creating ForceGraph3D instance...');
+
+const Graph = ForceGraph3D()(container)
+  .backgroundColor('#0a0a1a')
+  .showNavInfo(false)
+  .nodeLabel(node => {
+    if (node.type === 'feature') return `<b>${node.name}</b><br/>${node.fileCount} files, ${node.componentCount || node._feat?.components?.length || '?'} components`;
+    if (node.type === 'component') return `<b>${node.name}</b><br/>${node.fileCount} files`;
+    return node.name;
+  })
+  .nodeColor(node => node._dimmed ? (node.color + '30') : node.color)
+  .nodeVal(node => node.val)
+  .nodeOpacity(0.95)
+  .linkColor(link => link.color || 'rgba(100, 150, 255, 0.2)')
+  .linkWidth(link => showEdges ? (link.width || 0.5) : 0)
+  .linkOpacity(0.6)
+  .linkDirectionalParticles(0)
+  .nodeThreeObject(node => {
+    if (!showLabels) return undefined;
+    if (node._dimmed) return undefined;
+
+    const sprite = new SpriteText(node.name);
+    sprite.color = node.color || '#ffffff';
+    sprite.textHeight = node.type === 'feature' ? 4 : node.type === 'component' ? 2.5 : 1.5;
+    sprite.backgroundColor = 'rgba(0,0,0,0.6)';
+    sprite.padding = [2, 4];
+    sprite.borderRadius = 3;
+    return sprite;
+  })
+  .nodeThreeObjectExtend(true)
+  .onNodeClick(node => {
+    if (node._dimmed && node.type === 'feature') {
+      // Click dimmed feature → expand it
+      currentLayer = 1;
+      expandedFeature = node._feat;
+      expandedComponent = null;
+      renderGraph(buildLayer1(node._feat));
+      updateBreadcrumb();
+      return;
+    }
+    if (node.type === 'feature' && currentLayer === 0) {
+      currentLayer = 1;
+      expandedFeature = node._feat;
+      expandedComponent = null;
+      renderGraph(buildLayer1(node._feat));
+    } else if (node.type === 'component' && !node._dimmed) {
+      currentLayer = 2;
+      expandedComponent = node._comp;
+      renderGraph(buildLayer2(node._comp, node._parentFeature || expandedFeature));
+    }
+    updateInfoPanel(node);
+    updateBreadcrumb();
+  })
+  .onNodeHover(node => {
+    container.style.cursor = node ? 'pointer' : 'default';
+    if (node) updateInfoPanel(node);
+  })
+  .onBackgroundClick(() => {
+    if (currentLayer === 2) {
+      goToFeature();
+    } else if (currentLayer === 1) {
+      goHome();
+    }
+    updateInfoPanel(null);
+  })
+  .d3AlphaDecay(0.02)
+  .d3VelocityDecay(0.3)
+  .warmupTicks(80)
+  .cooldownTicks(150);
+
+console.log('[GRAPH] Instance created, configuring forces...');
+
+// Configure forces
+try {
+  Graph.d3Force('charge').strength(node => {
+    if (node.type === 'feature') return -500;
+    if (node.type === 'component') return -150;
+    return -30;
+  });
+  Graph.d3Force('link').distance(link => {
+    if (link.width && link.width > 1) return 40;
+    return 80;
+  });
+  console.log('[GRAPH] Forces configured OK');
+} catch(e) {
+  console.error('[GRAPH] Force config error:', e);
+}
+
+// Lighting
+try {
+  const scene = Graph.scene();
+  scene.add(new THREE.AmbientLight(0x404060, 0.8));
+  const pl = new THREE.PointLight(0xffffff, 1.2, 500);
+  pl.position.set(100, 200, 100);
+  scene.add(pl);
+  console.log('[GRAPH] Lighting added');
+} catch(e) {
+  console.error('[GRAPH] Lighting error:', e);
+}
+
+// ============================================================
+// SEARCH
+// ============================================================
+document.getElementById('search-input').addEventListener('input', e => {
+  const q = e.target.value.toLowerCase().trim();
+  if (!q || q.length < 2) return;
+
+  const gd = Graph.graphData();
+  const match = gd.nodes.find(n => n.name && n.name.toLowerCase().includes(q));
+  if (match) {
+    Graph.cameraPosition(
+      { x: match.x + 80, y: match.y + 40, z: match.z + 80 },
+      { x: match.x, y: match.y, z: match.z },
+      1000
+    );
+    updateInfoPanel(match);
+  }
+});
+
+// ============================================================
+// INIT RENDER
+// ============================================================
+console.log('[INIT] Rendering layer 0...');
+updateInfoPanel(null);
+document.getElementById('btn-labels').classList.add('active');
+document.getElementById('btn-edges').classList.add('active');
+renderGraph(buildLayer0());
+updateBreadcrumb();
+
+setTimeout(() => {
+  Graph.cameraPosition({ x: 0, y: 150, z: 450 }, { x: 0, y: 0, z: 0 }, 2000);
+  console.log('[INIT] Camera positioned. Ready!');
+}, 800);
+
+</script>
+</body>
+</html>

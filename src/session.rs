@@ -274,6 +274,14 @@ impl SessionManager {
             .await
         {
             Ok(pool) => {
+                // Enable WAL mode + busy timeout for multi-process access
+                sqlx::query("PRAGMA journal_mode=WAL")
+                    .execute(&pool)
+                    .await?;
+                sqlx::query("PRAGMA busy_timeout=5000")
+                    .execute(&pool)
+                    .await?;
+
                 // Create tables
                 sqlx::query(
                     "CREATE TABLE IF NOT EXISTS sessions (

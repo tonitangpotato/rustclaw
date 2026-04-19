@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style> body { margin: 0; background: #0a0a1a; } </style>
+<script src="https://unpkg.com/3d-force-graph@1"></script>
+</head>
+<body>
+<div id="graph"></div>
+<script>
+  const N = 5;
+  const data = {
+    nodes: [
+      { id: 'a', name: 'Terminal UI', val: 10, color: '#ff6060' },
+      { id: 'b', name: 'MCP Server', val: 8, color: '#60ff60' },
+      { id: 'c', name: 'Permission System', val: 6, color: '#6060ff' },
+      { id: 'd', name: 'CLI Commands', val: 7, color: '#ffff60' },
+      { id: 'e', name: 'Session Lifecycle', val: 5, color: '#ff60ff' }
+    ],
+    links: [
+      { source: 'a', target: 'b' },
+      { source: 'b', target: 'c' },
+      { source: 'c', target: 'd' },
+      { source: 'd', target: 'e' },
+      { source: 'a', target: 'e' }
+    ]
+  };
+
+  const Graph = ForceGraph3D()(document.getElementById('graph'))
+    .backgroundColor('#0a0a1a')
+    .graphData(data)
+    .nodeLabel('name')
+    .nodeColor('color')
+    .nodeVal('val')
+    .linkColor(() => 'rgba(100,150,255,0.4)')
+    .linkWidth(1);
+
+  console.log('Graph created, nodes:', data.nodes.length);
+</script>
+</body>
+</html>
