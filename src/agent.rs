@@ -482,6 +482,11 @@ impl AgentRunner {
         &self.config
     }
 
+    /// Get a reference to the memory manager (for interoceptive hooks, etc.)
+    pub fn memory(&self) -> Option<&Arc<MemoryManager>> {
+        Some(&self.memory)
+    }
+
     /// Get the currently active model name (respects runtime overrides).
     pub async fn current_model(&self) -> String {
         let client = self.llm_client.read().await;
@@ -902,6 +907,15 @@ CRITICAL CONSTRAINTS:
             system_prompt.push_str("\n");
             system_prompt.push_str(&memory_context);
         }
+        // Inject interoceptive state (internal feeling-state from L3 hub)
+        if let Some(intero_formatted) = hook_ctx.metadata
+            .get("interoceptive_state")
+            .and_then(|v| v.get("formatted"))
+            .and_then(|v| v.as_str())
+        {
+            system_prompt.push_str("\n");
+            system_prompt.push_str(intero_formatted);
+        }
         if !recent_memory_context.is_empty() {
             system_prompt.push_str("\n");
             system_prompt.push_str(&recent_memory_context);
@@ -1086,6 +1100,29 @@ CRITICAL CONSTRAINTS:
 
             if let Some(text) = &response.text {
                 response_text = text.clone();
+            }
+
+            // Detect stream-level failures (partial data recovered)
+            if response.stop_reason == "stream_error" || response.stop_reason == "stream_incomplete" {
+                tracing::warn!(
+                    "Turn {}: LLM stream abnormal (stop_reason='{}') — text_len={}, tool_calls={}",
+                    turn,
+                    response.stop_reason,
+                    response.text.as_ref().map(|t| t.len()).unwrap_or(0),
+                    response.tool_calls.len()
+                );
+                // If we got tool calls despite the error (partial salvage succeeded), proceed normally.
+                // If we got nothing useful, inject a retry prompt.
+                if response.tool_calls.is_empty() && response.text.as_ref().map(|t| t.trim().is_empty()).unwrap_or(true) {
+                    tracing::warn!("Turn {}: stream failure with no usable output — requesting retry", turn);
+                    session.messages.push(Message::text(
+                        "user",
+                        "Your last response was lost due to a connection error. Please try again. \
+                         If you were about to call a tool, try again with the same tool call.",
+                    ));
+                    continue;
+                }
+                // Otherwise: we have salvaged content (tool calls or text), proceed normally
             }
 
             // Handle max_tokens truncation with escalation
@@ -1576,7 +1613,17 @@ CRITICAL CONSTRAINTS:
         let effective_task = if let Some(ref skill_name) = options.skill {
             if let Some(skill) = self.workspace.skill_registry.get(skill_name) {
                 tracing::info!("Injecting skill '{}' ({} chars) into sub-agent task", skill_name, skill.prompt_content().len());
-                format!("# Skill Instructions\n\n{}\n\n---\n\n# Your Task\n\n{}", skill.prompt_content(), task)
+                // If the skill has a subagent_preamble, inject it between skill instructions and task.
+                // This lets skills override generic sub-agent behavior with skill-specific guidance.
+                if let Some(ref preamble) = skill.frontmatter.subagent_preamble {
+                    tracing::info!("Skill '{}' has subagent_preamble ({} chars)", skill_name, preamble.len());
+                    format!(
+                        "# Sub-Agent Mode (Skill-Specific)\n\n{}\n\n---\n\n# Skill Instructions\n\n{}\n\n---\n\n# Your Task\n\n{}",
+                        preamble, skill.prompt_content(), task
+                    )
+                } else {
+                    format!("# Skill Instructions\n\n{}\n\n---\n\n# Your Task\n\n{}", skill.prompt_content(), task)
+                }
             } else {
                 tracing::warn!("Skill '{}' not found in SkillRegistry", skill_name);
                 task.to_string()
@@ -1777,6 +1824,11 @@ CRITICAL CONSTRAINTS:
         // and retries add more dead time. With 15-turn loops, need enough headroom.
         let wall_clock_start = std::time::Instant::now();
         let wall_clock_limit = std::time::Duration::from_secs(1200); // 20 minutes
+
+        // ISS-012: Track write operations to detect "all-read-no-write" anti-pattern.
+        // Sub-agents that spend all iterations reading files and never write output
+        // get warned at 50% and 75% to start writing immediately.
+        let mut write_call_count: usize = 0;
 
         for turn in 0..max_turns {
             // Check wall-clock timeout
@@ -1993,6 +2045,7 @@ CRITICAL CONSTRAINTS:
                                     files_modified.push(path.to_string());
                                 }
                             }
+                            write_call_count += 1;
                         }
                         tool_results.push((tc.id.clone(), tool_result.output, tool_result.is_error));
                     }
@@ -2030,6 +2083,44 @@ CRITICAL CONSTRAINTS:
             }
 
             completed_turns += 1;
+
+            // ISS-012: Write-tracking budget warning.
+            // If we're past 50% of iterations and haven't written anything, warn the sub-agent.
+            // This catches the "all-read-no-write" anti-pattern before it's too late.
+            if write_call_count == 0 && max_turns > 4 {
+                let progress = (turn + 1) as f64 / max_turns as f64;
+                let remaining = max_turns - turn - 1;
+                if progress >= 0.75 {
+                    tracing::warn!(
+                        "Sub-agent '{}' turn {}/{}: CRITICAL — 75% iterations used, zero write operations",
+                        subagent.name, turn + 1, max_turns
+                    );
+                    session.messages.push(Message::text(
+                        "user",
+                        &format!(
+                            "🚨 CRITICAL: You have used {}/{} iterations ({:.0}%) without writing ANY output files. \
+                             You MUST start writing your output NOW. You have only {} iterations remaining. \
+                             All pre-loaded files in your context are your input — stop reading and START WRITING. \
+                             Partial output is better than no output.",
+                            turn + 1, max_turns, progress * 100.0, remaining
+                        ),
+                    ));
+                } else if progress >= 0.5 {
+                    tracing::warn!(
+                        "Sub-agent '{}' turn {}/{}: WARNING — 50% iterations used, zero write operations",
+                        subagent.name, turn + 1, max_turns
+                    );
+                    session.messages.push(Message::text(
+                        "user",
+                        &format!(
+                            "⚠️ BUDGET WARNING: You have used {}/{} iterations ({:.0}%) without writing any output files. \
+                             Pre-loaded files in your context ARE your input — do not re-read them. \
+                             START WRITING your output file now. Budget: {} iterations remaining.",
+                            turn + 1, max_turns, progress * 100.0, remaining
+                        ),
+                    ));
+                }
+            }
         }
 
         // If we hit max iterations without a final response, note it

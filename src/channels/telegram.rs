@@ -556,6 +556,17 @@ impl TelegramBot {
                     self.send_message(chat_id, &response.text, effective_reply).await?;
                 }
             }
+        } else if !had_error {
+            // Empty response with no error — something went wrong silently
+            tracing::warn!(
+                "Empty final response for chat {} (no error reported) — likely stream failure or truncation",
+                chat_id
+            );
+            self.send_message(
+                chat_id,
+                "⚠️ 回复生成中断，请重试。如果反复出现，尝试简化问题。",
+                reply_to,
+            ).await?;
         }
 
         Ok(())

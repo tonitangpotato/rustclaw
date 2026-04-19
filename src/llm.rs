@@ -1332,7 +1332,42 @@ impl LlmClient for AnthropicClient {
                 let chunk = match chunk_result {
                     Ok(c) => c,
                     Err(e) => {
-                        tracing::error!("Stream error: {}", e);
+                        tracing::error!("Stream error mid-response: {}", e);
+
+                        // Salvage partial tool call if one was in progress
+                        if let Some(tool) = current_tool.take() {
+                            tracing::warn!(
+                                "Stream interrupted with partial tool call: name='{}', id='{}', json_len={}",
+                                tool.name, tool.id, tool.input_json.len()
+                            );
+                            // Try to parse the partial JSON — it might be complete enough
+                            match serde_json::from_str::<serde_json::Value>(&tool.input_json) {
+                                Ok(input) => {
+                                    tracing::info!(
+                                        "Partial tool call '{}' has valid JSON — salvaging",
+                                        tool.name
+                                    );
+                                    let _ = tx
+                                        .send(StreamChunk::ToolUse(ToolCall {
+                                            id: tool.id,
+                                            name: tool.name,
+                                            input,
+                                        }))
+                                        .await;
+                                }
+                                Err(parse_err) => {
+                                    tracing::warn!(
+                                        "Partial tool call '{}' has invalid JSON ({}), discarding. Partial: {}...",
+                                        tool.name,
+                                        parse_err,
+                                        &tool.input_json[..tool.input_json.len().min(200)]
+                                    );
+                                }
+                            }
+                        }
+
+                        // Mark stop reason so downstream knows this was abnormal
+                        stop_reason = "stream_error".to_string();
                         break;
                     }
                 };
@@ -2491,6 +2526,8 @@ pub async fn collect_stream(
     let mut usage = Usage::default();
     let mut stop_reason = String::new();
 
+    let mut received_done = false;
+
     while let Some(chunk) = rx.recv().await {
         match chunk {
             StreamChunk::Text(t) => text_parts.push(t),
@@ -2498,8 +2535,22 @@ pub async fn collect_stream(
             StreamChunk::Done(u, sr) => {
                 usage = u;
                 stop_reason = sr;
+                received_done = true;
                 break;
             }
+        }
+    }
+
+    // If the channel closed without a Done chunk, the stream task died unexpectedly
+    if !received_done {
+        let text_len: usize = text_parts.iter().map(|t| t.len()).sum();
+        tracing::warn!(
+            "Stream channel closed without Done — stream task likely crashed. \
+             Collected so far: {} text chars, {} tool calls, stop_reason='{}'",
+            text_len, tool_calls.len(), stop_reason
+        );
+        if stop_reason.is_empty() {
+            stop_reason = "stream_incomplete".to_string();
         }
     }
 
