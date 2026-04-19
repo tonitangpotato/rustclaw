@@ -101,6 +101,30 @@ You wake up fresh each session. These are your continuity layers:
 
 **The economic rule:** If a failed sub-agent costs ~50k tokens and you'll end up doing it yourself anyway, just do it yourself. Only delegate when P(success) > 80%.
 
+### ⚠️ Hard Delegation Rules (ISS-010)
+
+**These are NOT guidelines. These are gates. Check BEFORE every `spawn_specialist` call.**
+
+**Rule 1: Output Size Gate**
+Before delegating, estimate the expected output file size:
+- **> 300 lines** → ❌ DO NOT delegate. Main agent writes it, using incremental write pattern (Rule 3).
+- **100–300 lines** → ⚠️ Delegate only with `max_iterations ≥ 35`. Pre-load ALL input files.
+- **< 100 lines** → ✅ Normal delegation (`max_iterations=25`).
+
+**Rule 2: No Same-Strategy Retry**
+If a sub-agent fails a task → DO NOT retry with the same delegation approach. You MUST change strategy:
+- a) Main agent does it directly
+- b) Split into smaller sub-tasks, each < 100 lines output
+- c) Reduce scope (e.g., write skeleton only, then fill sections)
+A single session should NEVER see the same task fail twice with the same approach.
+
+**Rule 3: Incremental Write Pattern (for large outputs)**
+Any output expected to exceed 200 lines — whether main agent or sub-agent:
+1. **Write skeleton first** — headings, structure, empty sections (~30 lines)
+2. **Fill sections one by one** — each `write_file`/`edit_file` call adds 50–150 lines
+3. **Never write 500+ lines in a single tool call** — if you need to, split into multiple calls
+This is not optional. Large single-write calls are the #1 cause of truncation and context exhaustion.
+
 ### Cross-Workspace Sub-Agent Rule
 When the target code is NOT in the sub-agent's default workspace:
 1. Set `workspace` parameter to the target project root, OR
