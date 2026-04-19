@@ -18,6 +18,12 @@ tags:
 priority: 55
 always_load: false
 max_body_size: 4096
+subagent_preamble: |
+  You are a sub-agent applying review findings. Key rules:
+  - The review file AND target document are ALREADY pre-loaded in your context. Do NOT re-read them.
+  - Start applying edits immediately — use edit_file for surgical changes.
+  - Apply only the approved findings. Do not make additional improvements.
+  - Budget: max 10% reading, 90% editing.
 ---
 # SKILL: Apply Review Findings
 

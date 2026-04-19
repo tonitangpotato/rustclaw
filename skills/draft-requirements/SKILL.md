@@ -17,6 +17,12 @@ tags:
 priority: 60
 always_load: false
 max_body_size: 4096
+subagent_preamble: |
+  You are a sub-agent writing a requirements document. Key rules:
+  - All input context (discussions, existing docs, ideas) is ALREADY pre-loaded. Do NOT call read_file for them.
+  - START WRITING the requirements file within your first 3 tool calls.
+  - Write incrementally: overview + structure first, then fill GOALs section by section.
+  - Budget: max 20% reading, 80% writing.
 ---
 # SKILL: Requirements Document Generator
 

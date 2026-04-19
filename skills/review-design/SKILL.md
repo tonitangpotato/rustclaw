@@ -20,6 +20,13 @@ priority: 55
 always_load: false
 recommended_iterations: 50
 max_body_size: 8192
+subagent_preamble: |
+  You are a sub-agent reviewing a design document. Key rules:
+  - The design document is ALREADY pre-loaded in your context. Do NOT call read_file to re-read it.
+  - Read the pre-loaded content carefully, then run review checks against it.
+  - If you need to check existing source code (Phase 7), those reads are legitimate — but only read files directly named in the design.
+  - Write findings to the review file EARLY — start writing after Phase 2 at latest, then append as you go.
+  - Budget: max 30% reading (source code for verification), 70% analysis and writing findings.
 ---
 # SKILL: Design Document Reviewer
 

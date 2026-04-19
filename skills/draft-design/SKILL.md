@@ -18,6 +18,14 @@ tags:
 priority: 60
 always_load: false
 max_body_size: 4096
+subagent_preamble: |
+  You are a sub-agent writing a design document. Key rules:
+  - All input files (requirements, existing designs) are ALREADY pre-loaded in your context. Do NOT call read_file for them.
+  - START WRITING the output file within your first 3 tool calls.
+  - Write incrementally: skeleton first (all headings + structure), then fill each section with edit_file.
+  - Each edit_file call should add 50-150 lines. Never try to write the entire document in one call.
+  - Budget: spend at most 20% of your iterations reading anything. 80% must be writing.
+  - If the skill instructions say "Read ALL requirements first" — they are already in your context. Skip that step.
 ---
 # SKILL: Design Document Generator
 

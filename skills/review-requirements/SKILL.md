@@ -20,6 +20,12 @@ tags:
 priority: 55
 always_load: false
 max_body_size: 8192
+subagent_preamble: |
+  You are a sub-agent reviewing a requirements document. Key rules:
+  - The requirements document is ALREADY pre-loaded in your context. Do NOT call read_file to re-read it.
+  - Run review checks against the pre-loaded content directly.
+  - Write findings to the review file EARLY — start writing after the first few checks, then append.
+  - Budget: max 20% reading (only for cross-referencing other docs if needed), 80% analysis and writing.
 ---
 # SKILL: Requirements Document Reviewer
 
