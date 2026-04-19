@@ -132,3 +132,45 @@
 ### 内部工具（不适合直接卖）
 - **gid-harness** — AI 开发执行引擎，主要内部使用，作为服务卖比较困难
 - **agentctl** — 进程管家，纯运维工具
+
+---
+
+## engram × gid 通用 KB 架构思考 (2026-04-15)
+
+### 核心洞察：两个 crate 的拼接点已经存在
+
+**engram 已有能力：**
+- 实体抽取（`entities.rs`，Aho-Corasick + regex，规则式，抽 Project/Person/Tech/Concept）
+- LLM 抽取（`extractor.rs`，text → ExtractedFact，但输出是扁平记忆条目，不是三元组）
+- 4信号聚类（`synthesis/cluster.rs`，Hebbian权重 + 实体Jaccard + embedding余弦 + 时间接近度）
+- 向量+FTS5混合搜索（`hybrid_search.rs`）
+- Hebbian 学习（co-recall 自动建链）
+
+**gid 已有能力：**
+- Infomap 社区检测（`infer/clustering.rs`，4700行，加权网络，极其成熟）
+- 图操作全套（refactor/validate/impact/deps/advise/visual）
+- LLM labeling（聚类后命名）
+- 知识节点（per-node findings/file_cache/tool_history）
+
+**关键发现：**
+- Infomap 不绑定代码——代码特定的只是边权策略（imports=1.0, calls=0.8）
+- 换成通用知识图谱只需换边权：relates_to=1.0, caused_by=0.8, Hebbian强度=直接当权重
+- engram 的 extractor 输出格式从 ExtractedFact 改成 (entity, relation, entity) 三元组就能直接喂 gid
+- 两个聚类器应该能互相输入但现在互不知道
+
+**通用 KB pipeline：**
+```
+文本 → engram extractor (改输出格式) → 三元组
+                                        ↓
+三元组 → gid graph → Infomap 聚类 → 社区发现
+                                        ↓
+社区 → engram recall 加权 (同社区记忆 Hebbian 增强)
+```
+
+**不是两个孤岛要建桥，是拼接口已经在那了，只差一层胶水。**
+
+### 战略意义
+- 市面上没人这么做（认知记忆层 + 结构知识图谱层 双层配合）
+- Cognee 试图揉成一个但丢失各自优势
+- engram 提供发现（"这个可能相关"），gid 提供解释（"具体怎么相关"）
+- 这是完整的 agent 知识系统

@@ -55,6 +55,21 @@ cd /Users/potato/rustclaw
 ./target/release/rustclaw daemon start -c rustclaw.yaml -w /Users/potato/rustclaw
 ```
 
+### X/Twitter (bird CLI)
+
+#### Accounts
+- **@horseonedragon** (potato's personal/主号): `~/bin/bird-potato` wrapper (auth_token + ct0 baked in)
+- **@Toni1161947** (小号/xinfluencer): `~/bin/bird-alt` wrapper (auth_token + ct0 baked in)
+- **@salty_hall_bots** (SaltyHall/Developer App): default `bird` command (uses env AUTH_TOKEN)
+
+#### Usage Rules
+- **@horseonedragon bird CLI: 完全不碰** — 避免任何风险
+- 所有 bird CLI 读操作用 **bird-alt**（小号 @Toni1161947）
+- 读主号互动: `~/bin/bird-alt search "to:horseonedragon" -n 20`
+- 读某条推回复: `~/bin/bird-alt replies <tweet-url>`
+- 所有写操作（发推/follow/reply）用 **X API**（SaltyHall App + OAuth）
+- Cookie tokens expire periodically — if auth fails, get new auth_token + ct0 from browser DevTools
+
 ### Voice (Built-in)
 RustClaw has **built-in voice support** via the `VOICE:` prefix. No external tools needed.
 - To send a voice message: just write `VOICE: your text here`
