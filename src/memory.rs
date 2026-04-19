@@ -641,6 +641,15 @@ impl MemoryManager {
 
     // ─── EmotionalAccumulator (process_interaction) ─────────────────────
 
+    /// Take emotion data from the most recent LLM extraction.
+    ///
+    /// One-shot: clears the cache after reading.
+    /// Returns None if no extraction occurred since last call.
+    pub fn take_last_emotions(&self) -> Option<Vec<(f64, String)>> {
+        let engram = self.engram.lock().ok()?;
+        engram.take_last_emotions()
+    }
+
     /// Process an interaction with emotional content.
     ///
     /// Tracks emotional valence per domain for trend analysis.
@@ -659,49 +668,6 @@ impl MemoryManager {
             .map_err(|e| anyhow::anyhow!("Record emotion error: {}", e))?;
         tracing::debug!("Recorded emotion {:.2} for domain '{}'", emotion, domain);
         Ok(())
-    }
-
-    /// Detect emotional valence from user message content.
-    ///
-    /// Uses simple keyword matching (no LLM needed).
-    /// Returns: positive (+0.7), negative (-0.5), or neutral (0.0).
-    pub fn detect_emotion(user_msg: &str) -> f64 {
-        let positive = ["好", "nice", "great", "thanks", "perfect", "完美", "太好了", "不错", 
-                       "excellent", "awesome", "love", "wonderful", "amazing", "correct", "yes"];
-        let negative = ["不对", "wrong", "no", "bad", "重做", "错了", "fix", "bug", "broken", 
-                       "fail", "error", "问题", "incorrect", "terrible", "awful"];
-        
-        let msg = user_msg.to_lowercase();
-        let pos = positive.iter().filter(|w| msg.contains(*w)).count();
-        let neg = negative.iter().filter(|w| msg.contains(*w)).count();
-        
-        if pos > neg { 0.7 } 
-        else if neg > pos { -0.5 } 
-        else { 0.0 }
-    }
-
-    /// Detect domain from content.
-    ///
-    /// Uses simple keyword matching to categorize content.
-    pub fn detect_domain(content: &str) -> &'static str {
-        let content = content.to_lowercase();
-        
-        if content.contains("code") || content.contains("rust") || content.contains("bug") 
-            || content.contains("impl") || content.contains("function") || content.contains("compile")
-            || content.contains("代码") || content.contains("编程") {
-            "coding"
-        } else if content.contains("trade") || content.contains("profit") || content.contains("market") 
-            || content.contains("bot") || content.contains("price") || content.contains("交易") {
-            "trading"
-        } else if content.contains("search") || content.contains("research") || content.contains("find")
-            || content.contains("investigate") || content.contains("研究") {
-            "research"
-        } else if content.contains("email") || content.contains("message") || content.contains("chat")
-            || content.contains("talk") || content.contains("沟通") {
-            "communication"
-        } else {
-            "general"
-        }
     }
 
     // ─── BehaviorFeedback (log_behavior) ────────────────────────────────
@@ -996,24 +962,6 @@ pub struct SelfReflectionResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_detect_emotion() {
-        assert!(MemoryManager::detect_emotion("nice work!") > 0.5);
-        assert!(MemoryManager::detect_emotion("好的,完美!") > 0.5);
-        assert!(MemoryManager::detect_emotion("wrong, please fix this bug") < 0.0);
-        assert!(MemoryManager::detect_emotion("不对,重做") < 0.0);
-        assert_eq!(MemoryManager::detect_emotion("let me think about it"), 0.0);
-    }
-
-    #[test]
-    fn test_detect_domain() {
-        assert_eq!(MemoryManager::detect_domain("fix this rust code bug"), "coding");
-        assert_eq!(MemoryManager::detect_domain("check the market price"), "trading");
-        assert_eq!(MemoryManager::detect_domain("research this topic"), "research");
-        assert_eq!(MemoryManager::detect_domain("send an email"), "communication");
-        assert_eq!(MemoryManager::detect_domain("hello world"), "general");
-    }
 
     #[test]
     fn test_importance_to_layer() {

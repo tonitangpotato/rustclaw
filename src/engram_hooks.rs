@@ -372,17 +372,26 @@ impl Hook for EngramStoreHook {
             Err(e) => tracing::warn!("Engram auto-store failed: {}", e),
         }
 
-        // Track emotional valence per domain (EmotionalAccumulator)
-        let emotion = MemoryManager::detect_emotion(user_msg);
-        let domain = MemoryManager::detect_domain(&store_content);
-        
-        if let Err(e) = self.memory.process_interaction(&store_content, emotion, domain) {
-            tracing::debug!("Engram emotion tracking failed (non-fatal): {}", e);
-        } else if emotion != 0.0 {
-            tracing::debug!(
-                "Engram emotion tracked: {:.2} for domain '{}'",
-                emotion, domain
-            );
+        // Track emotional valence per domain from LLM extraction (no keyword fallback)
+        match self.memory.take_last_emotions() {
+            Some(emotions) => {
+                for (valence, domain) in &emotions {
+                    if let Err(e) = self.memory.process_interaction(&store_content, *valence, domain) {
+                        tracing::warn!("Emotion recording failed for domain '{}': {}", domain, e);
+                    }
+                }
+                if !emotions.is_empty() {
+                    tracing::debug!(
+                        "Recorded {} emotion signals from LLM extraction",
+                        emotions.len()
+                    );
+                }
+            }
+            None => {
+                // No extraction result — message was skipped by extractor or extraction failed.
+                // store() already logs extraction errors internally, no fallback here.
+                tracing::debug!("No emotion data from extraction (skipped or failed)");
+            }
         }
 
         Ok(HookOutcome::Continue(None))
