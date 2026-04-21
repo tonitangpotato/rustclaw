@@ -1,0 +1,34 @@
+Inferred 18 components, 8 features from 64 code files
+
+Components:
+  • infer:component:0 — Platform Core Services (14 files)
+  • infer:component:0.0 — Event System (1 file)
+  • infer:component:0.1 — Platform Infrastructure (5 files)
+  • infer:component:0.2 — Hot Reload (1 file)
+  • infer:component:0.3 — GID Storage Core (2 files)
+  • infer:component:0.4 — GID Storage Implementation (3 files)
+  • infer:component:0.5 — Speech-to-Text (1 file)
+  • infer:component:0.6 — OAuth Integration (1 file)
+  • infer:component:0.7 — Tool Result Storage (1 file)
+  • infer:component:0.8 — Markdown Processor (1 file)
+  • infer:component:0.9 — Channel Module Root (1 file)
+  • infer:component:0.10 — Voice Emotion Analysis (1 file)
+  • infer:component:0.11 — Prompt Section Builder (1 file)
+  • infer:component:0.12 — Heartbeat Monitor (1 file)
+  • infer:component:0.13 — Channels and Entry Point (2 files)
+  • infer:component:0.13.0 — Telegram Channel Daemon (2 files)
+  • infer:component:0.13.1 — Application Entry Point (1 file)
+  • infer:component:infrastructure — Core Infrastructure (41 files)
+
+Features:
+  • infer:feature:authentication-authorization — Authentication & Authorization (2 components)
+  • infer:feature:messaging-channel-integration — Messaging Channel Integration (3 components)
+  • infer:feature:graph-storage-system — Graph Storage System (2 components)
+  • infer:feature:voice-processing-analysis — Voice Processing & Analysis (2 components)
+  • infer:feature:content-processing — Content Processing (2 components)
+  • infer:feature:claude-interaction-framework — Claude Interaction Framework (1 component)
+  • infer:feature:platform-runtime-management — Platform Runtime Management (3 components)
+  • infer:feature:application-bootstrap — Application Bootstrap (2 components)
+
+Clustering: 18 communities, codelength = 2.040
+Tokens: 2,862 (naming: 1,264, features: 1,598)

@@ -1,0 +1,567 @@
+nodes:
+- id: infer:component:0
+  title: events+platform+component+…
+  status: todo
+  description: ''
+  type: component
+  metadata:
+    total_size: 27
+    flow: 1.0
+    size: 0
+  source: infer
+- id: infer:component:0.0
+  title: events
+  status: todo
+  description: ''
+  type: component
+  metadata:
+    flow: 0.005068025140236629
+    size: 1
+  source: infer
+- id: infer:component:0.1
+  title: platform
+  status: todo
+  description: ''
+  type: component
+  metadata:
+    flow: 0.37032636461218016
+    size: 5
+  source: infer
+- id: infer:component:0.2
+  title: reload+daemon+main
+  status: todo
+  description: ''
+  type: component
+  metadata:
+    size: 0
+    total_size: 3
+    flow: 0.01654224476793941
+  source: infer
+- id: infer:component:0.2.0
+  title: reload
+  status: todo
+  description: ''
+  type: component
+  metadata:
+    size: 1
+    flow: 0.004303914944198327
+  source: infer
+- id: infer:component:0.2.1
+  title: daemon
+  status: todo
+  description: ''
+  type: component
+  metadata:
+    size: 1
+    flow: 0.008535066177619281
+  source: infer
+- id: infer:component:0.2.2
+  title: main
+  status: todo
+  description: ''
+  type: component
+  metadata:
+    size: 1
+    flow: 0.0037032636461218045
+  source: infer
+- id: infer:component:0.3
+  title: voice_emotion
+  status: todo
+  description: ''
+  type: component
+  metadata:
+    flow: 0.0064327866343514535
+    size: 1
+  source: infer
+- id: infer:component:0.4
+  title: gid_storage-0.4
+  status: todo
+  description: ''
+  type: component
+  metadata:
+    flow: 0.2221958187673081
+    size: 3
+  source: infer
+- id: infer:component:0.5
+  title: gid_storage-0.5
+  status: todo
+  description: ''
+  type: component
+  metadata:
+    size: 2
+    flow: 0.1481305458448719
+  source: infer
+- id: infer:component:0.6
+  title: stt
+  status: todo
+  description: ''
+  type: component
+  metadata:
+    flow: 0.005068025140236629
+    size: 1
+  source: infer
+- id: infer:component:0.7
+  title: oauth
+  status: todo
+  description: ''
+  type: component
+  metadata:
+    flow: 0.0037032636461218045
+    size: 1
+  source: infer
+- id: infer:component:0.8
+  title: channels
+  status: todo
+  description: ''
+  type: component
+  metadata:
+    flow: 0.20302493508184552
+    size: 6
+  source: infer
+- id: infer:component:0.9
+  title: prompt
+  status: todo
+  description: ''
+  type: component
+  metadata:
+    flow: 0.0037032636461218045
+    size: 1
+  source: infer
+- id: infer:component:0.10
+  title: tool_result_storage
+  status: todo
+  description: ''
+  type: component
+  metadata:
+    flow: 0.004003589295160066
+    size: 1
+  source: infer
+- id: infer:component:0.11
+  title: heartbeat
+  status: todo
+  description: ''
+  type: component
+  metadata:
+    flow: 0.004003589295160066
+    size: 1
+  source: infer
+- id: infer:component:0.12
+  title: markdown
+  status: todo
+  description: ''
+  type: component
+  metadata:
+    flow: 0.007797548128466277
+    size: 1
+  source: infer
+- id: infer:component:infrastructure
+  title: Infrastructure & Shared Utilities
+  status: todo
+  description: ''
+  type: component
+  metadata:
+    flow: 0.0
+    hub_excluded: true
+    size: 37
+  source: infer
+edges:
+- from: infer:component:0
+  to: infer:component:0.0
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0
+  to: infer:component:0.1
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0
+  to: infer:component:0.2
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0
+  to: infer:component:0.3
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0
+  to: infer:component:0.4
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0
+  to: infer:component:0.5
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0
+  to: infer:component:0.6
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0
+  to: infer:component:0.7
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0
+  to: infer:component:0.8
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0
+  to: infer:component:0.9
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0
+  to: infer:component:0.10
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0
+  to: infer:component:0.11
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0
+  to: infer:component:0.12
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.0
+  to: file:events.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.1
+  to: file:platform/instance.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.1
+  to: file:platform/auth.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.1
+  to: file:platform/server.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.1
+  to: file:platform/db.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.1
+  to: file:platform/mod.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.2
+  to: infer:component:0.2.0
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.2
+  to: infer:component:0.2.1
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.2
+  to: infer:component:0.2.2
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.2.0
+  to: file:reload.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.2.1
+  to: file:daemon.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.2.2
+  to: file:main.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.3
+  to: file:voice_emotion.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.4
+  to: file:gid_storage/types.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.4
+  to: file:gid_storage/graph_storage.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.4
+  to: file:gid_storage/schema.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.5
+  to: file:gid_storage/error.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.5
+  to: file:gid_storage/mod.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.6
+  to: file:stt.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.7
+  to: file:oauth.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.8
+  to: file:channels/telegram.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.8
+  to: file:channels/signal.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.8
+  to: file:channels/whatsapp.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.8
+  to: file:channels/matrix.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.8
+  to: file:channels/slack.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.8
+  to: file:channels/mod.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.9
+  to: file:prompt/sections.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.10
+  to: file:tool_result_storage.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.11
+  to: file:heartbeat.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:0.12
+  to: file:markdown.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:llm.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:tts.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:session.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:claude_cli.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:cron.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:interoceptive.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:tools.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:text_utils.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:ritual_runner.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:config.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:user_model.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:memory.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:skills.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:plugins.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:voice_mode.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:engram_hooks.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:serverless.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:autopilot.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:hooks.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:auth_profiles.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:credential.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:prompt/mod.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:workspace.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:safety.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:agent.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:tool_stats.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:orchestrator.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:worktree.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:search.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:sandbox.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:dashboard.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:browser.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:ritual_adapter.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:context.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:message_queue.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:distributed.rs
+  relation: contains
+  metadata:
+    source: infer
+- from: infer:component:infrastructure
+  to: file:channels/discord.rs
+  relation: contains
+  metadata:
+    source: infer
