@@ -76,18 +76,18 @@ RustClaw has **built-in voice support** via the `VOICE:` prefix. No external too
 - RustClaw handles TTS and Telegram voice delivery internally
 
 ### Engram (Memory System)
-- **CLI**: `engram --db ~/rustclaw/engram-memory.db <command>` (~90ms, TS CLI)
+- **Integration**: Native Rust crate (`engramai`), built into RustClaw. No CLI needed.
 - **Database**: `/Users/potato/rustclaw/engram-memory.db`
-- **Commands**:
-  - `engram --db ~/rustclaw/engram-memory.db recall "query" --limit 5` — search
-  - `engram --db ~/rustclaw/engram-memory.db add --type factual --importance 0.8 "content"` — store
-  - `engram --db ~/rustclaw/engram-memory.db consolidate` — strengthen memories
-  - `engram --db ~/rustclaw/engram-memory.db stats` — show stats
-  - `engram --db ~/rustclaw/engram-memory.db forget` — prune weak memories
-  - `engram --db ~/rustclaw/engram-memory.db list` — list all
-  - `engram --db ~/rustclaw/engram-memory.db hebbian` — show Hebbian links
-- **⚠️ Do NOT use mcporter for engram** — mcporter adds ~5sec overhead. CLI is 54x faster.
-- Run `consolidate` during heartbeats for memory maintenance
+- **Auto-recall**: Framework hooks automatically recall relevant memories before every LLM call
+- **Auto-store**: Framework hooks automatically store significant content after every LLM call
+- **Native tools** (for explicit use when needed):
+  - `engram_recall` — search memories by query
+  - `engram_store` — store with type + importance
+  - `engram_recall_associated` — Hebbian-linked memories
+  - `engram_trends` — emotional trends per domain
+  - `engram_behavior_stats` — tool success/failure rates
+  - `engram_soul_suggestions` — SOUL.md update suggestions
+- Consolidation runs during heartbeats automatically
 
 ### GID (Graph Indexed Development)
 - **Built-in**: GID is integrated into RustClaw (gid-core crate)

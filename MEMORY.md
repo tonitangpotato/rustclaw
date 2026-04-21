@@ -93,7 +93,14 @@
 - System prompt is modular: context files → skills → channel caps → runtime → behavior rules
 - Skills are markdown-based workflows with YAML frontmatter triggers — no Rust code needed
 
-*Last updated: 2026-04-03*
+### Interoceptive Emotion System (2026-04-19)
+- **Layer 1 + Layer 2: LIVE** — 4 signal meters → InteroceptiveHub → system prompt injection
+- **Layer 3 (行为调制): ✅ DONE** — 自适应σ偏差检测 + 系统提示注入 + 循环内干预
+- **核心目的**: 自我察觉→自我修正（闭环）。stress高→换策略，flow低→主动问人，load爆→提前收束
+- **实现**: AdaptiveBaseline (Welford算法), cold-start fallback, mid-loop intervention at 3+ consecutive failures
+- 247 tests pass, engramai v0.2.3, src/interoceptive.rs 530 lines
+
+*Last updated: 2026-04-19*
 
 ---
 

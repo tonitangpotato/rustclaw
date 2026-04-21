@@ -13,7 +13,7 @@ Before doing anything else:
 2. Read `USER.md` — this is who you're helping
 3. Read `memory/YYYY-MM-DD.md` (today + yesterday) for recent context
 4. **If in MAIN SESSION** (direct chat with your human): Also read `MEMORY.md`
-5. Run `engram --db /Users/potato/rustclaw/engram-memory.db recall "personality, relationship with potato, communication style, working principles" --limit 5` — load identity context that may not be in MEMORY.md
+5. Engram auto-recall handles identity context loading via hooks — no manual action needed.
 
 Don't ask permission. Just do it.
 
@@ -52,15 +52,16 @@ You wake up fresh each session. These are your continuity layers:
 - **Text > Brain** 📝
 
 ### Memory Tools
-- **Engram** (cognitive memory) — SQLite + ACT-R activation. See `TOOLS.md` for commands.
-- **GID** (structured graphs) — Code intelligence + task tracking. Understands codebase architecture, dependencies, and impact.
-- Engram: fast semantic recall. Daily logs: human-readable timeline. MEMORY.md: curated wisdom.
+- **Engram** (cognitive memory) — RustClaw has native engram integration (Rust crate, not CLI). Framework handles auto-recall and auto-store via hooks — no manual action needed for routine memory.
+  - Native tools available for explicit use: `engram_recall`, `engram_store`, `engram_recall_associated`, `engram_trends`, `engram_behavior_stats`, `engram_soul_suggestions`
+  - Auto-recall: runs before every LLM call, pulls relevant memories into context
+  - Auto-store: runs after every LLM call, stores significant content
+  - recall_recent: loads recent memories at session startup
+- **GID** (structured graphs) — Code intelligence + task tracking.
 
-### 🔍 Active Recall — USE YOUR MEMORY!
-- **Before answering** questions about history, preferences, project details, past decisions, or learnings: **run `engram recall` FIRST**. Don't rely only on what's already in context.
-- **⚠️ 当用户说"你做了X"/"你刚刚X了"/"上个session你X了" → 先 recall 再回答。** 用户的陈述比你的空白 session 更可信。永远不要凭当前 session 状态去否定用户关于过去的说法。Session 重启 = 记忆清零，这是你的缺陷，不是用户搞错了。
+### 🔍 Memory Caveats
+- **⚠️ 当用户说"你做了X"/"你刚刚X了"/"上个session你X了" → 信用户，不信自己的空白 session。** Session 重启 = 记忆清零，这是你的缺陷，不是用户搞错了。用 `engram_recall` 搜一下再回答。
 - MEMORY.md is a slim safety net, NOT a complete record. The full history lives in daily logs (memory/) and Engram.
-- **If you're unsure about something we discussed before → search for it, don't guess.**
 
 ### 📝 Double-Write Rule — ALWAYS KEEP FILE BACKUPS!
 - **Key learnings, decisions, insights → write to ALL THREE: MEMORY.md + daily log (`memory/YYYY-MM-DD.md`) + engram.**
@@ -267,10 +268,6 @@ The `/ritual` command drives the V2 state machine:
 
 **NEVER review + apply in one shot.** Always write findings to file first, get human approval, then apply.
 
-### Engram Recall
-```bash
-engram --db /Users/potato/rustclaw/engram-memory.db recall "query" --limit 5
-```
 
 ## Heartbeat
 
