@@ -636,6 +636,27 @@ impl AnthropicClient {
         }
     }
 
+    /// Write LLM request/response to a dedicated debug log file.
+    /// This is separate from tracing so it survives even without RUST_LOG=debug.
+    fn write_llm_debug_log(direction: &str, model: &str, content: &str) {
+        use std::io::Write;
+        let log_dir = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".rustclaw/logs");
+        let _ = std::fs::create_dir_all(&log_dir);
+        let path = log_dir.join("llm-debug.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+            let _ = writeln!(f, "\n=== {} [{}] model={} ===", direction, timestamp, model);
+            // Truncate very large bodies to avoid filling disk
+            if content.len() > 50_000 {
+                let _ = writeln!(f, "{}... [TRUNCATED at 50KB, total {}B]", &content[..50_000], content.len());
+            } else {
+                let _ = writeln!(f, "{}", content);
+            }
+        }
+    }
+
     /// Map HTTP status code to failure reason.
     fn status_to_failure_reason(status: u16) -> AuthProfileFailureReason {
         match status {
@@ -666,15 +687,27 @@ impl AnthropicClient {
             // OAuth tokens MUST include Claude Code identity to access sonnet/opus models.
             // Format as array of content blocks (matching the official SDK).
             // cache_control on last block enables prompt caching for the entire system prompt.
-            serde_json::json!([
-                {"type": "text", "text": CLAUDE_CODE_IDENTITY},
-                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
-            ])
+            // Note: Anthropic API rejects cache_control on empty text blocks, so skip empty system.
+            if system.is_empty() {
+                serde_json::json!([
+                    {"type": "text", "text": CLAUDE_CODE_IDENTITY, "cache_control": {"type": "ephemeral"}}
+                ])
+            } else {
+                serde_json::json!([
+                    {"type": "text", "text": CLAUDE_CODE_IDENTITY},
+                    {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+                ])
+            }
         } else {
             // Non-OAuth: array format with cache_control
-            serde_json::json!([
-                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
-            ])
+            // Skip empty system prompts — API rejects cache_control on empty text blocks.
+            if system.is_empty() {
+                serde_json::json!([])
+            } else {
+                serde_json::json!([
+                    {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+                ])
+            }
         }
     }
 
@@ -846,7 +879,13 @@ impl LlmClient for AnthropicClient {
                 self.apply_auth(req).await?
             };
 
-            tracing::debug!("Anthropic request body: {}", serde_json::to_string_pretty(&body).unwrap_or_default());
+            // LLM debug logging — write request details for post-mortem debugging
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let body_str = serde_json::to_string_pretty(&body).unwrap_or_default();
+                tracing::debug!("Anthropic request body: {}", body_str);
+                // Also write to dedicated LLM debug log
+                Self::write_llm_debug_log("REQUEST", model_override, &body_str);
+            }
             let resp = match req.json(&body).send().await {
                 Ok(r) => r,
                 Err(e) => {
@@ -1055,6 +1094,20 @@ impl LlmClient for AnthropicClient {
 
             // Track token usage
             token_tracker().record(&usage);
+
+            // Log LLM response for debugging
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let resp_summary = format!(
+                    "model={} tokens={{in:{},out:{},cache_r:{},cache_w:{}}} stop={} tools={} text_len={}",
+                    model_override,
+                    usage.input_tokens, usage.output_tokens, usage.cache_read, usage.cache_write,
+                    resp_body["stop_reason"].as_str().unwrap_or("?"),
+                    tool_calls.len(),
+                    text.as_ref().map(|t| t.len()).unwrap_or(0)
+                );
+                tracing::debug!("Anthropic response: {}", resp_summary);
+                Self::write_llm_debug_log("RESPONSE", model_override, &serde_json::to_string_pretty(&resp_body).unwrap_or_default());
+            }
 
             return Ok(LlmResponse {
                 text,

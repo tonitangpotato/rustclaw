@@ -107,6 +107,16 @@ pub async fn start_heartbeat(
                                             }
                                         }
                                     }
+                                    engramai::interoceptive::RegulationAction::IdentityEvolutionSuggestion { observation, suggestion, .. } => {
+                                        tracing::info!("🪞 Identity evolution: {} → {}", observation, suggestion);
+                                    }
+                                    engramai::interoceptive::RegulationAction::HeartbeatFrequencyAdjustment { direction, interval_multiplier, reason, .. } => {
+                                        let dir_str = match direction {
+                                            engramai::interoceptive::HeartbeatAdjustDirection::Increase => "⬆️ increase",
+                                            engramai::interoceptive::HeartbeatAdjustDirection::Decrease => "⬇️ decrease",
+                                        };
+                                        tracing::info!("💓 Heartbeat {} (×{:.2}): {}", dir_str, interval_multiplier, reason);
+                                    }
                                 }
                             }
                         }

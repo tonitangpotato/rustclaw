@@ -289,6 +289,16 @@ impl MemoryManager {
     }
 
     /// Get the current namespace.
+    /// Get the database path (needed for Knowledge Compiler store access).
+    pub fn db_path(&self) -> &str {
+        &self.db_path
+    }
+
+    /// Lock the engram Memory for direct access (used by Knowledge Compiler).
+    pub fn lock_engram(&self) -> anyhow::Result<std::sync::MutexGuard<'_, engramai::Memory>> {
+        self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))
+    }
+
     pub fn namespace(&self) -> Option<&str> {
         self.namespace.as_deref()
     }
@@ -375,6 +385,7 @@ impl MemoryManager {
                 confidence: r.confidence,
                 source: Some(r.record.source.clone()),
                 confidence_label: Some(r.confidence_label),
+                created_at: Some(r.record.created_at.to_rfc3339()),
             })
             .collect())
     }
@@ -453,6 +464,7 @@ impl MemoryManager {
                 confidence: r.confidence,
                 source: Some(r.record.source.clone()),
                 confidence_label: Some(r.confidence_label),
+                created_at: Some(r.record.created_at.to_rfc3339()),
             })
             .collect();
 
@@ -481,6 +493,7 @@ impl MemoryManager {
                 confidence: r.confidence,
                 source: Some(r.record.source.clone()),
                 confidence_label: Some(r.confidence_label),
+                created_at: Some(r.record.created_at.to_rfc3339()),
             })
             .collect())
     }
@@ -576,6 +589,7 @@ impl MemoryManager {
                 confidence: r.confidence,
                 source: Some(r.record.source.clone()),
                 confidence_label: Some(r.confidence_label),
+                created_at: Some(r.record.created_at.to_rfc3339()),
             })
             .collect())
     }
@@ -615,6 +629,7 @@ impl MemoryManager {
                 confidence: r.importance,
                 source: Some(r.source.clone()),
                 confidence_label: Some("recent".to_string()),
+                created_at: Some(r.created_at.to_rfc3339()),
             })
             .collect())
     }
@@ -633,7 +648,16 @@ impl MemoryManager {
 
         for mem in memories {
             let type_tag = &mem.memory_type;
-            lines.push(format!("- [{}] {}", type_tag, mem.content));
+            let timestamp = mem.created_at.as_deref().map(|ts| {
+                // Try to parse and format as a human-friendly relative/short timestamp
+                chrono::DateTime::parse_from_rfc3339(ts)
+                    .map(|dt| dt.format("%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|_| ts.to_string())
+            });
+            match timestamp {
+                Some(ts) => lines.push(format!("- [{}] [{}] {}", ts, type_tag, mem.content)),
+                None => lines.push(format!("- [{}] {}", type_tag, mem.content)),
+            }
         }
 
         lines.join("\n")
@@ -904,13 +928,17 @@ impl MemoryManager {
 
     /// Evaluate the current interoceptive state and generate regulation actions.
     ///
+    /// Uses adaptive baselines when calibrated, falls back to conservative
+    /// hardcoded thresholds during cold-start.
+    ///
     /// Returns advisory actions (soul updates, retrieval adjustments, behavior shifts, alerts).
     /// The caller decides how to act on them (log, send to Telegram, apply automatically).
     pub fn interoceptive_regulate(&self) -> anyhow::Result<Vec<RegulationAction>> {
         let engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
         let state = engram.interoceptive_snapshot();
+        let hub = engram.interoceptive_hub();
         let config = RegulationConfig::default();
-        Ok(regulation::evaluate(&state, &config))
+        Ok(regulation::evaluate_with_hub(&state, &config, Some(hub)))
     }
 
     /// Run a full interoceptive cycle: tick + evaluate.
@@ -954,6 +982,8 @@ pub struct RecalledMemory {
     pub source: Option<String>,
     /// Human-readable confidence label: "confident", "likely", "uncertain"
     pub confidence_label: Option<String>,
+    /// Creation timestamp (ISO 8601 / RFC 3339)
+    pub created_at: Option<String>,
 }
 
 /// Result of a self-reflection cycle.

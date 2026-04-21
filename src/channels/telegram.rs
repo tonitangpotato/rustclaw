@@ -391,12 +391,13 @@ impl TelegramBot {
             message_id,
         };
 
-        // Send persistent "typing" indicator that repeats every 4 seconds
+        // Send persistent "typing" indicator that repeats every 4 seconds.
+        // Max 5 minutes to prevent zombie typing loops.
         let typing_client = self.client.clone();
         let typing_url = self.api_url("sendChatAction");
         let typing_chat_id = chat_id;
         let mut typing_handle = tokio::spawn(async move {
-            loop {
+            for _ in 0..75 { // 75 * 4s = 5 minutes max
                 let _ = typing_client
                     .post(&typing_url)
                     .json(&serde_json::json!({
@@ -414,6 +415,7 @@ impl TelegramBot {
             let active = self.active_sessions.lock().await;
             if active.contains(&session_key) {
                 // Session busy — check for /btw or queue the message
+                tracing::info!("Typing ABORT (session busy) for chat {}", chat_id);
                 typing_handle.abort();
                 if text.starts_with("/btw ") || text.starts_with("/btw\n") {
                     let question = text.strip_prefix("/btw").unwrap().trim();
@@ -447,6 +449,7 @@ impl TelegramBot {
 
         // Check for a waiting ritual even when session is idle (e.g. user types
         // plain text while the main agent is not running but a ritual is paused).
+        tracing::info!("Typing ABORT (ritual check) for chat {}", chat_id);
         typing_handle.abort();
         if self.try_route_to_waiting_ritual(chat_id, &text).await {
             tracing::info!("Routed message to waiting ritual (idle session) for chat {}", chat_id);
@@ -491,6 +494,7 @@ impl TelegramBot {
             match event {
                 AgentEvent::Text(text) => {
                     // Intermediate text — send immediately as acknowledgment
+                    tracing::info!("Typing ABORT (AgentEvent::Text) for chat {}", chat_id);
                     typing_handle.abort();
                     let response = crate::context::ProcessedResponse::from_raw(&text);
                     if !response.is_silent {
@@ -501,13 +505,13 @@ impl TelegramBot {
                             let _ = self.send_message(chat_id, &response.text, effective_reply).await;
                         }
                     }
-                    // Restart typing indicator for tool execution
+                    // Restart typing indicator for tool execution (max 5 min)
                     let typing_client = self.client.clone();
                     let typing_url = self.api_url("sendChatAction");
                     let typing_chat_id = chat_id;
                     typing_handle.abort();
                     typing_handle = tokio::spawn(async move {
-                        loop {
+                        for _ in 0..75 {
                             let _ = typing_client
                                 .post(&typing_url)
                                 .json(&serde_json::json!({
@@ -539,7 +543,23 @@ impl TelegramBot {
         }
 
         // Stop typing
+        tracing::info!("Typing loop FINAL ABORT for chat {}", chat_id);
         typing_handle.abort();
+        // Actively cancel the typing indicator on Telegram's side.
+        // JoinHandle::abort() stops our local loop, but the last sendChatAction
+        // may still be in-flight.  Sending "cancel" is undocumented but works
+        // on Telegram — the official way is to just let it expire (~5s), but
+        // some clients cache it longer.  As a belt-and-suspenders fix we also
+        // try sending an empty/cancel action.
+        let _ = self
+            .client
+            .post(self.api_url("sendChatAction"))
+            .json(&serde_json::json!({
+                "chat_id": chat_id,
+                "action": "cancel",
+            }))
+            .send()
+            .await;
 
         // session_guard drop will remove from active_sessions automatically
 
@@ -2054,9 +2074,60 @@ Choose a model:", current),
         tokio::fs::write(&ogg_path, &file_bytes).await?;
         tracing::debug!("Downloaded voice to {}", ogg_path);
 
-        // Step 3: Transcribe using STT
-        let transcription = stt::transcribe(&ogg_path).await?;
+        // Step 3: Transcribe using STT + analyze voice emotion in parallel
+        let ogg_path_clone = ogg_path.clone();
+        let workspace = self.runner.workspace_root().to_string_lossy().to_string();
+        let user_id_str = user_id.to_string();
+
+        // Run STT and voice emotion analysis concurrently
+        let (transcription_result, emotion_result) = tokio::join!(
+            stt::transcribe(&ogg_path),
+            async {
+                // Convert OGG → WAV for SER (separate from STT's internal conversion)
+                let uid = std::process::id() ^ (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos());
+                let wav_path = format!("/tmp/rustclaw_ser_{}.wav", uid);
+
+                let ffmpeg_ok = tokio::process::Command::new("ffmpeg")
+                    .args(["-y", "-i", &ogg_path_clone, "-ar", "16000", "-ac", "1", &wav_path])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .await
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+
+                let result = if ffmpeg_ok {
+                    crate::voice_emotion::analyze_voice_emotion(&wav_path, &workspace).await
+                } else {
+                    None
+                };
+
+                let _ = tokio::fs::remove_file(&wav_path).await;
+                result
+            }
+        );
+
+        let transcription = transcription_result?;
         tracing::info!("Transcribed: {}", { let _end = transcription.len().min(50); let _end = transcription.floor_char_boundary(_end); &transcription[.._end] });
+
+        // Feed voice emotion signal to interoceptive hub
+        if let Some(ref emotion) = emotion_result {
+            let signal = emotion.to_signal("communication", Some(user_id_str.clone()));
+            if let Some(memory) = self.runner.memory() {
+                if let Err(e) = memory.feed_interoceptive_signal(signal) {
+                    tracing::warn!("Failed to feed voice emotion signal: {}", e);
+                }
+            }
+            tracing::info!(
+                "Voice emotion: {} ({:.0}%) from user {}",
+                emotion.primary_emotion,
+                emotion.confidence * 100.0,
+                user_id
+            );
+        }
 
         // Clean up the input file
         let _ = tokio::fs::remove_file(ogg_path).await;
@@ -2064,8 +2135,17 @@ Choose a model:", current),
         // Voice mode toggle is handled by LLM via set_voice_mode tool.
 
         // Step 4: Process transcribed text as a normal message.
-        // No prefix — agent treats it the same as typed text.
-        let user_message = transcription;
+        // If voice emotion was detected, prepend it so the LLM sees the tone.
+        let user_message = if let Some(ref emotion) = emotion_result {
+            format!(
+                "[🎙️ Voice tone: {} ({:.0}%)]\n{}",
+                emotion.primary_emotion,
+                emotion.confidence * 100.0,
+                transcription
+            )
+        } else {
+            transcription
+        };
         let session_key = format!("telegram:{}", chat_id);
 
         let msg_ctx = crate::context::MessageContext {

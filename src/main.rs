@@ -41,6 +41,7 @@ mod tools;
 pub mod tool_stats;
 mod tts;
 mod user_model;
+mod voice_emotion;
 mod voice_mode;
 mod worktree;
 // mod platform; // WIP: disabled until compilation fixed
@@ -48,6 +49,48 @@ mod workspace;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
+
+/// Initialize tracing with file + stderr dual output.
+/// File logging goes to ~/.rustclaw/logs/ with daily rotation.
+/// Controlled by RUST_LOG env var or config (loaded later, so we use defaults here).
+fn init_logging() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    // Determine log directory
+    let log_dir = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".rustclaw/logs");
+
+    // Ensure log directory exists
+    let _ = std::fs::create_dir_all(&log_dir);
+
+    // File appender with daily rotation
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "rustclaw.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    // Leak the guard so it lives for the process lifetime
+    // (dropping it would flush and close the file writer)
+    std::mem::forget(_guard);
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+        )
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(non_blocking)
+                .with_ansi(false)
+        )
+        .init();
+
+    tracing::info!("Logging initialized — file output: {}/rustclaw.log", log_dir.display());
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "rustclaw", version, about = "Rust-native AI agent framework")]
@@ -147,12 +190,8 @@ async fn main() -> anyhow::Result<()> {
         }
     }));
 
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    // Initialize logging — file + stderr dual output for daemon mode
+    init_logging();
 
     let cli = Cli::parse();
 

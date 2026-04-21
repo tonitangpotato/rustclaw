@@ -123,6 +123,38 @@ pub struct Config {
     /// Token budget / alert configuration
     #[serde(default)]
     pub token_budget: TokenBudgetConfig,
+
+    /// Logging configuration
+    #[serde(default)]
+    pub logging: LoggingConfig,
+}
+
+/// Logging configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoggingConfig {
+    /// Log level filter (default: "info")
+    pub level: String,
+    /// Enable file logging (default: true in daemon mode)
+    pub file_enabled: bool,
+    /// Log directory (default: ~/.rustclaw/logs/)
+    pub log_dir: Option<String>,
+    /// Log rotation: "daily" or "never" (default: "daily")
+    pub rotation: String,
+    /// Enable LLM request/response debug logging to separate file
+    pub llm_debug: bool,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: "info".to_string(),
+            file_enabled: true,
+            log_dir: None,
+            rotation: "daily".to_string(),
+            llm_debug: false,
+        }
+    }
 }
 
 /// Token budget and alert thresholds.
