@@ -71,6 +71,9 @@ pub trait Tool: Send + Sync {
 pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
     llm_client: Option<Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>>,
+    /// Shared LLM slot for tools that need late-binding LLM access (e.g. KnowledgeCompileTool).
+    /// Created empty at registry init, filled by set_llm_client().
+    shared_llm_slot: Arc<tokio::sync::RwLock<Option<Box<dyn crate::llm::LlmClient>>>>,
     workspace_root: Option<std::path::PathBuf>,
     /// Shared mutable slot for ritual notify — set per-request with chat context,
     /// read by StartRitualTool at execution time.
@@ -87,6 +90,7 @@ impl ToolRegistry {
         Self {
             tools: Vec::new(),
             llm_client: None,
+            shared_llm_slot: Arc::new(tokio::sync::RwLock::new(None)),
             workspace_root: None,
             ritual_notify: Arc::new(std::sync::Mutex::new(None)),
             current_session_key: Arc::new(std::sync::Mutex::new(None)),
@@ -96,6 +100,13 @@ impl ToolRegistry {
 
     /// Set the LLM client for ritual tools.
     pub fn set_llm_client(&mut self, client: Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>) {
+        // Also fill the shared LLM slot for tools that need late-binding access
+        {
+            let client_ref = client.blocking_read();
+            let cloned = client_ref.clone_boxed();
+            let mut slot = self.shared_llm_slot.blocking_write();
+            *slot = Some(cloned);
+        }
         self.llm_client = Some(client);
     }
 
@@ -160,7 +171,12 @@ impl ToolRegistry {
         // EmpathyBus tools for introspection
         registry.register(Box::new(EngramTrendsTool::new(memory.clone())));
         registry.register(Box::new(EngramBehaviorStatsTool::new(memory.clone())));
-        registry.register(Box::new(EngramSoulSuggestionsTool::new(memory)));
+        registry.register(Box::new(EngramSoulSuggestionsTool::new(memory.clone())));
+        // Knowledge Compiler tools
+        registry.register(Box::new(KnowledgeQueryTool::new(memory.clone())));
+        registry.register(Box::new(KnowledgeListTool::new(memory.clone())));
+        registry.register(Box::new(KnowledgeHealthTool::new(memory.clone())));
+        registry.register(Box::new(KnowledgeCompileTool::new(memory, registry.shared_llm_slot.clone())));
         // TTS and STT tools
         registry.register(Box::new(TtsTool));
         registry.register(Box::new(SttTool));
@@ -233,7 +249,7 @@ impl ToolRegistry {
         self.register(Box::new(GidWorkingMemoryTool));
         self.register(Box::new(GidIgnoreTool { mgr: mgr.clone() }));
         self.register(Box::new(GidScopeTool));
-        self.register(Box::new(GidInferTool { mgr: mgr.clone() }));
+        self.register(Box::new(GidInferTool { mgr: mgr.clone(), llm_client: self.llm_client.clone() }));
 
         // Context assembly tools
         self.register(Box::new(GidContextTool { mgr: mgr.clone() }));
@@ -1934,6 +1950,469 @@ impl Tool for EngramSoulSuggestionsTool {
     }
 }
 
+// ─── Knowledge Compiler Tools ────────────────────────────────
+
+use engramai::compiler::{
+    api::{MaintenanceApi, QueryOpts},
+    compilation::{MemorySnapshot, simple_hash_embedding},
+    discovery::TopicDiscovery,
+    storage::SqliteKnowledgeStore,
+    llm::{NoopProvider, LlmProvider as KcLlmProvider},
+    types::{LlmRequest as KcLlmRequest, LlmResponse as KcLlmResponse, LlmError as KcLlmError, ProviderMetadata as KcProviderMetadata, TokenUsage as KcTokenUsage},
+    KcConfig,
+    KnowledgeStore as _,
+};
+
+/// LLM provider for Knowledge Compiler that wraps RustClaw's LlmClient.
+/// Bridges async LlmClient → sync KcLlmProvider via block_in_place.
+struct RustClawKcProvider {
+    client: Box<dyn crate::llm::LlmClient>,
+    runtime: tokio::runtime::Handle,
+    model: String,
+}
+
+impl KcLlmProvider for RustClawKcProvider {
+    fn complete(&self, request: &KcLlmRequest) -> Result<KcLlmResponse, KcLlmError> {
+        let system = match &request.task {
+            engramai::compiler::types::LlmTask::GenerateTitle =>
+                "You are a title generator. Produce a short, descriptive title for the provided content. Respond with ONLY the title, nothing else.",
+            engramai::compiler::types::LlmTask::Compile =>
+                "You are a knowledge compiler. Synthesize the provided memories into a coherent topic page.",
+            engramai::compiler::types::LlmTask::Summarize =>
+                "You are a summarizer. Produce a concise summary of the provided content.",
+            _ => "You are a helpful assistant.",
+        };
+
+        let messages = vec![crate::llm::Message::text("user", &request.prompt)];
+
+        let start = std::time::Instant::now();
+        let result = tokio::task::block_in_place(|| {
+            self.runtime.block_on(
+                self.client.chat_with_model(system, &messages, &[], &self.model)
+            )
+        });
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        match result {
+            Ok(resp) => {
+                let content = resp.text.unwrap_or_default();
+                Ok(KcLlmResponse {
+                    content,
+                    usage: KcTokenUsage {
+                        input_tokens: resp.usage.input_tokens,
+                        output_tokens: resp.usage.output_tokens,
+                    },
+                    model: self.model.clone(),
+                    duration_ms,
+                })
+            }
+            Err(e) => Err(KcLlmError::ProviderUnavailable(e.to_string())),
+        }
+    }
+
+    fn metadata(&self) -> KcProviderMetadata {
+        KcProviderMetadata {
+            name: "rustclaw".to_string(),
+            model: self.model.clone(),
+            max_context_tokens: 200000,
+            supports_streaming: false,
+        }
+    }
+
+    fn health_check(&self) -> Result<(), KcLlmError> {
+        Ok(()) // RustClaw client handles auth internally
+    }
+}
+
+/// Query compiled knowledge topics.
+pub struct KnowledgeQueryTool {
+    memory: Arc<MemoryManager>,
+}
+
+impl KnowledgeQueryTool {
+    pub fn new(memory: Arc<MemoryManager>) -> Self {
+        Self { memory }
+    }
+}
+
+#[async_trait]
+impl Tool for KnowledgeQueryTool {
+    fn name(&self) -> &str {
+        "knowledge_query"
+    }
+
+    fn description(&self) -> &str {
+        "Search compiled knowledge topics. Knowledge Compiler aggregates related memories into structured topic pages for efficient retrieval."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query to find relevant knowledge topics"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of topics to return (default: 10)"
+                }
+            },
+            "required": ["query"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let query = input["query"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing 'query' parameter"))?;
+        let limit = input["limit"].as_u64().unwrap_or(10) as usize;
+
+        let db_path = self.memory.db_path().to_string();
+        let store = SqliteKnowledgeStore::open(std::path::Path::new(&db_path))
+            .map_err(|e| anyhow::anyhow!("Failed to open KC store: {}", e))?;
+        store.init_schema()
+            .map_err(|e| anyhow::anyhow!("Failed to init KC schema: {}", e))?;
+
+        let config = KcConfig::load();
+        let api = MaintenanceApi::new(store, config);
+        let opts = QueryOpts { limit, include_archived: false };
+
+        match api.query(query, &opts) {
+            Ok(results) => {
+                if results.is_empty() {
+                    return Ok(ToolResult {
+                        output: format!("No knowledge topics matching '{}'.", query),
+                        is_error: false,
+                    });
+                }
+
+                let mut output = format!("Found {} knowledge topics:\n\n", results.len());
+                for r in &results {
+                    output.push_str(&format!(
+                        "- [{}] {} (status: {:?}, relevance: {:.1})\n",
+                        r.topic_id, r.title, r.status, r.relevance
+                    ));
+                    if !r.summary.is_empty() {
+                        let preview: String = r.summary.chars().take(120).collect();
+                        output.push_str(&format!("  {}\n", preview));
+                    }
+                }
+                Ok(ToolResult { output, is_error: false })
+            }
+            Err(e) => Ok(ToolResult {
+                output: format!("Knowledge query failed: {}", e),
+                is_error: true,
+            }),
+        }
+    }
+}
+
+/// List all compiled knowledge topics.
+pub struct KnowledgeListTool {
+    memory: Arc<MemoryManager>,
+}
+
+impl KnowledgeListTool {
+    pub fn new(memory: Arc<MemoryManager>) -> Self {
+        Self { memory }
+    }
+}
+
+#[async_trait]
+impl Tool for KnowledgeListTool {
+    fn name(&self) -> &str {
+        "knowledge_list"
+    }
+
+    fn description(&self) -> &str {
+        "List all compiled knowledge topics with their status and quality scores."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of topics to list (default: 50)"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let limit = input["limit"].as_u64().unwrap_or(50) as usize;
+
+        let db_path = self.memory.db_path().to_string();
+        let store = SqliteKnowledgeStore::open(std::path::Path::new(&db_path))
+            .map_err(|e| anyhow::anyhow!("Failed to open KC store: {}", e))?;
+        store.init_schema()
+            .map_err(|e| anyhow::anyhow!("Failed to init KC schema: {}", e))?;
+
+        let config = KcConfig::load();
+        let api = MaintenanceApi::new(store, config);
+
+        match api.list() {
+            Ok(pages) => {
+                let total = pages.len();
+                let shown: Vec<_> = pages.into_iter().take(limit).collect();
+
+                let mut output = format!("Knowledge Base: {} topics total\n\n", total);
+                for page in &shown {
+                    let quality = page.metadata.quality_score
+                        .map(|s| format!(" q={:.2}", s))
+                        .unwrap_or_default();
+                    let sources = page.metadata.source_memory_ids.len();
+                    output.push_str(&format!(
+                        "- [{}] {} (v{}, {:?}, {} sources{})\n",
+                        page.id.0, page.title, page.version, page.status, sources, quality
+                    ));
+                }
+                if total > limit {
+                    output.push_str(&format!("\n... and {} more topics", total - limit));
+                }
+                Ok(ToolResult { output, is_error: false })
+            }
+            Err(e) => Ok(ToolResult {
+                output: format!("Failed to list knowledge topics: {}", e),
+                is_error: true,
+            }),
+        }
+    }
+}
+
+/// Get knowledge base health report.
+pub struct KnowledgeHealthTool {
+    memory: Arc<MemoryManager>,
+}
+
+impl KnowledgeHealthTool {
+    pub fn new(memory: Arc<MemoryManager>) -> Self {
+        Self { memory }
+    }
+}
+
+#[async_trait]
+impl Tool for KnowledgeHealthTool {
+    fn name(&self) -> &str {
+        "knowledge_health"
+    }
+
+    fn description(&self) -> &str {
+        "Get a health report for the knowledge base: stale topics, conflicts, decay status, and quality metrics."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {}
+        })
+    }
+
+    async fn execute(&self, _input: Value) -> anyhow::Result<ToolResult> {
+        let db_path = self.memory.db_path().to_string();
+        let store = SqliteKnowledgeStore::open(std::path::Path::new(&db_path))
+            .map_err(|e| anyhow::anyhow!("Failed to open KC store: {}", e))?;
+        store.init_schema()
+            .map_err(|e| anyhow::anyhow!("Failed to init KC schema: {}", e))?;
+
+        let config = KcConfig::load();
+        let api = MaintenanceApi::new(store, config);
+
+        match api.health_report() {
+            Ok(report) => {
+                let mut output = format!(
+                    "Knowledge Base Health Report:\n\
+                     \n  Total topics: {}\
+                     \n  Stale topics: {}\
+                     \n  Conflicts: {}\
+                     \n  Broken links: {}\n",
+                    report.total_topics,
+                    report.stale_topics.len(),
+                    report.conflicts.len(),
+                    report.broken_links.len(),
+                );
+                if !report.recommendations.is_empty() {
+                    output.push_str(&format!("\n  Recommendations ({}):\n", report.recommendations.len()));
+                    for rec in &report.recommendations {
+                        output.push_str(&format!("    - [P{}] {} — {}\n", rec.priority, rec.action, rec.reason));
+                    }
+                }
+                Ok(ToolResult { output, is_error: false })
+            }
+            Err(e) => Ok(ToolResult {
+                output: format!("Health report failed: {}", e),
+                is_error: true,
+            }),
+        }
+    }
+}
+
+/// Compile memories into knowledge topics.
+pub struct KnowledgeCompileTool {
+    memory: Arc<MemoryManager>,
+    llm_client: Arc<tokio::sync::RwLock<Option<Box<dyn crate::llm::LlmClient>>>>,
+}
+
+impl KnowledgeCompileTool {
+    pub fn new(memory: Arc<MemoryManager>, llm_client: Arc<tokio::sync::RwLock<Option<Box<dyn crate::llm::LlmClient>>>>) -> Self {
+        Self { memory, llm_client }
+    }
+}
+
+#[async_trait]
+impl Tool for KnowledgeCompileTool {
+    fn name(&self) -> &str {
+        "knowledge_compile"
+    }
+
+    fn description(&self) -> &str {
+        "Compile raw memories into structured knowledge topics. Discovers clusters of related memories and synthesizes them into topic pages. Use dry_run=true to preview without changes."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Preview what would be compiled without making changes (default: false)"
+                },
+                "topic": {
+                    "type": "string",
+                    "description": "Recompile a specific topic by ID (optional — if omitted, runs auto-discovery)"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, input: Value) -> anyhow::Result<ToolResult> {
+        let dry_run = input["dry_run"].as_bool().unwrap_or(false);
+        let _topic_id = input["topic"].as_str().map(String::from);
+
+        let db_path = self.memory.db_path().to_string();
+
+        // Load all memories
+        let engram = self.memory.lock_engram()?;
+        let all_memories = engram.list_ns(None, None)
+            .map_err(|e| anyhow::anyhow!("Failed to list memories: {}", e))?;
+        drop(engram);
+
+        if all_memories.is_empty() {
+            return Ok(ToolResult {
+                output: "No memories found. Nothing to compile.".to_string(),
+                is_error: false,
+            });
+        }
+
+        // Load embeddings
+        let storage = engramai::storage::Storage::new(&db_path)
+            .map_err(|e| anyhow::anyhow!("Failed to open storage: {}", e))?;
+        let emb_config = engramai::embeddings::EmbeddingConfig::default();
+        let model_id = emb_config.model_id();
+        let embedding_map: std::collections::HashMap<String, Vec<f32>> = storage
+            .get_all_embeddings(&model_id)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+        // Convert to snapshots
+        let snapshots: Vec<MemorySnapshot> = all_memories.iter().map(|m| {
+            let tags = m.metadata.as_ref()
+                .and_then(|v| v.get("tags"))
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            MemorySnapshot {
+                id: m.id.clone(),
+                content: m.content.clone(),
+                memory_type: format!("{:?}", m.memory_type).to_lowercase(),
+                importance: m.importance,
+                created_at: m.created_at,
+                updated_at: m.created_at,
+                tags,
+                embedding: embedding_map.get(&m.id).cloned(),
+            }
+        }).collect();
+
+        let store = SqliteKnowledgeStore::open(std::path::Path::new(&db_path))
+            .map_err(|e| anyhow::anyhow!("Failed to open KC store: {}", e))?;
+        store.init_schema()
+            .map_err(|e| anyhow::anyhow!("Failed to init KC schema: {}", e))?;
+
+        let config = KcConfig::load();
+        let api = MaintenanceApi::new(store, config);
+
+        if dry_run {
+            // Use discovery to preview clusters
+            let discovery = TopicDiscovery::new(3);
+            let embeddings: Vec<(String, Vec<f32>)> = snapshots.iter()
+                .map(|m| {
+                    let emb = m.embedding.clone()
+                        .unwrap_or_else(|| simple_hash_embedding(&m.content, 64));
+                    (m.id.clone(), emb)
+                })
+                .collect();
+            let candidates = discovery.discover(&embeddings);
+
+            let mut output = format!(
+                "Dry run: {} memories → {} potential topics\n\n",
+                snapshots.len(), candidates.len()
+            );
+            for (i, c) in candidates.iter().enumerate().take(20) {
+                let title = c.suggested_title.as_deref().unwrap_or("(untitled)");
+                output.push_str(&format!("  {}. {} ({} memories)\n", i + 1, title, c.memories.len()));
+            }
+            if candidates.len() > 20 {
+                output.push_str(&format!("  ... and {} more candidates\n", candidates.len() - 20));
+            }
+            Ok(ToolResult { output, is_error: false })
+        } else {
+            // Create LLM provider for topic labeling — reuses RustClaw's LlmClient
+            let kc_provider: Option<Box<dyn KcLlmProvider>> = {
+                let guard = self.llm_client.blocking_read();
+                guard.as_ref().map(|client| {
+                    Box::new(RustClawKcProvider {
+                        client: client.clone_boxed(),
+                        runtime: tokio::runtime::Handle::current(),
+                        model: "claude-haiku-4-5-20251001".to_string(),
+                    }) as Box<dyn KcLlmProvider>
+                })
+            };
+
+            // Actually compile — use recompile_all to purge old topics first
+            let result = match &kc_provider {
+                Some(provider) => api.recompile_all_dyn(Some(provider.as_ref()), &snapshots),
+                None => api.recompile_all::<NoopProvider>(None, &snapshots),
+            };
+            match result {
+                Ok((purged, pages)) => {
+                    let mut output = if purged > 0 {
+                        format!("🔄 Purged {} old topics, compiled {} new topics:\n\n", purged, pages.len())
+                    } else {
+                        format!("✅ Compiled {} new topics:\n\n", pages.len())
+                    };
+                    for p in &pages {
+                        let quality = p.metadata.quality_score
+                            .map(|s| format!(" q={:.2}", s))
+                            .unwrap_or_default();
+                        output.push_str(&format!(
+                            "  [{}] {} (v{}{})\n",
+                            p.id.0, p.title, p.version, quality
+                        ));
+                    }
+                    Ok(ToolResult { output, is_error: false })
+                }
+                Err(e) => Ok(ToolResult {
+                    output: format!("Compilation failed: {}", e),
+                    is_error: true,
+                }),
+            }
+        }
+    }
+}
+
 // ─── TTS (Text-to-Speech) Tool ───────────────────────────────
 
 /// Text-to-Speech tool using edge-tts.
@@ -2114,7 +2593,7 @@ impl Tool for DelegateTaskTool {
         let priority = input["priority"].as_u64().unwrap_or(100) as u8;
         let budget_tokens = input["budget_tokens"].as_u64();
         let timeout_secs = input["timeout_secs"].as_u64().unwrap_or(600);
-        let wait = input["wait"].as_bool().unwrap_or(true);
+        let wait = true; // Always wait — fire-and-forget disabled (produces blind spots)
 
         // Generate task ID
         let task_id = format!("task_{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
@@ -2289,7 +2768,8 @@ impl Tool for SpawnSpecialistTool {
                 },
                 "wait": {
                     "type": "boolean",
-                    "description": "Whether to wait for completion (default: true). If false, returns immediately with task ID."
+                    "description": "Whether to wait for completion (default: true). Set to false for fire-and-forget.",
+                    "deprecated": true
                 },
                 "skill": {
                     "type": "string",
@@ -2375,7 +2855,7 @@ impl Tool for SpawnSpecialistTool {
         } else {
             vec![]
         };
-        let wait = input["wait"].as_bool().unwrap_or(true);
+        let wait = true; // Always wait — fire-and-forget disabled (produces blind spots)
 
         // Generate a unique task/session ID
         let task_id = format!("spawn_{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
@@ -3793,16 +4273,56 @@ impl Tool for GidExtractTool {
         let canonical_ws = workspace_dir.canonicalize().unwrap_or_else(|_| workspace_dir.to_path_buf());
         let is_external = !canonical_dir.starts_with(&canonical_ws);
 
-        // Extract code graph from directory
-        let code_graph = CodeGraph::extract_from_dir(dir_path);
+        // Resolve project root and .gid/ directory for incremental extraction
+        let project_root = if is_external {
+            find_project_root(dir_path).unwrap_or_else(|| dir_path.to_path_buf())
+        } else {
+            workspace_dir.to_path_buf()
+        };
+        let gid_dir = project_root.join(".gid");
+        std::fs::create_dir_all(&gid_dir)?;
+        let meta_path = gid_dir.join("extract-meta.json");
+
+        // Extract code graph incrementally (matches CLI behavior)
+        let (mut code_graph, report) = match CodeGraph::extract_incremental(dir_path, &gid_dir, &meta_path, false) {
+            Ok((cg, rpt)) => (cg, rpt.to_string()),
+            Err(e) => {
+                // Fallback to full extract if incremental fails
+                tracing::warn!("Incremental extract failed ({}), falling back to full extract", e);
+                let cg = CodeGraph::extract_from_dir(dir_path);
+                let fallback_report = format!("Full rebuild (incremental failed: {})", e);
+                (cg, fallback_report)
+            }
+        };
+
+        // LSP refinement pass (default on, matches CLI behavior)
+        let lsp_info = match code_graph.refine_with_lsp(&canonical_dir) {
+            Ok(stats) => {
+                let mut info = if stats.refined > 0 || stats.removed > 0 || stats.references_edges_added > 0 || stats.implementation_edges_added > 0 {
+                    format!(
+                        "\n  - LSP: {} refined, {} removed, {} ref edges, {} impl edges",
+                        stats.refined, stats.removed,
+                        stats.references_edges_added, stats.implementation_edges_added,
+                    )
+                } else {
+                    "\n  - LSP: no changes needed".to_string()
+                };
+                if !stats.missing_servers.is_empty() {
+                    let langs: Vec<&str> = stats.missing_servers.iter().map(|m| m.language_id.as_str()).collect();
+                    info.push_str(&format!("\n  - ⚠️ Missing LSP servers: {}", langs.join(", ")));
+                }
+                info
+            }
+            Err(e) => {
+                format!("\n  - LSP refinement skipped: {}", e)
+            }
+        };
+
         let code_nodes = code_graph.nodes.len();
         let code_edges = code_graph.edges.len();
 
         if is_external {
-            // External project: find project root and write to its own .gid/ (auto-detect backend)
-            let project_root = find_project_root(dir_path).unwrap_or_else(|| dir_path.to_path_buf());
-            let gid_dir = project_root.join(".gid");
-            std::fs::create_dir_all(&gid_dir)?;
+            // External project: write to its own .gid/
             let ext_backend = detect_backend(&gid_dir);
             let target_graph_path = match ext_backend {
                 StorageBackend::Sqlite => gid_dir.join("graph.db"),
@@ -3827,8 +4347,8 @@ impl Tool for GidExtractTool {
 
             Ok(ToolResult {
                 output: format!(
-                    "✅ Code extraction complete (external project):\n  - Analyzed: {}\n  - Found: {} code nodes, {} edges\n  - Existing graph: {} nodes, {} edges\n  - New unified: {} nodes, {} edges\n  - Saved to: {}",
-                    dir, code_nodes, code_edges,
+                    "✅ Code extraction complete (external project):\n  - Analyzed: {}\n  - Extract: {}\n  - Found: {} code nodes, {} edges{}\n  - Existing graph: {} nodes, {} edges\n  - New unified: {} nodes, {} edges\n  - Saved to: {}",
+                    dir, report, code_nodes, code_edges, lsp_info,
                     existing_nodes, existing_edges,
                     total_nodes, total_edges,
                     target_graph_path.display()
@@ -3836,7 +4356,7 @@ impl Tool for GidExtractTool {
                 is_error: false,
             })
         } else {
-            // Internal: merge into workspace graph (original behavior)
+            // Internal: merge into workspace graph
             let mut graph = graph_arc.write().await;
             let existing_nodes = graph.nodes.len();
             let existing_edges = graph.edges.len();
@@ -3850,8 +4370,8 @@ impl Tool for GidExtractTool {
 
             Ok(ToolResult {
                 output: format!(
-                    "✅ Code extraction complete:\n  - Analyzed: {} (found {} code nodes, {} edges)\n  - Existing graph: {} nodes, {} edges\n  - New unified: {} nodes, {} edges\n  - Added: {} nodes, {} edges",
-                    dir, code_nodes, code_edges,
+                    "✅ Code extraction complete:\n  - Analyzed: {}\n  - Extract: {}\n  - Found: {} code nodes, {} edges{}\n  - Existing graph: {} nodes, {} edges\n  - New unified: {} nodes, {} edges\n  - Added: {} nodes, {} edges",
+                    dir, report, code_nodes, code_edges, lsp_info,
                     existing_nodes, existing_edges,
                     graph.nodes.len(), graph.edges.len(),
                     new_nodes, new_edges
@@ -4717,35 +5237,61 @@ impl Tool for GidScopeTool {
 
 // ── gid_infer: run infer pipeline (clustering → labeling → merge) ──
 
-/// Bridge: SimpleLlm trait → claude CLI for the infer pipeline.
-/// Same approach as gid-cli's CliSimpleLlm.
-struct CliSimpleLlm {
-    model: String,
+/// Bridge: gid-core's SimpleLlm trait → RustClaw's LlmClient.
+/// Uses the existing Anthropic client (with auth, connection pool, retries)
+/// instead of shelling out to `claude` CLI which deadlocks in non-tty environments.
+struct RustClawSimpleLlm {
+    client: Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>,
 }
 
 #[async_trait]
-impl infer::SimpleLlm for CliSimpleLlm {
+impl infer::SimpleLlm for RustClawSimpleLlm {
     async fn complete(&self, prompt: &str) -> anyhow::Result<String> {
-        let output = tokio::process::Command::new("claude")
-            .arg("-p")
-            .arg(prompt)
-            .arg("--model")
-            .arg(&self.model)
-            .output()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to run claude CLI (is it installed?): {}", e))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("claude CLI failed: {}", stderr);
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        use crate::llm::Message;
+        // Eagerly log that complete() was called
+        let debug_path = "/tmp/rustclaw-infer-debug.log";
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(debug_path)
+            .and_then(|mut f| {
+                use std::io::Write;
+                writeln!(f, "\n=== COMPLETE CALLED (prompt: {} chars) ===", prompt.len())
+            });
+        let client = self.client.read().await;
+        let messages = vec![Message::text("user", prompt)];
+        let response = match client.chat_with_model("", &messages, &[], "claude-sonnet-4-5-20250929").await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(debug_path)
+                    .and_then(|mut f| {
+                        use std::io::Write;
+                        writeln!(f, "=== LLM ERROR: {:?} ===", e)
+                    });
+                return Err(e);
+            }
+        };
+        let text = response.text.unwrap_or_default();
+        // Debug: write LLM exchange to file for debugging
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(debug_path)
+            .and_then(|mut f| {
+                use std::io::Write;
+                writeln!(f, "=== RESPONSE ({} chars) ===\n{}\n=== END ===",
+                    text.len(), text)
+            });
+        Ok(text)
     }
 }
 
 struct GidInferTool {
     mgr: Arc<GraphManager>,
+    llm_client: Option<Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>>,
 }
 
 #[async_trait]
@@ -4792,6 +5338,10 @@ impl Tool for GidInferTool {
                 "max_cluster_size": {
                     "type": "integer",
                     "description": "Maximum files per component. Clusters exceeding this are sub-clustered. Default: auto = max(20, total_files/5)"
+                },
+                "min_naming_size": {
+                    "type": "integer",
+                    "description": "Minimum files in a component to use LLM naming (smaller ones use auto-name). Default: 3"
                 },
                 "rollback_batch": {
                     "type": "string",
@@ -4854,9 +5404,17 @@ impl Tool for GidInferTool {
             cluster_config.max_cluster_size = Some(max as usize);
         }
 
+        let labeling_config = if level == InferLevel::Component {
+            None
+        } else {
+            let lc = infer::LabelingConfig::default();
+            // min_naming_size removed from LabelingConfig in gid-core 0.3.2
+            Some(lc)
+        };
+
         let config = InferConfig {
             clustering: cluster_config,
-            labeling: if level == InferLevel::Component { None } else { Some(Default::default()) },
+            labeling: labeling_config,
             level,
             format,
             dry_run,
@@ -4867,11 +5425,17 @@ impl Tool for GidInferTool {
         let (graph_arc, path) = self.mgr.resolve(&input).await?;
         let graph = graph_arc.read().await;
 
-        // Build LLM client for labeling (uses `claude` CLI, same as gid-cli)
-        let llm_client: Option<CliSimpleLlm> = if level == InferLevel::Component {
+        // Build LLM client for labeling — uses RustClaw's existing Anthropic client
+        // (ISS-013: replaces CliLlm which deadlocked in non-tty environments)
+        let llm_client: Option<RustClawSimpleLlm> = if level == InferLevel::Component {
+            let _ = std::fs::write("/tmp/rustclaw-infer-debug.log", "LLM skipped: level=Component\n");
             None
+        } else if let Some(ref client) = self.llm_client {
+            let _ = std::fs::write("/tmp/rustclaw-infer-debug.log", "LLM client found, creating RustClawSimpleLlm\n");
+            Some(RustClawSimpleLlm { client: client.clone() })
         } else {
-            Some(CliSimpleLlm { model: "sonnet".to_string() })
+            let _ = std::fs::write("/tmp/rustclaw-infer-debug.log", "LLM client is NONE! bail!\n");
+            anyhow::bail!("Feature-level inference requires LLM but no LLM client configured");
         };
         let result = infer::run(&graph, &config, llm_client.as_ref().map(|c| c as &dyn infer::SimpleLlm)).await.map_err(|e| {
             anyhow::anyhow!("Infer pipeline failed: {}", e)

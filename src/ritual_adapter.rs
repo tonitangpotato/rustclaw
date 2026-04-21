@@ -38,7 +38,7 @@ impl GidLlmClient for RitualLlmAdapter {
         // Resolve model aliases to full model names
         let resolved_model: &str = match model {
             "sonnet" => "claude-sonnet-4-5-20250929",
-            "opus" => "claude-opus-4-6",
+            "opus" => "claude-opus-4-7",
             "haiku" => "claude-haiku-3-5-20241022",
             other => other,
         };

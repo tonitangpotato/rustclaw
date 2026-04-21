@@ -996,9 +996,12 @@ impl RitualRunner {
                 _ => None,
             };
 
-            // implement/execute-tasks benefit from stronger model; others use sonnet
+            // implement/execute-tasks use the agent's current model; others use sonnet
             let model = match name {
-                "implement" | "execute-tasks" => Some("claude-opus-4-6".to_string()),
+                "implement" | "execute-tasks" => {
+                    let client = self.llm_client.read().await;
+                    Some(client.model_name().to_string())
+                }
                 _ => Some("claude-sonnet-4-5-20250929".to_string()),
             };
 

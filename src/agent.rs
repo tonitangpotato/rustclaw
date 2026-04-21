@@ -382,6 +382,76 @@ pub struct AgentRunner {
     pub tool_stats: Arc<crate::tool_stats::ToolStatsTracker>,
     /// Interoceptive signal emitter (Layer 1: runtime metric collection)
     pub signal_emitter: Arc<crate::interoceptive::SignalEmitter>,
+    /// Active regulation actions from the last interoceptive evaluation.
+    /// These are injected into the system prompt as behavioral directives.
+    active_regulation: Arc<RwLock<Vec<engramai::interoceptive::RegulationAction>>>,
+}
+
+/// Format regulation actions into a system prompt section with behavioral directives.
+///
+/// These directives tell the LLM what to do differently based on internal state.
+/// This is Layer 3 of the interoceptive system — the action layer.
+fn format_regulation_directives(actions: &[engramai::interoceptive::RegulationAction]) -> String {
+    use engramai::interoceptive::{AlertSeverity, RegulationAction};
+
+    if actions.is_empty() {
+        return String::new();
+    }
+
+    let mut lines = vec!["## ⚡ Active Regulation (self-correction directives)".to_string()];
+
+    for action in actions {
+        match action {
+            RegulationAction::BehaviorShift { recommendation, success_rate, .. } => {
+                lines.push(format!(
+                    "- **CHANGE APPROACH**: {} (success rate: {:.0}%). Do NOT retry the same strategy — try a fundamentally different method.",
+                    recommendation,
+                    success_rate * 100.0,
+                ));
+            }
+            RegulationAction::RetrievalAdjustment { reason, .. } => {
+                lines.push(format!(
+                    "- **EXPAND SEARCH**: {} Use broader recall queries. Check more sources before answering.",
+                    reason,
+                ));
+            }
+            RegulationAction::SoulUpdateSuggestion { domain, reason, .. } => {
+                lines.push(format!(
+                    "- **ATTENTION [{}]**: {} Consider whether current approach in this domain is productive.",
+                    domain, reason,
+                ));
+            }
+            RegulationAction::Alert { severity, message, .. } => {
+                let prefix = match severity {
+                    AlertSeverity::High => "🚨 URGENT",
+                    AlertSeverity::Medium => "⚠️ WARNING",
+                    AlertSeverity::Low => "ℹ️ NOTE",
+                };
+                lines.push(format!(
+                    "- **{}**: {} Diagnose the environment before continuing normal work.",
+                    prefix, message,
+                ));
+            }
+            RegulationAction::IdentityEvolutionSuggestion { aspect, observation, suggestion, confidence, .. } => {
+                lines.push(format!(
+                    "- **IDENTITY [{:?}]** (confidence: {:.0}%): {} → {}",
+                    aspect, confidence * 100.0, observation, suggestion,
+                ));
+            }
+            RegulationAction::HeartbeatFrequencyAdjustment { direction, interval_multiplier, reason, .. } => {
+                let dir_label = match direction {
+                    engramai::interoceptive::HeartbeatAdjustDirection::Increase => "INCREASE MONITORING",
+                    engramai::interoceptive::HeartbeatAdjustDirection::Decrease => "REDUCE MONITORING",
+                };
+                lines.push(format!(
+                    "- **HEARTBEAT {}** (×{:.2}): {}",
+                    dir_label, interval_multiplier, reason,
+                ));
+            }
+        }
+    }
+
+    lines.join("\n")
 }
 
 /// Persist large tool results to disk, replacing content with preview.
@@ -476,6 +546,7 @@ impl AgentRunner {
             subagent_events: subagent_tx,
             tool_stats: Arc::new(crate::tool_stats::ToolStatsTracker::new()),
             signal_emitter,
+            active_regulation: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -550,7 +621,12 @@ impl AgentRunner {
                 }
 
                 // Hot-reload workspace model display
-                // (workspace.model is used in system prompt to tell the agent what model it is)
+                // NOTE: workspace.model and runtime_ctx.model are plain fields (not behind RwLock),
+                // so they can't be updated through Arc<Self>. However, set_model() above already
+                // updates the LLM client (which is behind Arc<RwLock>), so the actual model used
+                // for inference is correct. The model name shown in the system prompt via
+                // runtime_ctx.format_for_prompt() will reflect the config value at next restart.
+                // TODO: Wrap runtime_ctx and workspace in Arc<RwLock> to enable full hot-reload.
             }
             tracing::warn!("Config reload listener exited");
         });
@@ -923,6 +999,20 @@ CRITICAL CONSTRAINTS:
             system_prompt.push_str("\n");
             system_prompt.push_str(intero_formatted);
         }
+        // Inject output productivity warnings (假忙/repeat-read/spawn-blind detection)
+        if let Some(warning) = self.signal_emitter.output_productivity.get_warnings() {
+            system_prompt.push_str("\n## ⚠️ Productivity Alert\n");
+            system_prompt.push_str(&warning);
+            system_prompt.push_str("\n**Stop reading. Start writing. If context is sufficient, produce output NOW.**\n");
+        }
+        // Inject active regulation directives (Layer 3: behavioral modulation)
+        {
+            let reg_actions = self.active_regulation.read().await;
+            if !reg_actions.is_empty() {
+                system_prompt.push_str("\n");
+                system_prompt.push_str(&format_regulation_directives(&reg_actions));
+            }
+        }
         if !recent_memory_context.is_empty() {
             system_prompt.push_str("\n");
             system_prompt.push_str(&recent_memory_context);
@@ -1229,6 +1319,26 @@ CRITICAL CONSTRAINTS:
             // Add tool results as user message
             session.messages.push(Message::tool_results(tool_results));
 
+            // Mid-loop regulation: check execution stress after tool execution.
+            // If stress is extreme (consecutive failures, high retry count),
+            // inject a behavioral directive into the conversation.
+            {
+                let stress = &self.signal_emitter.execution_stress;
+                let consec = stress.consecutive_failures();
+                if consec >= 3 {
+                    let warning = format!(
+                        "[SYSTEM: {} consecutive tool failures detected. \
+                         STOP retrying the same approach. \
+                         Change strategy fundamentally: different tool, different method, \
+                         or ask the user for clarification. \
+                         Do not apologize — just switch approach.]",
+                        consec
+                    );
+                    tracing::warn!("Mid-loop regulation: {} consecutive failures", consec);
+                    session.messages.push(Message::text("user", &warning));
+                }
+            }
+
             // Check for queued messages (messages sent while agent was busy)
             let queued = self.message_queues.drain(session_key).await;
             if !queued.is_empty() {
@@ -1262,6 +1372,30 @@ CRITICAL CONSTRAINTS:
                 if let Err(e) = self.memory.feed_interoceptive_signal(sig) {
                     tracing::debug!("Interoceptive signal feed failed (non-fatal): {}", e);
                 }
+            }
+        }
+
+        // Layer 3: Evaluate regulation and store active actions for next request
+        match self.memory.interoceptive_regulate() {
+            Ok(actions) => {
+                if !actions.is_empty() {
+                    tracing::info!("Interoceptive regulation: {} action(s)", actions.len());
+                    for action in &actions {
+                        match action {
+                            engramai::interoceptive::RegulationAction::BehaviorShift { action, recommendation, .. } => {
+                                tracing::info!("⚡ Behavior shift [{}]: {}", action, recommendation);
+                            }
+                            engramai::interoceptive::RegulationAction::Alert { severity, message, .. } => {
+                                tracing::warn!("🚨 Alert [{}]: {}", severity, message);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                *self.active_regulation.write().await = actions;
+            }
+            Err(e) => {
+                tracing::debug!("Interoceptive regulation failed (non-fatal): {}", e);
             }
         }
 
@@ -1475,6 +1609,13 @@ CRITICAL CONSTRAINTS:
                     // Feed interoceptive signal emitter
                     self.signal_emitter.execution_stress.record_tool_outcome(!tool_result.is_error);
 
+                    // Feed output productivity meter
+                    let first_arg = tc.input.get("path")
+                        .or_else(|| tc.input.get("query"))
+                        .or_else(|| tc.input.get("pattern"))
+                        .and_then(|v| v.as_str());
+                    self.signal_emitter.output_productivity.record_tool_call(&tc.name, first_arg);
+
                     let output = if tc.name == "web_fetch" {
                         wrap_external_content("web_fetch", &sanitized.content)
                     } else {
@@ -1501,6 +1642,9 @@ CRITICAL CONSTRAINTS:
 
                     // Feed interoceptive signal emitter
                     self.signal_emitter.execution_stress.record_tool_outcome(false);
+
+                    // Feed output productivity meter (still track the attempt)
+                    self.signal_emitter.output_productivity.record_tool_call(&tc.name, None);
 
                     let _ = tx.send(AgentEvent::ToolDone {
                         name: tc.name.clone(),
