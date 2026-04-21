@@ -1,11 +1,22 @@
 /target
 rustclaw.yaml
+rustclaw-*.yaml
+!rustclaw.example.yaml
 *.db
+*.db-wal
+*.db-shm
+*.db-journal
 .env
+.env.*
+
+# Backup / scratch files
+*.bak
+*.orig
+*.swp
 
 # Runtime data (not source code)
 engram-memory.db*
-sessions.db
+sessions.db*
 target/
 *.ogg
 *.mp3
