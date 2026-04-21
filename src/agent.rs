@@ -481,7 +481,7 @@ impl AgentRunner {
         memory: Arc<MemoryManager>,
         sessions: SessionManager,
         hooks: HookRegistry,
-        tools: ToolRegistry,
+        mut tools: ToolRegistry,
     ) -> Self {
         let llm_client = llm::create_client(&config.llm).expect("Failed to create LLM client");
 
@@ -511,6 +511,39 @@ impl AgentRunner {
         // Set model name in workspace for system prompt
         workspace.model = Some(config.llm.model.clone());
 
+        // Build ritual registry from config (ISS-016) — only if at least one
+        // project root is configured. When the list is empty, ritual awareness
+        // is disabled and no section is injected.
+        if !config.ritual.known_project_roots.is_empty() {
+            use std::time::Duration;
+            let reg_cfg = crate::ritual_registry::RitualRegistryConfig {
+                known_roots: config
+                    .ritual
+                    .known_project_roots
+                    .iter()
+                    .map(std::path::PathBuf::from)
+                    .collect(),
+                ttl: Duration::from_secs(config.ritual.registry_ttl_secs),
+                stuck_threshold: Duration::from_secs(config.ritual.stuck_threshold_secs),
+                dead_threshold: Duration::from_secs(config.ritual.dead_threshold_secs),
+            };
+            tracing::info!(
+                "Ritual registry enabled: {} root(s) tracked (ttl={}s, stuck={}s)",
+                reg_cfg.known_roots.len(),
+                config.ritual.registry_ttl_secs,
+                config.ritual.stuck_threshold_secs,
+            );
+            let registry = std::sync::Arc::new(
+                crate::ritual_registry::RitualRegistry::new(reg_cfg),
+            );
+            workspace.ritual_registry = Some(registry.clone());
+            // Late-bind the registry into the tool registry so StartRitualTool
+            // can invalidate the cache when a ritual is started/finished.
+            if let Ok(mut slot) = tools.ritual_registry.lock() {
+                *slot = Some(registry);
+            }
+        }
+
         let runtime_ctx = crate::context::RuntimeContext::detect(&config.llm.model);
 
         let voice_mode_path = std::path::Path::new(&std::env::var("HOME").unwrap_or_default())
@@ -518,7 +551,6 @@ impl AgentRunner {
         let voice_mode = crate::voice_mode::VoiceMode::new(voice_mode_path);
 
         let (subagent_tx, _) = tokio::sync::broadcast::channel(16);
-        let mut tools = tools;
         tools.subagent_event_tx = Some(subagent_tx.clone());
 
         // Initialize interoceptive signal emitter with hourly token budget

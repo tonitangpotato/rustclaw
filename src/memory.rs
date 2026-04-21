@@ -615,23 +615,52 @@ impl MemoryManager {
     /// Recall recent memories by creation time (no query/embedding needed).
     /// Used for session startup: injects the most recent N memories as context
     /// so the agent doesn't start from zero after a restart.
+    ///
+    /// Applies light filtering to reduce operational noise: over-fetches from the
+    /// DB (≈2.5×) then drops short/boilerplate/duplicate memories before truncating
+    /// back to `limit`. See ISS-014.
     pub fn recall_recent(&self, limit: usize) -> anyhow::Result<Vec<RecalledMemory>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        // Over-fetch so filtering can discard noise without starving the result.
+        let fetch_limit = (limit.saturating_mul(5) / 2).max(limit + 5);
         let engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
         let records = engram
-            .recall_recent(limit, None)
+            .recall_recent(fetch_limit, None)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
+        drop(engram);
 
-        Ok(records
-            .into_iter()
-            .map(|r| RecalledMemory {
+        let mut out: Vec<RecalledMemory> = Vec::with_capacity(limit);
+        let mut seen_prefixes: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for r in records.into_iter() {
+            if out.len() >= limit {
+                break;
+            }
+            if !is_continuity_worthy(&r.content) {
+                continue;
+            }
+            // Deduplicate by content prefix (first 60 chars normalized) so repeated
+            // near-identical memories don't crowd out distinct signals.
+            let key: String = r
+                .content
+                .chars()
+                .take(60)
+                .flat_map(|c| c.to_lowercase())
+                .collect();
+            if !seen_prefixes.insert(key) {
+                continue;
+            }
+            out.push(RecalledMemory {
                 content: r.content.clone(),
                 memory_type: format!("{:?}", r.memory_type),
                 confidence: r.importance,
                 source: Some(r.source.clone()),
                 confidence_label: Some("recent".to_string()),
                 created_at: Some(r.created_at.to_rfc3339()),
-            })
-            .collect())
+            });
+        }
+        Ok(out)
     }
 
     /// Format recent memories for session startup injection.
@@ -641,7 +670,7 @@ impl MemoryManager {
             return String::new();
         }
 
-        let mut lines = Vec::with_capacity(memories.len() + 3);
+        let mut lines = Vec::with_capacity(memories.len() + 5);
         lines.push(String::new());
         lines.push("## 🧠 Recent Memories (session startup — most recent first)".to_string());
         lines.push("These are your most recent memories, loaded automatically to maintain continuity across restarts.".to_string());
@@ -659,6 +688,19 @@ impl MemoryManager {
                 None => lines.push(format!("- [{}] {}", type_tag, mem.content)),
             }
         }
+
+        // ISS-014 Fix 4: continuity instruction. When a fresh session starts and
+        // these memories are injected, proactively signal to the user what we
+        // were last doing instead of waiting to be asked.
+        lines.push(String::new());
+        lines.push(
+            "**Continuity note**: This is the first message of a fresh session. \
+If the user's message is a greeting or an open prompt (e.g. \"hi\", \"继续\", \"你决定吧\"), \
+briefly summarize what you were last working on based on the memories above and \
+ask whether to continue. If the user already has a clear task, just do it — \
+don't force a continuity recap."
+                .to_string(),
+        );
 
         lines.join("\n")
     }
@@ -973,6 +1015,48 @@ impl MemoryManager {
     }
 }
 
+/// Heuristic: decide whether a recalled memory is worth injecting as
+/// continuity context on session startup. Filters out low-signal operational
+/// traces (tool logs, filesystem noise, very short fragments) that would
+/// crowd out genuine working-state memories.
+///
+/// Kept deliberately simple — better to keep one noisy memory than to drop
+/// a real one. Threshold-based, no regex gymnastics.
+fn is_continuity_worthy(content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.chars().count() < 25 {
+        return false;
+    }
+    // Compare against lowercased prefix. Most of these are emitted by the
+    // auto-store hook when the agent uses read/edit/search tools in a loop.
+    let lower = trimmed.to_lowercase();
+    const OPERATIONAL_PREFIXES: &[&str] = &[
+        "read file",
+        "reading file",
+        "listed directory",
+        "listing directory",
+        "executed command",
+        "executing command",
+        "ran command",
+        "ran shell",
+        "edited file",
+        "editing file",
+        "wrote file",
+        "writing file",
+        "search_files",
+        "searched for",
+        "grep ",
+        "ls ",
+        "cat ",
+    ];
+    for p in OPERATIONAL_PREFIXES {
+        if lower.starts_with(p) {
+            return false;
+        }
+    }
+    true
+}
+
 /// A recalled memory with metadata.
 #[derive(Debug, Clone)]
 pub struct RecalledMemory {
@@ -1011,6 +1095,26 @@ mod tests {
         assert!(matches!(MemoryManager::importance_to_layer(0.5), MemoryLayer::Working));
         assert!(matches!(MemoryManager::importance_to_layer(0.4), MemoryLayer::Archive));
         assert!(matches!(MemoryManager::importance_to_layer(0.1), MemoryLayer::Archive));
+    }
+
+    #[test]
+    fn test_continuity_filter_drops_operational_noise() {
+        // ISS-014: keep real working-state memories, drop tool-call noise.
+        assert!(!is_continuity_worthy("Read file src/agent.rs"));
+        assert!(!is_continuity_worthy("read file src/memory.rs at offset 100"));
+        assert!(!is_continuity_worthy("Listed directory /tmp"));
+        assert!(!is_continuity_worthy("Executed command ls -la"));
+        assert!(!is_continuity_worthy("grep 'foo' in bar.rs"));
+        // Too short — not informative
+        assert!(!is_continuity_worthy("ok"));
+        assert!(!is_continuity_worthy("short note"));
+        // Real memories kept
+        assert!(is_continuity_worthy(
+            "Working on ISS-014 session continuity fix — reducing recent memory limit"
+        ));
+        assert!(is_continuity_worthy(
+            "User asked about xinfluencer product status and timeline"
+        ));
     }
 }
 

@@ -196,10 +196,15 @@ impl RitualRunner {
     }
 
     /// Save state to disk (uses ritual ID for path).
+    /// Also stamps `adapter_pid` to the current process so the main agent's
+    /// `RitualRegistry` can detect whether it is the executor of a SingleLlm ritual.
     pub fn save_state(&self, state: &RitualState) -> Result<()> {
         std::fs::create_dir_all(&self.rituals_dir)?;
         let path = self.state_path_for(&state.id);
-        let data = serde_json::to_string_pretty(state)?;
+        // Stamp the current process PID without mutating the caller's state.
+        let mut stamped = state.clone();
+        stamped.adapter_pid = Some(std::process::id());
+        let data = serde_json::to_string_pretty(&stamped)?;
         std::fs::write(&path, data)?;
         Ok(())
     }

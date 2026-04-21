@@ -182,3 +182,35 @@ After fix:
 1. Restart RustClaw
 2. Send "hi" or "继续"
 3. Agent should respond with something like: "我回来了。刚才在处理 knowledge compiler 的 ID collision bug，已经修好并编译了，需要重启生效。要我继续跑 knowledge_compile 吗？"
+
+---
+
+## Implementation Notes (2026-04-20)
+
+**Status**: ✅ Fixed — all 4 fixes landed (Fix 1/3 were already done before this session).
+
+### What was done this session
+
+**Fix 2: Reduce limit + filter operational noise** (`src/memory.rs`)
+- `MemoryManager::recall_recent(limit)` now over-fetches `limit * 2.5` records, then filters.
+- New module-level helper `is_continuity_worthy(content)`:
+  - Drops memories shorter than 25 chars
+  - Drops operational-prefix memories: "Read file", "Listed directory", "Executed command", "Edited file", "Wrote file", "Searched for", "grep ", "ls ", "cat ", etc.
+- Content-prefix dedup (first 60 chars, lowercased) so repeated near-duplicates don't crowd out distinct signal.
+- Final result is still capped at `limit`.
+- `rustclaw.yaml` already had `recent_memory_limit: 20`.
+
+**Fix 4: Continuity behavior instruction** (`src/memory.rs::format_recent_for_prompt`)
+- Appended a "**Continuity note**" paragraph after the memory list, instructing the agent to:
+  - Summarize recent work and ask "continue?" on open/greeting prompts.
+  - Skip the recap if the user already has a clear task.
+
+### Tests
+- Added `test_continuity_filter_drops_operational_noise` — verifies filter drops operational noise and keeps real working-state memories.
+- 270/270 tests pass (was 269 — +1 new test).
+
+### Files Changed
+- `src/memory.rs` — `recall_recent` filtering + dedup, `format_recent_for_prompt` continuity note, new `is_continuity_worthy` helper, new unit test.
+
+### Verification approach
+Filter behavior is verified by unit test. End-to-end verification (agent recalls working state after restart) will happen organically in subsequent sessions.

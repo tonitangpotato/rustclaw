@@ -330,6 +330,9 @@ pub struct Workspace {
     /// SKM trigger strategy for matching (built from skill_registry).
     /// Wrapped in Arc because TriggerStrategy doesn't implement Clone.
     trigger_strategy: Option<Arc<TriggerStrategy>>,
+    /// Ritual registry for cross-workspace situational awareness (ISS-016).
+    /// None = ritual awareness disabled (no `known_project_roots` configured).
+    pub ritual_registry: Option<Arc<crate::ritual_registry::RitualRegistry>>,
 }
 
 impl std::fmt::Debug for Workspace {
@@ -358,6 +361,7 @@ impl Clone for Workspace {
             model: self.model.clone(),
             skill_registry: self.skill_registry.clone(),
             trigger_strategy: self.trigger_strategy.clone(),
+            ritual_registry: self.ritual_registry.clone(),
         }
     }
 }
@@ -424,6 +428,7 @@ impl Workspace {
             model: None,
             skill_registry,
             trigger_strategy,
+            ritual_registry: None,
             root,
         })
     }
@@ -751,6 +756,13 @@ impl Workspace {
                 .to_string(),
         );
 
+        // 8b. Active ritual status (ISS-016) — only present when ≥1 ritual is running.
+        if let Some(registry) = &self.ritual_registry {
+            if let Some(section) = registry.render_prompt_section() {
+                sections.push(section);
+            }
+        }
+
         // 9. Workspace files
         let mut ws = String::new();
         if let Some(soul) = &self.soul {
@@ -901,6 +913,7 @@ mod tests {
             model: None,
             skill_registry,
             trigger_strategy,
+            ritual_registry: None,
         };
 
         (tmp, ws)
@@ -1026,6 +1039,7 @@ mod tests {
             model: None,
             skill_registry: SkillRegistry::empty(),
             trigger_strategy: None,
+            ritual_registry: None,
         };
 
         let matched = ws.match_skills("anything", 5);
@@ -1076,6 +1090,7 @@ mod tests {
             model: None,
             skill_registry,
             trigger_strategy,
+            ritual_registry: None,
         };
 
         let matched = ws.match_skills("visit http://example.com/path?q=1", 5);

@@ -78,6 +78,10 @@ pub struct ToolRegistry {
     /// Shared mutable slot for ritual notify — set per-request with chat context,
     /// read by StartRitualTool at execution time.
     pub ritual_notify: Arc<std::sync::Mutex<Option<crate::ritual_runner::NotifyFn>>>,
+    /// Shared slot for the ritual registry. Populated late (by `Agent::new()`
+    /// after it builds the registry from config), read by StartRitualTool on
+    /// each invocation to invalidate the cache.
+    pub ritual_registry: Arc<std::sync::Mutex<Option<Arc<crate::ritual_registry::RitualRegistry>>>>,
     /// Current parent session key — set per-request by telegram.rs,
     /// used by fire-and-forget sub-agents to inject completion back into parent.
     pub current_session_key: Arc<std::sync::Mutex<Option<String>>>,
@@ -93,6 +97,7 @@ impl ToolRegistry {
             shared_llm_slot: Arc::new(tokio::sync::RwLock::new(None)),
             workspace_root: None,
             ritual_notify: Arc::new(std::sync::Mutex::new(None)),
+            ritual_registry: Arc::new(std::sync::Mutex::new(None)),
             current_session_key: Arc::new(std::sync::Mutex::new(None)),
             subagent_event_tx: None,
         }
@@ -239,6 +244,7 @@ impl ToolRegistry {
             self.workspace_root.clone().unwrap_or_else(|| mgr.workspace_gid_dir.parent().unwrap_or(std::path::Path::new(".")).to_path_buf()),
             self.llm_client.clone(),
             self.ritual_notify.clone(),
+            self.ritual_registry.clone(),
         )));
 
         self.register(Box::new(GidStatsTool { mgr: mgr.clone() }));
@@ -1965,10 +1971,10 @@ use engramai::compiler::{
 
 /// LLM provider for Knowledge Compiler that wraps RustClaw's LlmClient.
 /// Bridges async LlmClient → sync KcLlmProvider via block_in_place.
-struct RustClawKcProvider {
-    client: Box<dyn crate::llm::LlmClient>,
-    runtime: tokio::runtime::Handle,
-    model: String,
+pub struct RustClawKcProvider {
+    pub client: Box<dyn crate::llm::LlmClient>,
+    pub runtime: tokio::runtime::Handle,
+    pub model: String,
 }
 
 impl KcLlmProvider for RustClawKcProvider {
@@ -5522,6 +5528,10 @@ struct StartRitualTool {
     llm_client: Option<Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>>,
     /// Shared notify slot — telegram.rs sets this per-request with chat_id context
     notify_slot: Arc<std::sync::Mutex<Option<crate::ritual_runner::NotifyFn>>>,
+    /// Shared slot for the ritual registry. Late-bound by Agent::new(). When
+    /// present, we invalidate its cache around ritual start so the main
+    /// agent's next system-prompt build reflects reality immediately.
+    registry_slot: Arc<std::sync::Mutex<Option<Arc<crate::ritual_registry::RitualRegistry>>>>,
 }
 
 impl StartRitualTool {
@@ -5529,8 +5539,14 @@ impl StartRitualTool {
         workspace_root: PathBuf,
         llm_client: Option<Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>>,
         notify_slot: Arc<std::sync::Mutex<Option<crate::ritual_runner::NotifyFn>>>,
+        registry_slot: Arc<std::sync::Mutex<Option<Arc<crate::ritual_registry::RitualRegistry>>>>,
     ) -> Self {
-        Self { workspace_root, llm_client, notify_slot }
+        Self { workspace_root, llm_client, notify_slot, registry_slot }
+    }
+
+    /// Read the current registry from the slot (cheap clone of Arc).
+    fn current_registry(&self) -> Option<Arc<crate::ritual_registry::RitualRegistry>> {
+        self.registry_slot.lock().ok().and_then(|g| g.clone())
     }
 }
 
@@ -5615,7 +5631,23 @@ impl Tool for StartRitualTool {
             notify,
         );
 
-        match runner.start(task).await {
+        // Invalidate the registry cache before starting — so the new ritual
+        // state file is picked up immediately on the next prompt build.
+        let reg = self.current_registry();
+        if let Some(ref reg) = reg {
+            reg.invalidate();
+        }
+
+        let result = runner.start(task).await;
+
+        // Invalidate again after the ritual has transitioned — captures the
+        // terminal phase (Done/Escalated/Cancelled/WaitingApproval/…) so the
+        // main agent's next prompt reflects reality.
+        if let Some(ref reg) = reg {
+            reg.invalidate();
+        }
+
+        match result {
             Ok(state) => {
                 if let Err(e) = runner.save_state(&state) {
                     tracing::error!("Failed to save ritual state: {}", e);

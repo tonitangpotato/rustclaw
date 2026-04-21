@@ -36,6 +36,7 @@ mod events;mod stt;
 mod message_queue;
 mod text_utils;
 mod ritual_adapter;
+mod ritual_registry;
 mod ritual_runner;
 mod tools;
 pub mod tool_stats;
@@ -379,6 +380,7 @@ async fn main() -> anyhow::Result<()> {
             // Uses spawn_blocking to avoid blocking the tokio runtime with CPU-intensive work.
             let mem_for_reflection = mem_for_consolidation.clone();
             let mem_for_rumination = mem_for_reflection.clone();
+            let mem_for_kc = mem_for_reflection.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
                 interval.tick().await; // skip first immediate tick
@@ -444,6 +446,44 @@ async fn main() -> anyhow::Result<()> {
                 }
             });
             tracing::info!("Engram self-reflection scheduled (every 24 hours)");
+
+            // Start Knowledge Compiler incremental compilation background task (every 4 hours)
+            // Discovers new memory clusters not yet covered by existing topics, compiles only those.
+            // Cost-controlled: max 10 new topics per cycle to bound LLM spend (GUARD-3).
+            {
+                let mem_for_kc = mem_for_kc.clone();
+                let llm_cfg = cfg.llm.clone();
+                tokio::spawn(async move {
+                    // Initial delay: run 30 min after startup to let memories accumulate
+                    tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(4 * 3600));
+                    loop {
+                        interval.tick().await;
+                        let mem = mem_for_kc.clone();
+                        let llm_config = llm_cfg.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            kc_incremental_compile(&mem, &llm_config)
+                        }).await {
+                            Ok(Ok(report)) => {
+                                if report.new_topics > 0 || report.candidates_found > 0 {
+                                    tracing::info!(
+                                        "KC incremental compile: {} candidates found, {} new topics compiled, {} skipped (already covered), {} deferred (cost limit)",
+                                        report.candidates_found,
+                                        report.new_topics,
+                                        report.skipped_covered,
+                                        report.deferred,
+                                    );
+                                } else {
+                                    tracing::debug!("KC incremental compile: no new topics to compile");
+                                }
+                            }
+                            Ok(Err(e)) => tracing::warn!("KC incremental compile failed: {}", e),
+                            Err(e) => tracing::warn!("KC incremental compile panicked: {}", e),
+                        }
+                    }
+                });
+                tracing::info!("KC incremental compilation scheduled (every 4 hours, max 10 topics/cycle)");
+            }
 
             // Configure token budget alerts
             {
@@ -538,6 +578,249 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+// ─── KC Incremental Compilation ──────────────────────────────
+
+/// Report from a single KC incremental compilation cycle.
+struct KcIncrementalReport {
+    candidates_found: usize,
+    new_topics: usize,
+    skipped_covered: usize,
+    deferred: usize,
+}
+
+/// Run incremental Knowledge Compiler compilation.
+///
+/// Strategy:
+/// 1. Load all memories + embeddings
+/// 2. Discover topic candidates via clustering
+/// 3. Load existing compiled topics and collect their source memory IDs
+/// 4. Filter candidates: skip any whose memories are ≥80% already covered
+/// 5. Compile only genuinely new candidates (up to MAX_TOPICS_PER_CYCLE for cost control)
+fn kc_incremental_compile(
+    mem: &std::sync::Arc<memory::MemoryManager>,
+    llm_config: &crate::config::LlmConfig,
+) -> anyhow::Result<KcIncrementalReport> {
+    use engramai::compiler::{
+        compilation::{MemorySnapshot, simple_hash_embedding, compile_without_llm, extract_summary, aggregate_tags, QualityScorer},
+        discovery::TopicDiscovery,
+        storage::SqliteKnowledgeStore,
+        llm::LlmProvider as KcLlmProvider,
+        types::*,
+        KcConfig,
+        KnowledgeStore as _,
+    };
+
+    const MAX_TOPICS_PER_CYCLE: usize = 10;
+
+    let db_path = mem.db_path().to_string();
+
+    // 1. Load all memories
+    let engram = mem.lock_engram()?;
+    let all_memories = engram.list_ns(None, None)
+        .map_err(|e| anyhow::anyhow!("Failed to list memories: {}", e))?;
+    drop(engram);
+
+    if all_memories.is_empty() {
+        return Ok(KcIncrementalReport {
+            candidates_found: 0, new_topics: 0, skipped_covered: 0, deferred: 0,
+        });
+    }
+
+    // Load embeddings
+    let storage = engramai::storage::Storage::new(&db_path)
+        .map_err(|e| anyhow::anyhow!("Failed to open storage: {}", e))?;
+    let emb_config = engramai::embeddings::EmbeddingConfig::default();
+    let model_id = emb_config.model_id();
+    let embedding_map: std::collections::HashMap<String, Vec<f32>> = storage
+        .get_all_embeddings(&model_id)
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+
+    // Convert to snapshots
+    let snapshots: Vec<MemorySnapshot> = all_memories.iter().map(|m| {
+        let tags = m.metadata.as_ref()
+            .and_then(|v| v.get("tags"))
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        MemorySnapshot {
+            id: m.id.clone(),
+            content: m.content.clone(),
+            memory_type: format!("{:?}", m.memory_type).to_lowercase(),
+            importance: m.importance,
+            created_at: m.created_at,
+            updated_at: m.created_at,
+            tags,
+            embedding: embedding_map.get(&m.id).cloned(),
+        }
+    }).collect();
+
+    // 2. Open KC store and list existing topics
+    let store = SqliteKnowledgeStore::open(std::path::Path::new(&db_path))
+        .map_err(|e| anyhow::anyhow!("Failed to open KC store: {}", e))?;
+    store.init_schema()
+        .map_err(|e| anyhow::anyhow!("Failed to init KC schema: {}", e))?;
+
+    let existing_topics = store.list_topic_pages()
+        .map_err(|e| anyhow::anyhow!("Failed to list topics: {}", e))?;
+
+    // Collect all memory IDs already covered by existing topics
+    let covered_memory_ids: std::collections::HashSet<String> = existing_topics
+        .iter()
+        .flat_map(|t| t.metadata.source_memory_ids.iter().cloned())
+        .collect();
+
+    // 3. Discover candidates from ALL memories
+    let memory_embeddings: Vec<(String, Vec<f32>)> = snapshots.iter()
+        .map(|m| {
+            let emb = m.embedding.clone()
+                .unwrap_or_else(|| simple_hash_embedding(&m.content, 64));
+            (m.id.clone(), emb)
+        })
+        .collect();
+
+    let config = KcConfig::load();
+    let discovery = TopicDiscovery::new(config.min_cluster_size);
+    let candidates = discovery.discover(&memory_embeddings);
+    let candidates_found = candidates.len();
+
+    // 4. Filter: only candidates with >20% uncovered memories
+    let mem_map: std::collections::HashMap<&str, &MemorySnapshot> =
+        snapshots.iter().map(|m| (m.id.as_str(), m)).collect();
+
+    let memory_contents: Vec<(String, String)> = snapshots.iter()
+        .map(|m| (m.id.clone(), m.content.clone()))
+        .collect();
+
+    let mut new_candidates = Vec::new();
+    let mut skipped_covered = 0;
+
+    for candidate in &candidates {
+        let total = candidate.memories.len();
+        if total == 0 { continue; }
+        let uncovered = candidate.memories.iter()
+            .filter(|id| !covered_memory_ids.contains(id.as_str()))
+            .count();
+        let coverage_ratio = 1.0 - (uncovered as f64 / total as f64);
+        if coverage_ratio >= 0.8 {
+            // ≥80% of this candidate's memories are already in existing topics — skip
+            skipped_covered += 1;
+        } else {
+            new_candidates.push(candidate);
+        }
+    }
+
+    if new_candidates.is_empty() {
+        return Ok(KcIncrementalReport {
+            candidates_found, new_topics: 0, skipped_covered, deferred: 0,
+        });
+    }
+
+    // 5. Cost control: cap at MAX_TOPICS_PER_CYCLE
+    let deferred = new_candidates.len().saturating_sub(MAX_TOPICS_PER_CYCLE);
+    let to_compile = &new_candidates[..new_candidates.len().min(MAX_TOPICS_PER_CYCLE)];
+
+    // Create LLM provider (use haiku for cheap labeling)
+    let kc_provider: Option<Box<dyn KcLlmProvider>> = match crate::llm::create_client(llm_config) {
+        Ok(client) => Some(Box::new(tools::RustClawKcProvider {
+            client,
+            runtime: tokio::runtime::Handle::current(),
+            model: "claude-haiku-4-5-20251001".to_string(),
+        }) as Box<dyn KcLlmProvider>),
+        Err(e) => {
+            tracing::warn!("KC: failed to create LLM client, compiling without LLM: {}", e);
+            None
+        }
+    };
+
+    // 6. Compile each new candidate
+    let mut new_topics = 0;
+    let mut topic_counter: u64 = 0;
+
+    for candidate in to_compile {
+        let candidate_memories: Vec<MemorySnapshot> = candidate.memories
+            .iter()
+            .filter_map(|id| mem_map.get(id.as_str()).map(|m| (*m).clone()))
+            .collect();
+
+        if candidate_memories.is_empty() { continue; }
+
+        // Label with LLM if available
+        let title = if let Some(ref provider) = kc_provider {
+            match discovery.label_cluster(candidate, &memory_contents, provider.as_ref()) {
+                Ok(label) => label,
+                Err(_) => candidate.suggested_title.clone()
+                    .unwrap_or_else(|| format!("Topic ({})", candidate.memories.len())),
+            }
+        } else {
+            candidate.suggested_title.clone()
+                .unwrap_or_else(|| format!("Topic ({})", candidate.memories.len()))
+        };
+
+        let content = compile_without_llm(&title, &candidate_memories);
+        let now = chrono::Utc::now();
+        let topic_id = TopicId(format!("topic-{}-{}", now.timestamp_millis(), topic_counter));
+        topic_counter += 1;
+
+        let page = TopicPage {
+            id: topic_id.clone(),
+            title,
+            summary: extract_summary(&content),
+            content,
+            sections: Vec::new(),
+            status: TopicStatus::Active,
+            version: 1,
+            metadata: TopicMetadata {
+                created_at: now,
+                updated_at: now,
+                compilation_count: 1,
+                source_memory_ids: candidate_memories.iter().map(|m| m.id.clone()).collect(),
+                tags: aggregate_tags(&candidate_memories),
+                quality_score: None,
+            },
+        };
+
+        // Score quality
+        let scorer = QualityScorer::new(&config);
+        let report = scorer.score(&page, &candidate_memories, &[]);
+        let mut page = page;
+        page.metadata.quality_score = Some(report.overall);
+
+        // Persist
+        if let Err(e) = store.create_topic_page(&page) {
+            tracing::warn!("KC: failed to persist topic '{}': {}", page.title, e);
+            continue;
+        }
+
+        let source_refs: Vec<SourceMemoryRef> = candidate_memories.iter().map(|m| SourceMemoryRef {
+            memory_id: m.id.clone(),
+            relevance_score: m.importance,
+            added_at: now,
+        }).collect();
+        let _ = store.save_source_refs(&topic_id, &source_refs);
+
+        let record = CompilationRecord {
+            topic_id,
+            compiled_at: now,
+            source_count: candidate_memories.len(),
+            duration_ms: 0,
+            quality_score: report.overall,
+            recompile_reason: Some("incremental auto-compile".to_string()),
+        };
+        let _ = store.save_compilation_record(&record);
+
+        new_topics += 1;
+    }
+
+    Ok(KcIncrementalReport {
+        candidates_found,
+        new_topics,
+        skipped_covered,
+        deferred,
+    })
 }
 
 /// Interactive chat mode — REPL for talking to the agent.

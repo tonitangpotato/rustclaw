@@ -127,6 +127,38 @@ pub struct Config {
     /// Logging configuration
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    /// Ritual registry — gives main agent awareness of active rituals (ISS-016).
+    #[serde(default)]
+    pub ritual: RitualConfigSection,
+}
+
+/// User-facing config for the ritual registry (ISS-016).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RitualConfigSection {
+    /// Project roots to scan for `.gid/rituals/*.json` state files.
+    /// The main agent injects an "Active Ritual Status" section into its
+    /// system prompt for any non-terminal ritual found here.
+    pub known_project_roots: Vec<String>,
+    /// Cache TTL in seconds (default: 5).
+    pub registry_ttl_secs: u64,
+    /// Seconds without state update before a ritual is flagged stuck (default: 180).
+    pub stuck_threshold_secs: u64,
+    /// Seconds without state update after which a ritual is treated as dead
+    /// and excluded (default: 600).
+    pub dead_threshold_secs: u64,
+}
+
+impl Default for RitualConfigSection {
+    fn default() -> Self {
+        Self {
+            known_project_roots: Vec::new(),
+            registry_ttl_secs: 5,
+            stuck_threshold_secs: 180,
+            dead_threshold_secs: 600,
+        }
+    }
 }
 
 /// Logging configuration.
