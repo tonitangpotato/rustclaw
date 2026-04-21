@@ -47,12 +47,16 @@ impl Hook for EngramRecallHook {
         match self.memory.session_recall(&ctx.content, &ctx.session_key) {
             Ok((results, full_recall_triggered)) => {
                 if !results.is_empty() {
-                    // Format memories with confidence labels
+                    // Format memories with confidence labels and timestamps
                     let memories: Vec<String> = results
                         .iter()
                         .map(|r| {
                             let label = r.confidence_label.as_deref().unwrap_or("likely");
-                            format!("- [{}] [{}] {}", label, r.memory_type, r.content)
+                            let ts_prefix = r.created_at.as_deref()
+                                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                                .map(|dt| format!("[{}] ", dt.format("%m-%d %H:%M")))
+                                .unwrap_or_default();
+                            format!("- {}[{}] [{}] {}", ts_prefix, label, r.memory_type, r.content)
                         })
                         .collect();
                     let memory_block = format!(

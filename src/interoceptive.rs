@@ -176,6 +176,11 @@ impl ExecutionStressMeter {
         }
     }
 
+    /// Get the current count of consecutive failures.
+    pub fn consecutive_failures(&self) -> u32 {
+        self.consecutive_failures.load(Ordering::Relaxed)
+    }
+
     /// Produce a stress signal from current state.
     pub fn sample(&self) -> InteroceptiveSignal {
         let depth = self.loop_depth.load(Ordering::Relaxed);
@@ -405,6 +410,199 @@ impl Default for ResourcePressureMeter {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+//  Output Productivity — Read/Write ratio, repeat reads, spawn tracking
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Tracks whether the agent is actually producing output or just "busy reading".
+///
+/// Three sub-detectors:
+/// 1. ReadWriteRatio — too many reads with zero writes → "假忙" (fake busy)
+/// 2. RepeatRead — same file read 3+ times → stuck in a loop
+/// 3. SpawnBlind — spawn_specialist fired but output never checked
+#[derive(Debug)]
+pub struct OutputProductivityMeter {
+    /// Recent tool calls: ring buffer of (tool_name_category, file_path_hash).
+    recent_calls: Mutex<Vec<ToolCallRecord>>,
+    /// Max window size for recent calls.
+    window_size: usize,
+    /// Cached warning text from last sample.
+    last_warning: Mutex<Option<String>>,
+}
+
+/// Categorized tool call record for output tracking.
+#[derive(Debug, Clone)]
+struct ToolCallRecord {
+    category: ToolCategory,
+    /// For read operations: hash of the file path to detect repeats.
+    file_hash: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ToolCategory {
+    Read,       // read_file, search_files, list_dir, web_fetch
+    Write,      // write_file, edit_file
+    Spawn,      // spawn_specialist
+    Other,      // everything else
+}
+
+impl OutputProductivityMeter {
+    pub fn new() -> Self {
+        Self {
+            recent_calls: Mutex::new(Vec::with_capacity(20)),
+            window_size: 12, // look at last 12 tool calls
+            last_warning: Mutex::new(None),
+        }
+    }
+
+    /// Record a tool call. Call this after every tool execution.
+    pub fn record_tool_call(&self, tool_name: &str, first_arg: Option<&str>) {
+        let category = match tool_name {
+            "read_file" | "search_files" | "list_dir" | "web_fetch" => ToolCategory::Read,
+            "write_file" | "edit_file" => ToolCategory::Write,
+            "spawn_specialist" => ToolCategory::Spawn,
+            _ => ToolCategory::Other,
+        };
+
+        let file_hash = if category == ToolCategory::Read {
+            first_arg.map(|path| {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                path.hash(&mut hasher);
+                hasher.finish()
+            })
+        } else {
+            None
+        };
+
+        if let Ok(mut calls) = self.recent_calls.lock() {
+            calls.push(ToolCallRecord { category, file_hash });
+            // Keep only the last window_size entries
+            if calls.len() > self.window_size * 2 {
+                let drain_to = calls.len() - self.window_size;
+                calls.drain(..drain_to);
+            }
+        }
+    }
+
+    /// Produce a productivity signal with anomaly detection.
+    pub fn sample(&self) -> InteroceptiveSignal {
+        let calls = self.recent_calls.lock().unwrap();
+        let window: Vec<_> = if calls.len() > self.window_size {
+            calls[calls.len() - self.window_size..].to_vec()
+        } else {
+            calls.clone()
+        };
+        drop(calls);
+
+        if window.len() < 4 {
+            // Not enough data yet
+            return InteroceptiveSignal::new(
+                SignalSource::CognitiveFlow, // reuse existing source
+                Some("output_productivity".to_string()),
+                0.0, // neutral
+                0.0,
+            );
+        }
+
+        let read_count = window.iter().filter(|c| c.category == ToolCategory::Read).count();
+        let write_count = window.iter().filter(|c| c.category == ToolCategory::Write).count();
+        let spawn_count = window.iter().filter(|c| c.category == ToolCategory::Spawn).count();
+
+        // Detector 1: ReadWriteRatio — reads >= 6 with zero writes
+        let read_heavy = read_count >= 6 && write_count == 0;
+
+        // Detector 2: RepeatRead — same file read 3+ times
+        let repeat_read = {
+            let mut hash_counts = std::collections::HashMap::new();
+            for call in window.iter() {
+                if let Some(hash) = call.file_hash {
+                    *hash_counts.entry(hash).or_insert(0u32) += 1;
+                }
+            }
+            hash_counts.values().any(|&count| count >= 3)
+        };
+
+        // Detector 3: SpawnBlind — spawned but no subsequent read to check output
+        // (simplified: spawned recently but no writes followed)
+        let spawn_no_output = spawn_count > 0 && write_count == 0 && read_count < 2;
+
+        // Composite score
+        let anomaly_count = read_heavy as u8 + repeat_read as u8 + spawn_no_output as u8;
+
+        let valence = match anomaly_count {
+            0 => 0.3,      // healthy: producing output
+            1 => -0.3,     // mild concern
+            2 => -0.6,     // significant concern
+            _ => -0.9,     // critical: multiple signals firing
+        };
+
+        let arousal = match anomaly_count {
+            0 => 0.1,
+            1 => 0.4,
+            2 => 0.7,
+            _ => 0.9,
+        };
+
+        let signal = InteroceptiveSignal::new(
+            SignalSource::CognitiveFlow,
+            Some("output_productivity".to_string()),
+            valence,
+            arousal,
+        );
+
+        // Attach warning text for prompt injection (stored separately, not in SignalContext)
+        if anomaly_count > 0 {
+            let mut warnings = Vec::new();
+            if read_heavy {
+                warnings.push(format!(
+                    "ReadWriteRatio: {} reads, 0 writes in last {} calls. Are you preparing or procrastinating?",
+                    read_count, window.len()
+                ));
+            }
+            if repeat_read {
+                warnings.push("RepeatRead: Same file read 3+ times. Info is already in context — start writing.".to_string());
+            }
+            if spawn_no_output {
+                warnings.push("SpawnBlind: Spawned sub-agent but no output produced or checked.".to_string());
+            }
+            let warning_text = warnings.join(" | ");
+            if let Ok(mut w) = self.last_warning.lock() {
+                *w = Some(warning_text);
+            }
+        } else if let Ok(mut w) = self.last_warning.lock() {
+            *w = None;
+        }
+
+        signal
+    }
+
+    /// Get human-readable warnings for prompt injection.
+    /// Returns None if everything is healthy.
+    pub fn get_warnings(&self) -> Option<String> {
+        // Read from cached warning (updated by last sample() call)
+        self.last_warning.lock().ok().and_then(|w| w.clone()).map(|text| {
+            format!("⚠️ Output productivity alert: {}", text)
+        })
+    }
+
+    /// Reset the meter (e.g., at session start or after a successful write burst).
+    pub fn reset(&self) {
+        if let Ok(mut calls) = self.recent_calls.lock() {
+            calls.clear();
+        }
+        if let Ok(mut w) = self.last_warning.lock() {
+            *w = None;
+        }
+    }
+}
+
+impl Default for OutputProductivityMeter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 //  Somatic Summary — Aggregated PAD (Pleasure-Arousal-Dominance) + Urgency
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -491,6 +689,7 @@ pub struct SignalEmitter {
     pub execution_stress: ExecutionStressMeter,
     pub cognitive_flow: CognitiveFlowMeter,
     pub resource_pressure: ResourcePressureMeter,
+    pub output_productivity: OutputProductivityMeter,
 }
 
 impl SignalEmitter {
@@ -500,10 +699,11 @@ impl SignalEmitter {
             execution_stress: ExecutionStressMeter::new(),
             cognitive_flow: CognitiveFlowMeter::new(),
             resource_pressure: ResourcePressureMeter::new(),
+            output_productivity: OutputProductivityMeter::new(),
         }
     }
 
-    /// Sample all four signal lines and return them with a somatic summary.
+    /// Sample all five signal lines and return them with a somatic summary.
     ///
     /// The caller should feed these signals to the InteroceptiveHub.
     pub fn sample_all(
@@ -515,10 +715,11 @@ impl SignalEmitter {
         let stress = self.execution_stress.sample();
         let flow = self.cognitive_flow.sample();
         let resource = self.resource_pressure.sample();
+        let output = self.output_productivity.sample();
 
         let summary = SomaticSummary::from_signals(&load, &stress, &flow, &resource);
 
-        (vec![load, stress, flow, resource], summary)
+        (vec![load, stress, flow, resource, output], summary)
     }
 }
 
@@ -754,11 +955,114 @@ mod tests {
         let emitter = SignalEmitter::new(2_000_000);
         let (signals, summary) = emitter.sample_all(1000, 50_000);
 
-        assert_eq!(signals.len(), 4);
+        assert_eq!(signals.len(), 5); // load, stress, flow, resource, output
         assert!(summary.valence > -1.0 && summary.valence <= 1.0);
         assert!(summary.arousal >= 0.0 && summary.arousal <= 1.0);
         assert!(summary.dominance >= 0.0 && summary.dominance <= 1.0);
         assert!(summary.urgency >= 0.0 && summary.urgency <= 1.0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  Output Productivity Meter Tests
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn output_productivity_no_data() {
+        let meter = OutputProductivityMeter::new();
+        let sig = meter.sample();
+        // With <4 calls, should be neutral
+        assert!(sig.valence.abs() < 0.01, "no data should be neutral: {}", sig.valence);
+        assert!(meter.get_warnings().is_none(), "no warnings with no data");
+    }
+
+    #[test]
+    fn output_productivity_healthy_mix() {
+        let meter = OutputProductivityMeter::new();
+        // Mix of reads and writes — healthy
+        meter.record_tool_call("read_file", Some("/a.rs"));
+        meter.record_tool_call("read_file", Some("/b.rs"));
+        meter.record_tool_call("write_file", Some("/c.rs"));
+        meter.record_tool_call("read_file", Some("/d.rs"));
+        meter.record_tool_call("edit_file", Some("/e.rs"));
+        let sig = meter.sample();
+        assert!(sig.valence > 0.0, "healthy mix should be positive: {}", sig.valence);
+        assert!(meter.get_warnings().is_none(), "no warnings for healthy mix");
+    }
+
+    #[test]
+    fn output_productivity_read_heavy_triggers() {
+        let meter = OutputProductivityMeter::new();
+        // 8 reads, 0 writes → should trigger ReadWriteRatio
+        for i in 0..8 {
+            meter.record_tool_call("read_file", Some(&format!("/file{}.rs", i)));
+        }
+        let sig = meter.sample();
+        assert!(sig.valence < 0.0, "read-heavy should be negative: {}", sig.valence);
+        let warnings = meter.get_warnings();
+        assert!(warnings.is_some(), "should produce warning");
+        assert!(warnings.unwrap().contains("ReadWriteRatio"), "should mention ReadWriteRatio");
+    }
+
+    #[test]
+    fn output_productivity_repeat_read_triggers() {
+        let meter = OutputProductivityMeter::new();
+        // Same file 4 times → should trigger RepeatRead
+        meter.record_tool_call("read_file", Some("/same.rs"));
+        meter.record_tool_call("read_file", Some("/other.rs"));
+        meter.record_tool_call("read_file", Some("/same.rs"));
+        meter.record_tool_call("read_file", Some("/same.rs"));
+        meter.record_tool_call("read_file", Some("/same.rs"));
+        let sig = meter.sample();
+        assert!(sig.valence < 0.0, "repeat-read should be negative: {}", sig.valence);
+        let warnings = meter.get_warnings();
+        assert!(warnings.is_some(), "should produce warning");
+        assert!(warnings.unwrap().contains("RepeatRead"), "should mention RepeatRead");
+    }
+
+    #[test]
+    fn output_productivity_write_clears_warning() {
+        let meter = OutputProductivityMeter::new();
+        // Start with reads
+        for i in 0..6 {
+            meter.record_tool_call("read_file", Some(&format!("/file{}.rs", i)));
+        }
+        meter.sample();
+        assert!(meter.get_warnings().is_some(), "should warn after 6 reads");
+        
+        // Now write — adds to window, dilutes reads
+        meter.record_tool_call("write_file", Some("/output.rs"));
+        meter.record_tool_call("write_file", Some("/output2.rs"));
+        meter.record_tool_call("write_file", Some("/output3.rs"));
+        meter.sample();
+        // After writes, read_count in window still >= 6 but write_count > 0
+        assert!(meter.get_warnings().is_none(), "should clear after writes");
+    }
+
+    #[test]
+    fn output_productivity_reset() {
+        let meter = OutputProductivityMeter::new();
+        for i in 0..8 {
+            meter.record_tool_call("read_file", Some(&format!("/file{}.rs", i)));
+        }
+        meter.sample();
+        assert!(meter.get_warnings().is_some());
+        
+        meter.reset();
+        meter.sample();
+        assert!(meter.get_warnings().is_none(), "should be clean after reset");
+    }
+
+    #[test]
+    fn output_productivity_spawn_blind() {
+        let meter = OutputProductivityMeter::new();
+        meter.record_tool_call("spawn_specialist", None);
+        meter.record_tool_call("spawn_specialist", None);
+        // Only spawns, no reads or writes → spawn_no_output fires
+        // Need 4+ calls for the meter to activate
+        meter.record_tool_call("exec", None);
+        meter.record_tool_call("exec", None);
+        let sig = meter.sample();
+        assert!(sig.valence < 0.0, "spawn-blind should be negative: {}", sig.valence);
     }
 
     #[test]
