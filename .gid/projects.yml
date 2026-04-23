@@ -7,7 +7,7 @@ projects:
     path: /Users/potato/rustclaw
     display_name: RustClaw
   engramai:
-    path: /Users/potato/clawd/projects/engram-ai-rust
+    path: /Users/potato/clawd/projects/engram
     display_name: engramai
   gid-rs:
     path: /Users/potato/clawd/projects/gid-rs

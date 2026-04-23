@@ -5,6 +5,34 @@
 
 ---
 
+## 📍 Canonical Project Roots (check HERE FIRST before searching paths)
+
+Each project has ONE canonical root. Do NOT search for graphs/issues — look them up here.
+
+- **engram** (monorepo, active, consolidated 2026-04-22 ISS-023) → `/Users/potato/clawd/projects/engram/`
+  - GitHub: tonitangpotato/engram-ai (monorepo)
+  - Last commit: `3132194 feat: consolidate engram-ai-rust into monorepo (ISS-023)`
+  - ⚠️ Graph state mid-migration (2026-04-22): `engram/.gid/` has issues + graph.db but NOT the latest graph.yml with ISS-024 nodes. The live graph.yml (114 nodes, Apr 22 23:33) is still in engram-ai-rust/.gid/. Do NOT push ISS-024 work to the old repo — ask potato where to put it.
+- **engram-ai-rust** (old repo, preserved but not active) → `/Users/potato/clawd/projects/engram-ai-rust/`
+  - potato: "repo不要不要闪，还要都要留着的，只是merge到那个monorepo里面"
+  - All rustclaw/cogmembench configs now point to engram/, NOT this one
+- **rustclaw** (this workspace) → `/Users/potato/rustclaw/`
+- **agentctl** → `/Users/potato/clawd/projects/agentctl/`
+- **xinfluencer** → `/Users/potato/clawd/projects/xinfluencer/`
+- **gid-rs** → `/Users/potato/clawd/projects/gid-rs/`
+- **autoalpha** → `/Users/potato/clawd/projects/autoalpha/`
+- **causal-agent** → `/Users/potato/clawd/projects/causal-agent/`
+- **swebench** → `/Users/potato/clawd/projects/swebench/`
+- **interview-prep** → `/Users/potato/clawd/projects/interview-prep/`
+
+If potato mentions an issue ID (ISS-NNN) or task name, resolve via this table, don't grep/find.
+
+**Common mistake (I've made this 2x now):** Assuming engram-ai-rust is "the real one" because its graph.yml is fresher. The monorepo consolidation happened 2026-04-22 — engram/ is canonical going forward, even though the graph.yml migration is incomplete.
+
+Tracked: `.gid/issues/ISS-020-project-path-discovery-friction.md`
+
+---
+
 ## About potato
 
 - **Name**: potato (oneB)
@@ -79,7 +107,16 @@
 - Voice mode toggle per chat
 - "Acknowledge before working" rule in system prompt + AGENTS.md
 
-### Test Count: 166 (up from 140)
+### Test Count: 281 (up from 166; +2 ISS-021 Phase 1 baseline tests)
+
+### ISS-021 Phase 1 — Envelope side-channel (2026-04-23)
+- **Envelope** type replaces `MessageContext` (alias kept until Phase 4)
+- `HookContext.envelope: Option<Envelope>` plumbed (defaults None, populated by Phase 2+3)
+- `MemoryManager::store/store_explicit` migrated to `engram.store_raw(content, StorageMeta { user_metadata, ... })` — accepts optional Envelope, serializes to `user_metadata.envelope`
+- Recall quality baseline: 10 fixtures × (3 gold + 5 distractor incl. 1 near-topic), Precision@3 metric, **P_before = 0.767** (unsaturated, 0.233 headroom for Phase 5 significance test)
+- `MemoryManager::for_testing()` test-only constructor — avoids hand-constructed struct literal fragility across refactors
+- Storage audit built into baseline test: asserts 0 Quarantined, all items land as `Stored(_)` — ensures store_raw migration is a behavioral no-op
+- **Phase 1 scope expanded (justified)**: store_raw migration + fixture re-design + for_testing refactor all pulled into Phase 1 as root-fix prerequisites (details in `.gid/issues/ISS-021.../issue.md` "Phase 1 Execution Record")
 
 ## Core Rules
 
@@ -100,7 +137,7 @@
 - **实现**: AdaptiveBaseline (Welford算法), cold-start fallback, mid-loop intervention at 3+ consecutive failures
 - 247 tests pass, engramai v0.2.3, src/interoceptive.rs 530 lines
 
-*Last updated: 2026-04-19*
+*Last updated: 2026-04-23 (ISS-021 Phase 1 complete)*
 
 ---
 
@@ -139,6 +176,35 @@
 ### 内部工具（不适合直接卖）
 - **gid-harness** — AI 开发执行引擎，主要内部使用，作为服务卖比较困难
 - **agentctl** — 进程管家，纯运维工具
+
+---
+
+## Recall 失败根因 + Trace Logger (2026-04-23)
+
+### 三层缺陷(今晚深挖,potato 直觉命中根因)
+1. **Store 层** — 关键 meta 事件(canonical repo 是哪个等)没入规范记忆或 compile 成 topic
+2. **Compile 层(根因)** — knowledge_compile 没编译"仓库结构"这类 meta 话题,搜索 0 命中。133 个 unresolved conflicts 可能阻塞新 topic 生成
+3. **Retrieve 层** — EngramRecallHook query 构造 naive:`session_recall(&ctx.content, ...)` 直接用消息原文当 query,无 session context 融合,无 meta-state 检索
+
+### 幻觉传导机制(新洞察,今晚 session 内演示两次)
+Recall 失败 → agent 无法察觉 → 用想象补齐 → 输出错误信息。
+Agent 无法区分"hook 注入的是真相"vs"hook 注入的是噪音"。
+**对策**:看到 recall 返回时质疑"这是不是只是偏移",关键事实性断言先用工具核实。
+
+### 已实施:Recall Trace Logger
+- 改了 `src/engram_hooks.rs`,新增 `write_recall_trace()`,每次 recall append 一行 JSON 到 `/Users/potato/rustclaw/recall-trace.jsonl`
+- 字段:ts, session_key, query, query_len, ok, full_recall_triggered, result_count, results[{content, type, confidence, label}]
+- 失败静默,零行为变化,cargo check 通过,3/3 测试过
+- 分析命令:`jq 'select(.result_count == 0)' recall-trace.jsonl` 等
+
+### 待办
+1. 累积 trace 数据(几小时 - 1 天),离线分类失败模式
+2. 写 engram 项目 bug issue(Store/Compile/Retrieve + 幻觉传导 + 实时证据)
+3. `knowledge_compile --dry-run` 诊断 Compile 层(为啥 discovery 不聚类 meta 话题)
+4. 检查 133 个 unresolved conflicts 是否在阻塞
+5. **新 IDEA**:Pre-restart auto-summary hook(今晚发现"自动总结再重启"功能实际不存在,只是 `restart_self` 发 Telegram + exit)
+
+详细时间线:`memory/2026-04-23.md` 00:00-00:30 段落。
 
 ---
 

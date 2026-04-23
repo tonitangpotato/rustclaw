@@ -3,6 +3,180 @@
 > All ideas captured by RustClaw's Idea Intake pipeline.
 > Format: newest first. Each idea has a unique ID for cross-referencing.
 
+## IDEA-20260422-02: AI Tool Benchmark Arena — agent-native 评测中枢 + benchmark-writing agent
+- **Date**: 2026-04-22
+- **Source**: potato 原创（触发自"engram 要不要建网页"讨论 + 正在做 cogmembench 的经验）
+- **Category**: product / infrastructure / benchmark
+- **Tags**: ai_tools, benchmark, mcp, agent_registry, cogmembench, directory, verification, arena, evaluation
+- **Effort**: High（分阶段可降低）
+
+### Summary
+做一个"AI 工具评测竞技场"——不是又一个 AI 工具目录（那层已经饱和），而是**可复现、跨类别、持续更新的工具 benchmark** + **暴露给 agent 的自然语言查询接口**（MCP）。核心差异化：有一个**专门写 benchmark 的 meta-agent**，新工具出来自动读 docs、生成 test cases、跑测、入库。对标 MLPerf × Gartner × LMSYS Arena，agent-native。
+
+### The Idea（三层结构）
+
+**Layer 1 — Directory（收录）**
+- AI 工具元数据库：名字、类别、链接、pricing、API、开源/闭源
+- 这层已饱和（theresanaiforaz / Futurepedia / Product Hunt AI），纯 SEO 聚合没护城河
+- 只做最小实用版本，不作为主打
+
+**Layer 2 — Benchmark 聚合（评测）** ← 有缺口
+- 现有 leaderboard 只覆盖 LLM 本身（HELM、LMSYS Arena），不覆盖"工具"
+- 其他 review 站都是主观评分，不可复现
+- **缺口：跨品类、可复现、持续更新的工具 benchmark**
+- 每个工具按品类跑标准化测试集（memory系统 → cogmembench-style；RAG → RAG benchmark；code agent → SWE-bench 子集）
+- 评分维度：准确率、延迟、成本、可扩展性、文档质量、免费额度
+
+**Layer 3 — Agent-facing API（agent 查询接口）** ← moat
+- 暴露 MCP server：`benchmarkhub` / `toolarena`
+- Agent 用自然语言查询："我需要一个能处理百万级文档的 embedding 工具，免费不限 rate"
+- 返回 top-3 + benchmark 分数 + 各维度对比 + 推荐理由
+- 目前 agent 选工具是 hardcode 或 ReAct 瞎试——这层几乎空白
+
+**Layer 4 — Benchmark-writing Agent（最聪明的点）**
+- 手工为每个工具写 benchmark 无法 scale
+- Meta-agent 流程：读工具 docs → 理解能力边界 → 生成标准化 test cases → 运行测试 → 得分入库
+- 新工具发布，agent 自动评测
+- **cogmembench 就是这个 meta-agent 针对 memory 类的雏形**——抽象化后就是通用框架
+
+### Potential Value
+- **商业化路径**（需要避免广告/赞助，公信力是命根子）
+  - 付费 MCP API（其他 agent 按 query 收费）
+  - 私有 benchmark 服务（企业"帮我们评 10 个内部工具"）
+  - 订阅制 report（最新 benchmark、深度分析）
+  - Gartner + MLPerf 混合模式
+- **战略价值**
+  - 比 engram 更大的潜在市场（benchmark 是 infrastructure 层）
+  - cogmembench 的自然外延——不是新项目，是现有工作的泛化
+  - 对 MCP ecosystem 来说是刚需基础设施（1000+ servers 但没有质量筛选）
+
+### Tags for Identity
+agent-native benchmarking, cogmembench extension, MCP server, tool verification, benchmark-writing meta-agent, arena model
+
+### Key Design Decisions（待定）
+- **品牌独立 vs engram 子产品**：`benchmarks.engram.xxx` 还是独立域名？倾向独立（长期可能比 engram 更大）
+- **域名候选方向**：
+  - arena 系（对标 LMSYS Arena）：`agentarena.xxx`, `toolarena.xxx`
+  - meter 系：`toolmeter.xxx`, `agentmeter.xxx`
+  - verify 系：`verify.tools`, `howgood.ai`
+  - bench 系：`agentbench.xxx`, `benchmarkhub.xxx`
+- **公信力机制**
+  - 开源方法论 + 测试代码 + raw data
+  - 允许工具作者 submit + 复现
+  - 声明利益关系（engram 自己怎么放？规则明确）
+
+### Relationship to Current Work
+- **cogmembench** 是 v0 原型（memory 品类的 benchmark 框架）
+- **Engram** 的 benchmark 数据是第一个 case study——证明方法论可行
+- **GID** 可以用来建 benchmark 之间的依赖/演化图谱（跨版本比较、工具 feature 对应的测试集映射）
+- **RustClaw** 是天然的 benchmark-writing agent 运行时
+
+### Action Items
+- [ ] 继续把 cogmembench 做成开源产品（engram v0.3 之后）——这是 v0 起点 [P1] — 为通用 arena 铺路
+- [ ] 第一个 public case study：engram vs Mem0/Zep/Letta LoCoMo 对比（v0.3 发布后）[P1] — 建立方法论可信度
+- [ ] 占名：注册 1-2 个候选域名（等 potato 确定方向）[P2]
+- [ ] 调研 MCP server 怎么暴露自然语言查询接口（现有 tool registry MCP 例子）[P2]
+- [ ] 设计 benchmark-writing agent 的通用抽象（输入：工具 docs + API spec，输出：test suite + scores）[P2] — 这是技术核心
+- [ ] 观察 3 个月内 MCP ecosystem 是否出现质量筛选玩家 [P2] — 竞争扫描
+
+### Launch Trigger Criteria
+不要现在启动。正式启动应满足：
+- ✅ engram v0.3 发布
+- ✅ cogmembench 开源完成
+- ✅ 第一个 case study（engram vs others LoCoMo）获得 HN/X 反馈
+- ✅ 至少 2-3 个工具作者主动询问评测——市场信号
+
+### Connections
+- Related: IDEA-20260422-01（HN Viral Analyzer）— 爆贴分析可复用于 benchmark 发布策略
+- Related: cogmembench 项目（~/clawd/projects/cogmembench）— 直接 v0 原型
+- Related: engram benchmark 工作（正在跑 LoCoMo）— 第一个 case study
+- Related: MCP ecosystem 发展 — 基础设施依赖
+- Related: IDEA 可能存在于 clawd 侧（如 Knowledge Compiler、GID 产品化）— 评测维度可泛化到知识管理工具
+
+### Risks / Open Questions
+- **精力分配**：potato 已有 engram + GidHub + xinfluencer + cogmembench，能不能再开新战线？建议作为 cogmembench 自然外延而非新项目
+- **公信力**：engram 自己评自己会被质疑——规则要从第一天透明
+- **市场时机**：MCP 爆发期，1-2 年内必有人做。等 v0.3 是 6-8 周，可接受
+- **技术难点**：benchmark-writing agent 的泛化能力——从 memory 类推广到 RAG/code/planning 类需要 per-domain 适配
+
+### Status: 💡 New
+---
+
+## IDEA-20260422-01: HN Viral Post Feature Analyzer — 爆贴特征抓取 + 写作指导
+- **Date**: 2026-04-22
+- **Triggered by**: potato 想更好地发 Show HN（xinfluencer / engram / gid / rustclaw 都可能发）
+- **Category**: tool / content_strategy
+- **Tags**: hn, show_hn, content_strategy, launch, viral_analysis, xinfluencer
+
+### The Idea
+系统化抓取分析 HN 爆贴特征，生成**可操作的写作模板**和**发布时机建议**。不是"读了 10 个 Show HN 凭感觉总结"，而是基于几千条真实数据的统计分析。
+
+### Pipeline 设计
+1. **Crawl layer** — HN Firebase API 已在 `skills/social-intake/intake.py` 集成
+   - 抓取近 90 天 top stories（score > 100）+ 全部 Show HN（不管分数）
+   - 元数据：title, url, domain, score, descendants（评论数）, time, by（作者）, text
+   - 扩展：每条帖子抓前 50 条评论（上帝视角看读者怎么反应）
+2. **Feature extraction**
+   - **Title 特征**：长度、是否含数字、是否含 "I built X"、"Show HN:" 前缀、关键词分布（TF-IDF）
+   - **时机**：发布时间（UTC 转 PT/ET）、星期几、早晚高峰
+   - **领域**：domain 类别（github.io、自建站、Substack...）、语言/技术栈提及
+   - **作者**：karma、历史发帖记录、账号年龄
+   - **轨迹**：上榜速度（评分增长曲线，需要轮询）
+3. **Success clustering**
+   - 定义 "viral"：score > 500，或进 front page top 10
+   - 用 k-means / HDBSCAN 把爆贴聚类（infra tool / AI / dev experience / 个人项目 / 争议话题）
+   - 每类提取代表性 title templates、发布模式
+4. **Comment sentiment analysis**（这个最有价值）
+   - 评论里骂什么 vs 夸什么
+   - Show HN 常见的翻车模式：过度 marketing、benchmark 可疑、"又一个 X"、对比不公平
+   - 抓出"被顶赞的评论"特征 —— 读者真正认可什么
+5. **Writing assistant**
+   - 输入：你的项目草稿 title + description
+   - 输出：匹配到的聚类、该聚类的爆款模板、预测评分区间、潜在槽点预警
+   - 实际上是 retrieval-augmented writing，不是从零生成
+
+### Why This Matters
+- **直接服务于 potato 的 launch 目标**：engram、gid-core、rustclaw、xinfluencer 都需要 Show HN 曝光
+- **比"凭感觉"强 10 倍**：HN 社区有非常明确的口味，数据能让你提前知道哪些表达会翻车
+- **可复用**：同一个工具可以分析 Reddit r/rust、r/programming、Product Hunt、X 爆文
+- **可以变成产品**：xinfluencer 的"爆贴分析"功能就直接嵌这个引擎
+
+### Connection to Existing Work
+- `skills/social-intake/intake.py` 已经有 HN Firebase API 集成
+- xinfluencer 已经有 `scoring`、`discover` 模块，架构可复用
+- 历史上 potato 写过 engram/gid 的 Show HN 草稿，可以作为"之前的版本 vs 优化后"对比
+- **Connection to IDEA-20260403-02 (Knowledge Compiler)**：爆贴特征也是一种 knowledge compilation
+
+### Next Steps
+1. **Phase 0 — 数据抓取（1-2 小时）**
+   - 写一个 `hn-scraper.py` 或 Rust crate，批量抓近 90 天 Show HN + top stories
+   - 存 SQLite（方便后续 query）
+   - 样本量目标：~500 Show HN + ~2000 top stories
+2. **Phase 1 — 探索性分析**
+   - Jupyter / Rust notebook 看分布：score 分布、title 长度、domain 分布
+   - 先肉眼 scan 前 20 个爆款 Show HN，找 pattern hypothesis
+3. **Phase 2 — 聚类 + 模板提取**
+   - 用 embedding + HDBSCAN 聚类
+   - 每个 cluster 抽 representative titles
+4. **Phase 3 — 评论分析**（最高价值）
+   - 评论 sentiment + 被顶赞评论的主题抽取
+   - 找"翻车 pattern"（被骂最狠的 Show HN 做错了什么）
+5. **Phase 4 — Writing assistant CLI**
+   - `hn-advisor analyze draft.md` → 评分 + 建议 + 同类爆款对比
+
+### 技术栈建议
+- 数据抓取：Python + httpx（HN API rate limit 宽松）或直接扩展现有 `intake.py`
+- 存储：SQLite（轻量）或 engram（如果想接入现有知识图谱）
+- 分析：先 Python pandas + scikit-learn 快速原型，验证后可移到 xinfluencer Rust
+- 模板匹配：embedding 相似度（xinfluencer 已有）
+
+### Success Metric
+- potato 下次发 Show HN 前跑一次，预测分数 vs 实际分数误差 < 30%
+- 能指出具体槽点（"你的 benchmark 对比不公平，类似 post 的 top comment 就是骂这个"）
+
+### Status: 💡 New
+---
+
 ## IDEA-20260417-01: OSINT Profile Dossier — 社工背调产品
 - **Date**: 2026-04-17
 - **Triggered by**: potato 收到 cold email，RustClaw 用公开信息交叉验证对方身份，效果惊人

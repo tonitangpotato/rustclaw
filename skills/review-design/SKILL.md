@@ -44,11 +44,11 @@ Design docs reviewed by LLMs tend to need 5-6 iterative rounds because each pass
 
 ## Sub-Agent Configuration
 
-This skill is iteration-heavy — reading the full design, running 29 checks, and verifying code references all consume tool calls. When spawning a sub-agent for this skill:
+This skill is iteration-heavy — reading the full design, running 35 checks, and verifying code references all consume tool calls. When spawning a sub-agent for this skill:
 
-- **full review**: `max_iterations: 50` minimum (29 checks + code verification = 40-50 tool calls)
-- **standard review**: `max_iterations: 35` minimum
-- **quick review**: `max_iterations: 20` minimum
+- **full review**: `max_iterations: 60` minimum (35 checks + code verification = 50-60 tool calls)
+- **standard review**: `max_iterations: 40` minimum
+- **quick review**: `max_iterations: 25` minimum
 
 Under-provisioned iterations are the #1 cause of incomplete reviews — the agent runs out mid-Phase-7 and never writes the review file.
 
@@ -60,15 +60,15 @@ Check the beginning of your prompt for a `[REVIEW_DEPTH: quick|standard|full]` d
 
 | Depth | Triage Size | Phases to Run | Checks |
 |---|---|---|---|
-| **quick** | small | Phase 0 + Phase 1 + Phase 4 | 0-4, 13-16 (9 checks) |
-| **standard** | medium | Phase 0-5 | 0-20 (21 checks) |
-| **full** | large (default) | Phase 0-7 | All 29 checks |
+| **quick** | small | Phase 0 + Phase 1 + Phase 4 + Phase 8 | 0-4, 13-16, 30-32 (12 checks) |
+| **standard** | medium | Phase 0-5 + Phase 8 | 0-20, 30-35 (27 checks) |
+| **full** | large (default) | Phase 0-8 | All 36 checks (0-35) |
 
 **If no `[REVIEW_DEPTH]` directive is present, default to `full`.**
 
-For `quick` reviews: skip logic correctness, type safety edge cases, doc quality, implementability, and code alignment checks. Focus on structure and architecture only — the goal is fast validation that the design is internally consistent.
+For `quick` reviews: skip logic correctness, type safety edge cases, doc quality, implementability, and full code alignment checks. Focus on structure, architecture, and the core integrity checks (debt/shortcuts/conflicts #30-32) — the goal is fast validation that the design is internally consistent and not introducing hidden debt.
 
-For `standard` reviews: skip Phase 6 (Implementability) and Phase 7 (Existing Code Alignment). These are expensive checks that require codebase knowledge and are best reserved for large/complex designs.
+For `standard` reviews: skip Phase 6 (Implementability) and Phase 7 (Existing Code Alignment). Phase 8 (Engineering Integrity) is always run — technical debt and shortcut detection are non-negotiable, even for incremental changes.
 
 ---
 
@@ -148,7 +148,49 @@ Read the design document completely, then run the checks applicable to your revi
     - **Use `search_files` and `read_file` to verify.** Don't trust the design author's memory of the codebase.
     - Every unverified assumption about existing code → 🔴 Critical finding. This is the #1 source of multi-round review cycles.
 
+### Phase 8: Engineering Integrity (Technical Debt, Shortcuts, Conflicts)
 
+This phase enforces potato's engineering philosophy: **no technical debt, root fix not patch, no shortcuts, no conflicts with existing architecture.** A design that introduces debt — even intentionally — must surface it explicitly so the trade-off is visible, not hidden.
+
+30. **Technical debt introduction** — Does the design introduce code/structure the author would NOT want to maintain long-term? Look for:
+    - "We'll clean this up later" / "Temporary solution" / "Good enough for now" phrases
+    - Workarounds that paper over a deeper issue instead of fixing it
+    - Hardcoded values marked as "TODO: make configurable"
+    - Duplicated logic justified as "we'll dedupe in a future refactor"
+    - Any accepted debt → **must be documented explicitly** with: (a) what the debt is, (b) why it's accepted now, (c) concrete trigger for paying it back (not "someday"). If debt is introduced without this framing → 🔴 Critical.
+
+31. **Shortcut detection (patch vs root fix)** — Is the design solving the *symptom* or the *root cause*? Red flags:
+    - "Add a check to prevent X from happening" when the real question is *why does X happen*
+    - "Wrap this in try/catch" without understanding what can actually fail
+    - "Add a retry" as a fix for an intermittent bug whose root cause is unidentified
+    - "Special-case this one scenario" when a general solution exists at the same cost
+    - New config flag to disable a broken feature instead of fixing the feature
+    - Each shortcut → 🟡 Important. Ask: "What's the root cause? Is this design treating the symptom?"
+
+32. **Conflicts with existing architecture** — Does the design contradict patterns/conventions already established in the codebase?
+    - Uses a different error-handling style than the rest of the project (e.g., `unwrap()` when the codebase uses `Result<_, Error>` propagation)
+    - Introduces a new data-flow pattern when an existing one fits
+    - Duplicates abstractions that already exist under a different name (check Phase 7 Check #26 first)
+    - Bypasses existing layers (e.g., talks directly to DB when a repository layer exists)
+    - Conflicts with invariants enforced elsewhere (e.g., design assumes mutable access to a struct the rest of the codebase treats as immutable)
+    - Each conflict → 🔴 Critical if it breaks invariants, 🟡 Important if it's inconsistent style.
+
+33. **Simplification vs completeness** — Is the design **simplifying the problem** rather than solving it? potato's rule: "不要简化问题 — 问题有多复杂就处理多复杂." Red flags:
+    - Edge cases mentioned in requirements are dropped in design with no justification
+    - "We'll assume X never happens" without proof X can't happen
+    - Error paths reduced to "return error" without specifying recovery semantics
+    - Concurrency/ordering concerns waved away as "unlikely in practice"
+    - Each unjustified simplification → 🟡 Important (escalate to 🔴 if it drops a requirement).
+
+34. **Breaking-change risk assessment** — If the design modifies existing behavior, is the blast radius analyzed?
+    - Which existing callers/tests/features does this affect?
+    - Is there a grep/impact analysis in the design, or just "this shouldn't break anything"?
+    - Are tests planned to prove existing behavior is preserved where intended?
+    - Vague "should be backward-compatible" without verification → 🟡 Important.
+
+35. **Purpose alignment** — Does every component in the design serve the stated goal? Or are there components that are "nice to have" / "might be useful later" / "for flexibility"?
+    - Speculative flexibility (interfaces with one implementation, config knobs with one value) → 🟢 Minor, flag for removal
+    - Components that don't trace to any GOAL → 🟡 Important (either add GOAL or remove component)
 
 ## Output Format
 
@@ -200,7 +242,7 @@ After writing the review file, report a **brief summary** to the user:
 
 ## Rules
 
-- **Run ALL 29 checks.** Don't skip checks even if the first few find nothing.
+- **Run ALL 35 checks.** Don't skip checks even if the first few find nothing.
 - **No "looks good" without evidence.** For each passed check, briefly note what you verified.
 - **Find the ROOT issue, not symptoms.** If check #5 and #12 both flag the same underlying problem, consolidate into one finding with the root cause.
 - **Suggest concrete fixes.** Not "this could be improved" — show the actual code/spec change.

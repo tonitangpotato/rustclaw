@@ -80,6 +80,46 @@ Read the graph YAML (`.gid/graph.yml`), the design document, and requirements (i
 21. **Granularity consistency** — If task-1 is "implement complete auth system" and task-2 is "add semicolon to line 42" → inconsistent granularity.
 22. **Status accuracy** — If tasks have statuses: are they correct? A task marked "done" whose output file doesn't exist → flag. A task marked "todo" whose implementation already exists in code → flag.
 
+### Phase 6: Engineering Integrity (Technical Debt, Shortcuts, Conflicts)
+
+Tasks are where debt/shortcuts get *committed to the plan* — once a task is written a certain way, the implementation tends to follow. This phase catches debt at the planning stage, before code is written.
+
+23. **Technical debt in task framing** — Does any task implicitly accept debt? Look for:
+    - Tasks named "quick fix for X" / "temporary workaround" / "patch Y for now"
+    - Tasks that say "minimal implementation, expand later" without a follow-up task actually scheduled for the expansion
+    - Tasks that duplicate logic from existing code instead of refactoring ("copy the pattern from module X" when "extract shared helper from module X" is the right move)
+    - Missing cleanup tasks — if a task replaces old code, is there a task to delete the old code? If not → 🟡 Important.
+    - Each instance → 🟡 Important. Either schedule the follow-up concretely (as a dependent task) or rewrite the task to do it right the first time.
+
+24. **Shortcut tasks (patch vs root fix)** — Is any task treating a symptom instead of the root cause?
+    - "Add validation to prevent bug X" when the real task is "fix state machine that allows X"
+    - "Retry on failure Y" without an accompanying "diagnose why Y happens" task
+    - "Add feature flag to disable broken feature" as a standalone task with no fix task behind it
+    - Each shortcut → 🟡 Important. Ask: "What's the root task? Should this task be replaced or paired with one that fixes the cause?"
+
+25. **Conflicts with existing codebase** — Does any task conflict with conventions/invariants in the existing code?
+    - Task says "add new error type" when project has a unified error enum (should be "add variant to existing error enum")
+    - Task creates a new module for functionality that belongs in an existing module
+    - Task adds a dependency that duplicates functionality already provided by an existing dep
+    - Task bypasses an existing abstraction layer (e.g., "query DB directly" when repository pattern is established)
+    - Verify by reading the target files/modules the task touches. Each conflict → 🔴 Critical if it breaks invariants, 🟡 Important if it's inconsistent style.
+
+26. **Simplification detection (problem-dodging tasks)** — Is any task quietly narrowing scope from the design? potato's rule: 问题有多复杂就处理多复杂.
+    - Task implements the happy path but skips error handling the design specified
+    - Task implements one of N cases from the design with no tasks for the other N-1
+    - Task says "basic implementation" when design called for specific edge-case handling
+    - Each → 🟡 Important (🔴 if it drops a requirement/design section entirely).
+
+27. **Missing paired-task coverage** — Certain task types almost always need a paired task. If missing → flag:
+    - New public API → needs doc-update task
+    - Breaking change → needs migration task for existing callers/data
+    - New external dependency → needs security/licensing review task
+    - New async/concurrent code → needs stress/concurrency test task
+    - Data schema change → needs migration script task
+    - Each missing pair → 🟡 Important.
+
+28. **Verification tasks for risky work** — For any task touching high-risk areas (concurrency, auth, data integrity, financial logic), is there a dedicated verification task separate from general unit tests? "Unit tests" as a blanket task is not enough for risk-tier code. Missing dedicated verification → 🟡 Important.
+
 ## Output Destination
 
 **ALWAYS write the full review to a file**, not just respond in chat.
@@ -134,7 +174,7 @@ After writing the review file, report a **brief summary** to the user:
 
 ## Rules
 
-- **Run ALL 22 checks.** Don't skip checks even if early ones find nothing.
+- **Run ALL 28 checks.** Don't skip checks even if early ones find nothing.
 - **Read the design document AND the tasks.** Tasks without design context can't be properly reviewed.
 - **Trace every dependency.** Don't trust declared deps — verify by checking what each task reads/writes.
 - **Build the coverage matrix.** This is the highest-value output.

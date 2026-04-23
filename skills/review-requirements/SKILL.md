@@ -49,15 +49,15 @@ Check the beginning of your prompt for a `[REVIEW_DEPTH: quick|standard|full]` d
 
 | Depth | Triage Size | Phases to Run | Checks |
 |---|---|---|---|
-| **quick** | small | Phase 0 + Phase 1 + Phase 4 | 0-6, 17-21 (12 checks) |
-| **standard** | medium | Phase 0-5 | 0-25 (26 checks) |
-| **full** | large (default) | Phase 0-6 | All 28 checks |
+| **quick** | small | Phase 0 + Phase 1 + Phase 4 + Phase 7 | 0-6, 17-21, 29-33 (17 checks) |
+| **standard** | medium | Phase 0-5 + Phase 7 | 0-25, 29-33 (31 checks) |
+| **full** | large (default) | Phase 0-7 | All 33 checks |
 
 **If no `[REVIEW_DEPTH]` directive is present, default to `full`.**
 
-For `quick` reviews: skip coverage & gaps, consistency checks, traceability, and stakeholder alignment. Focus on individual requirement quality (including implementation leakage detection) and implementability only — the goal is fast validation that each requirement is specific, testable, and not a disguised design decision.
+For `quick` reviews: skip coverage & gaps, consistency checks, traceability, and stakeholder alignment. Focus on individual requirement quality (including implementation leakage detection), implementability, and engineering integrity (debt/shortcuts/conflicts #29-33) — the goal is fast validation that each requirement is specific, testable, not a disguised design decision, and not quietly introducing debt.
 
-For `standard` reviews: skip Phase 6 (Stakeholder Alignment). These checks are valuable but less critical for incremental requirement updates.
+For `standard` reviews: skip Phase 6 (Stakeholder Alignment). Phase 7 (Engineering Integrity) is always run — debt and conflict detection are non-negotiable, even for incremental requirement updates.
 
 ---
 
@@ -119,6 +119,33 @@ Read the entire requirements document, then run the checks applicable to your re
 27. **Success metrics** — How will you know the requirements are met in production? Are there observable metrics beyond "tests pass"?
 28. **Risk identification** — Are high-risk requirements identified? Complex, novel, or uncertain requirements should be flagged for prototyping/spike.
 
+### Phase 7: Engineering Integrity (Technical Debt, Shortcuts, Conflicts)
+
+Requirements can introduce debt just like designs can — by being too narrow, by conflicting with existing requirements, or by quietly cutting scope that should be kept. This phase surfaces those.
+
+29. **Technical debt in requirement framing** — Does any GOAL/GUARD implicitly accept debt? Look for:
+    - "For now, only support X" without a follow-up requirement for Y (scope cut disguised as phase 1)
+    - "Assume Z" when Z is actually a decision that should be a GUARD
+    - "Legacy compatibility required" without specifying which legacy behaviors (ambiguous debt)
+    - Each instance → 🟡 Important. Either make the scope cut explicit (add non-goal), make the assumption a GUARD, or remove the caveat.
+
+30. **Shortcut / simplification detection** — Is the requirement **dodging the hard part**? potato's rule: 问题有多复杂就处理多复杂. Red flags:
+    - Requirement that names the easy path but omits error/edge cases ("user logs in" without "what if creds expire mid-session")
+    - Quantitative targets conspicuously loose ("handles requests" with no latency/throughput) — might be dodging a hard NFR
+    - "Best-effort" / "when possible" language on requirements that actually have hard dependencies
+    - Each shortcut → 🟡 Important. Ask: "Is this loose because the real answer is hard, or because it genuinely doesn't matter?"
+
+31. **Conflicts with existing requirements / system invariants** — Does this document contradict:
+    - Requirements in other feature docs (cross-feature conflict)? — list the conflicting IDs
+    - GUARDs in the master requirements doc (e.g., feature GOAL contradicts global security GUARD)?
+    - Existing production behavior that callers depend on (breaking change not flagged as such)?
+    - Conventions established across the project (naming, error semantics, data ownership)?
+    - Each conflict → 🔴 Critical. Conflicts discovered in design/implementation are 10x more expensive than conflicts caught here.
+
+32. **Missing non-goals (scope creep prevention)** — potato's rule: "every 'we won't do X' is as valuable as 'we will do Y'." For each feature boundary that's ambiguous, is there an explicit non-goal? If readers could reasonably think "this requires X" but the author meant to exclude X → 🟡 Important. Add a non-goal.
+
+33. **Requirement stability** — Are any requirements flagged as "TBD" / "to be decided" / "pending stakeholder input" without owner + deadline? Unresolved requirements that go to design become discovered-in-implementation rework. Each unowned TBD → 🟡 Important.
+
 ## Output Format
 
 ```markdown
@@ -174,7 +201,7 @@ After writing the review file, report a **brief summary** to the user:
 
 ## Rules
 
-- **Run ALL 28 checks.** Don't skip checks even if early ones find nothing.
+- **Run ALL 33 checks.** Don't skip checks even if early ones find nothing.
 - **No "looks good" without evidence.** For each passed check, note what you verified and the count.
 - **Check EVERY requirement individually for checks #1-5.** Don't just sample — exhaustive review.
 - **Build the coverage matrix.** This is the most valuable output — it shows what's missing, not just what's wrong.
