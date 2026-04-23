@@ -1,8 +1,8 @@
 # ISS-021: Message Envelope — Side Channel, Not In-Band String
 
-- **Status**: 🟢 Phase 4 complete (v2.5 — `MessageContext` alias removed; `process_message_with_context` renamed to `process_message_with_envelope`)
+- **Status**: 🟢 Phase 5b complete — counterfactual measurement returned `delta = 0.000`; Phase 5c (wet migration) rejected on evidence. Architecturally ISS-021 is fully landed at Phase 4; Phase 5c stays `blocked` permanently barring an embedding-model change.
 - **Created**: 2026-04-23
-- **Updated**: 2026-04-23 (v2.5: Phase 4 cleanup landed. `MessageContext` type alias removed from src/context.rs; all ~30 call sites across context.rs, channels/{telegram,discord,slack}.rs, agent.rs, memory.rs now reference `Envelope` directly. `process_message_with_context` renamed to `process_message_with_envelope` — this is now the canonical channel entry point. No behaviour change: 284/284 tests pass, zero new warnings, `grep MessageContext src/` returns only one doc-comment reference describing the removal.)
+- **Updated**: 2026-04-23 (v2.6: Phase 5b controlled-experiment harness landed. Same corpus, query, and recall path; only variable is an 80-token Telegram header prepended (polluted) vs not (clean). 10/10 fixtures P_clean ≡ P_polluted. Validity double-checked: regime diagnostic confirms live Ollama+nomic-embed-text path; heavy-distractor sanity probe drops P@3 by 0.433, proving the harness IS content-sensitive. 315/315 tests pass.)
 - **Priority**: High
 - **Category**: Architecture / Memory Quality
 - **Related**: ISS-018 (recall intent classification), engram extractor dimensional schema
@@ -136,8 +136,97 @@ Landed atomically (no Phase 2→3 bridge state). Merged per v2.1 audit finding F
 
 **Follow-up** (Phase 5):
 - Implement `rustclaw memory migrate-envelope --dry-run` CLI (ISS-021-12 in graph).
-- Counterfactual baseline measurement: `P_if_migrated` against hypothetical-migrated DB copy (ISS-021-13).
-- Wet migration (ISS-021-14) is **gated** on `P_if_migrated - P_before ≥ 0.15`; marked `blocked` in graph until Phase 5b evidence.
+- Counterfactual baseline measurement: `P_clean` vs `P_polluted` via controlled-experiment harness (ISS-021-13).
+- Wet migration (ISS-021-14) is **gated** on `P_clean - P_polluted ≥ 0.15`; marked `blocked` in graph until Phase 5b evidence.
+
+### Phase 5b Design Decision (2026-04-23)
+
+The literal Phase 5 protocol ("copy prod DB → apply migration → re-run baseline fixtures") has a fatal flaw: the synthetic fixture corpus does not exist in the production DB. Running the fixtures against prod data yields `P@3 ≡ 0` because `relevant_ixs` indexes into strings that are not present in prod. The numbers would be produced but signal-free.
+
+**Revised Phase 5b protocol — controlled experiment on synthetic corpus:**
+
+For each of the 10 baseline fixtures, run two variants:
+
+1. **`polluted`** — each corpus item is prepended with a realistic 80-token Telegram header before `store()`:
+   `[TELEGRAM potato (@potatosoupup) id:7539582820 Thu 2026-04-23 12:00 -04:00]\n\n{original_content}`
+2. **`clean`** — corpus stored as-is (current post-Phase-2+3 behavior).
+
+All other variables (embedding model, recall path, session_key scheme, query) are held identical. `delta = P_clean_mean - P_polluted_mean` directly isolates header pollution as a variable.
+
+**Adversarial strengthening:** the polluted variant uses the *same* header across all items in a fixture (same sender, same timestamp-prefix). This matches prod (most polluted rows share `id:7539582820`), and if the embedding model is header-sensitive it will pull polluted items into a tight cluster away from the query.
+
+**Why this is the right measurement:** the hypothesis under test is *"the embedding model is contaminated by in-content channel headers"*. That is a **model property**, not a data-distribution property. A controlled experiment on synthetic corpus measures the model property directly and cleanly.
+
+**Gating:** if `delta ≥ 0.15`, Phase 5c wet migration is justified. If `delta < 0.15`, pollution is not dominant — open a new issue for the real recall bottleneck (embedding choice, extractor dimensions, session_recall strategy) and leave Phase 5c blocked.
+
+## Phase 5b Execution Record (2026-04-23)
+
+### Result
+
+```
+Recall regime: EMBEDDING (Ollama/nomic-embed-text live)
+
+fixture                       P_clean P_polluted      delta
+authentication-flow             0.667      0.667      0.000
+rust-ownership                  1.000      1.000      0.000
+baking-sourdough                0.667      0.667      0.000
+tcp-networking                  1.000      1.000      0.000
+espresso-extraction             0.667      0.667      0.000
+quantum-entanglement            0.667      0.667      0.000
+database-indexing               1.000      1.000      0.000
+mountain-climbing               0.667      0.667      0.000
+ml-gradient-descent             0.667      0.667      0.000
+culinary-fermentation           0.667      0.667      0.000
+  ---
+  mean P_clean    = 0.767
+  mean P_polluted = 0.767
+  DELTA           = +0.000
+  gate threshold  = 0.150
+  decision        = REJECT — pollution not dominant
+```
+
+**10/10 fixtures: clean P@3 ≡ polluted P@3.** `delta = 0.000 ≪ 0.15`.
+
+### Validity checks (both passed)
+
+1. **Recall regime diagnostic**: test self-reports `EMBEDDING (Ollama/nomic-embed-text live)` — confirms the measurement exercises the real embedding + cosine-similarity path, NOT the FTS fallback that would trivially ignore a fixed header token set.
+2. **Harness sanity probe** (`recall_harness_sanity_reacts_to_large_content_changes`): seeding corpus items with a LARGE off-topic prefix (≈150 tokens, 11 unrelated facts) drops P@3 from 0.767 → 0.333, a **−0.433 delta**. The harness is content-sensitive; a real effect would be detected.
+3. **Storage audit**: all 10×2=20 runs stored exactly 8 items, 0 quarantined. The two modes operate on identical populations; delta is not confounded by differential quarantine.
+
+### Interpretation
+
+`nomic-embed-text` is robust to the 80-token Telegram channel header prefix. Mechanistically this matches the retrieval literature: for mean-pooled transformer embeddings, a fixed prefix shared by every item in the corpus adds a common-mode vector component that cancels out of pairwise cosine similarities. Ranking is preserved.
+
+The hypothesis ("header pollution measurably degrades recall") is **falsified under the current embedding model.**
+
+### Gating decision
+
+- **Phase 5c wet migration: REJECTED.** No evidence that rewriting historical rows would improve recall quality. Scheduling that work would be cargo-culting on an untested assumption.
+- **ISS-021-14 remains `blocked`** in the graph, permanently, unless a future change of embedding model re-opens the hypothesis.
+
+### What IS still worth doing (independent of Phase 5c)
+
+The architectural wins from Phase 2+3 still stand on their own merits, none of which required a recall-quality delta to justify:
+
+1. **Single source of truth** — envelope metadata lives in one place (`user_metadata.envelope`), not duplicated in `content`.
+2. **Clean content for downstream extractors** — the engramai entity extractor, KC compiler, and any future LLM-based consumers see real message text, not telegram-preambled noise.
+3. **No round-trip parsing** — no regex-based strip path between channels and agents.
+4. **Debuggability** — querying "which messages came from group X" becomes a structured filter, not a substring search.
+
+### Next step: open a follow-up issue
+
+If recall quality on prod ever feels subjectively worse than expected, the bottleneck is **NOT** header pollution. A new issue should investigate:
+
+- Embedding model choice (nomic-embed-text is small + general; maybe swap for a higher-dimensional or domain-tuned model)
+- Extractor dimension quality (entity extraction relevance to Chinese mixed content, cross-language alignment)
+- `session_recall` strategy (weighting between embedding / FTS / entity channels; working-memory decay tuning)
+- Namespace partitioning (is default namespace overloaded?)
+
+### Verification artifacts
+
+- `src/memory.rs::recall_quality_baseline::recall_counterfactual_header_pollution_phase_5b` — the measurement test (deterministic, idempotent, runs under `cargo test`).
+- `src/memory.rs::recall_quality_baseline::recall_harness_sanity_reacts_to_large_content_changes` — the harness validity guard. If recall ever stops reacting to content changes, THIS test fails first, before Phase 5b produces a meaningless zero.
+- All 315 tests pass, zero new warnings.
 
 ---
 

@@ -1731,4 +1731,334 @@ mod recall_quality_baseline {
         assert!(prefix.contains("POTATO") || prefix.contains("potato"));
         assert!(prefix.contains("testing"));
     }
+
+    // ─── Phase 5b: Counterfactual Measurement ───────────────────────
+    //
+    // Controlled experiment — for each fixture, seed the corpus twice:
+    //   1. `polluted`: each item prepended with a realistic Telegram header
+    //      (matches pre-Phase-2+3 behavior and the legacy rows the diagnostic
+    //      scan found in prod — see `memory_migrate::scan_db`).
+    //   2. `clean`: each item stored as-is (post-Phase-2+3 behavior).
+    //
+    // All other knobs (embedding model, recall path, session_key scheme, query,
+    // recall limit) held identical. delta = P_clean - P_polluted isolates
+    // header pollution as the only variable.
+    //
+    // Adversarial design: the polluted variant shares the SAME header
+    // across all 8 corpus items per fixture, mimicking prod where the vast
+    // majority of legacy rows carry `id:7539582820`. If the embedding model
+    // is header-sensitive, this pulls polluted items into a tight cluster
+    // away from the query vector, amplifying the delta.
+    //
+    // Gate: delta ≥ 0.15 → Phase 5c wet migration justified.
+    //       delta  < 0.15 → pollution not dominant, file separate issue.
+    //
+    // This test does NOT fail on any particular delta — it's a measurement,
+    // not a correctness gate. The decision lives in the Phase 5b Execution
+    // Record in `.gid/issues/ISS-021-message-context-side-channel/issue.md`.
+
+    /// Fixed realistic pollution header matching the legacy format identified
+    /// by `memory_migrate::HEADER_STRIP_RE` / `channel_header_regex`.
+    const POLLUTION_HEADER: &str =
+        "[TELEGRAM potato (@potatosoupup) id:7539582820 Thu 2026-04-23 12:00 -04:00]\n\n";
+
+    /// Run one fixture in one mode; returns (P@3, stored_count, quarantined).
+    fn run_fixture_mode(
+        fixture: &Fixture,
+        mode: &str,
+        pollute: bool,
+    ) -> (f64, usize, usize) {
+        let (mgr, _guard) = make_manager();
+        let session_key = format!("5b-{}-{}", mode, fixture.name);
+
+        for (i, item) in fixture.corpus.iter().enumerate() {
+            let content = if pollute {
+                format!("{}{}", POLLUTION_HEADER, item)
+            } else {
+                (*item).to_string()
+            };
+            mgr.store(
+                &content,
+                MemoryType::Factual,
+                0.5,
+                Some(&format!("5b-{}-{}-ix{}", mode, fixture.name, i)),
+                None,
+            )
+            .expect("store fixture memory (phase 5b)");
+        }
+
+        let (stored, quarantined) = {
+            let engram = mgr.engram.lock().expect("engram lock");
+            let all = engram.list(None).expect("list memories");
+            let q = engram.count_quarantine().expect("count quarantine");
+            (all.len(), q)
+        };
+
+        let (results, _full) = mgr
+            .session_recall(fixture.query, &session_key)
+            .expect("session_recall (phase 5b)");
+
+        // Strip the pollution header before matching — this is exactly what
+        // `memory_migrate::run_migrate_envelope` would do in the wet path, so
+        // P@3 in `polluted` mode reflects *recall quality with contaminated
+        // embeddings but the same reference corpus semantics*. Without this,
+        // we'd be measuring a trivial string-equality artifact instead of
+        // the embedding-contamination effect we actually care about.
+        let p3 = precision_at_3_normalized(&results, fixture, pollute);
+        (p3, stored, quarantined)
+    }
+
+    /// Precision@3 that normalizes recalled content by stripping the
+    /// pollution header before comparing to gold strings. Keeps the
+    /// comparison apples-to-apples across modes.
+    fn precision_at_3_normalized(
+        results: &[RecalledMemory],
+        fixture: &Fixture,
+        strip_header: bool,
+    ) -> f64 {
+        let gold: Vec<&str> = fixture
+            .relevant_ixs
+            .iter()
+            .map(|&i| fixture.corpus[i])
+            .collect();
+        let top_k: Vec<_> = results.iter().take(3).collect();
+        let hits = top_k
+            .iter()
+            .filter(|r| {
+                let c: &str = if strip_header {
+                    r.content
+                        .strip_prefix(POLLUTION_HEADER)
+                        .unwrap_or(&r.content)
+                } else {
+                    &r.content
+                };
+                gold.iter().any(|g| c == *g)
+            })
+            .count();
+        hits as f64 / 3.0
+    }
+
+    #[test]
+    fn recall_counterfactual_header_pollution_phase_5b() {
+        // Diagnostic: which recall path is this harness actually exercising?
+        // If Ollama is down or the embedding provider errored, we'd silently
+        // fall back to FTS — which treats the fixed Telegram header as a set
+        // of term tokens present in every row (common-mode), so delta would
+        // be ~0 for trivial reasons, not because the embedding model is
+        // header-robust. We need to know which regime we're in before
+        // interpreting the delta.
+        let (probe_mgr, _probe_guard) = make_manager();
+        let embedding_regime = {
+            let engram = probe_mgr.engram.lock().expect("engram lock");
+            if engram.is_embedding_available() {
+                "EMBEDDING (Ollama/nomic-embed-text live)"
+            } else if engram.has_embedding_support() {
+                "EMBEDDING-DEGRADED (provider present but unavailable — FTS fallback)"
+            } else {
+                "FTS-ONLY (no embedding provider — delta is uninterpretable)"
+            }
+        };
+        drop(probe_mgr);
+        println!("\n[Phase 5b] Recall regime: {}", embedding_regime);
+
+        let mut per_fixture: Vec<(&str, f64, f64)> = Vec::with_capacity(FIXTURES.len());
+        let mut audit: Vec<(&str, usize, usize, usize, usize)> =
+            Vec::with_capacity(FIXTURES.len()); // (name, clean_stored, clean_q, polluted_stored, polluted_q)
+
+        for fixture in FIXTURES {
+            let (p_clean, c_stored, c_q) = run_fixture_mode(fixture, "clean", false);
+            let (p_polluted, p_stored, p_q) = run_fixture_mode(fixture, "polluted", true);
+            per_fixture.push((fixture.name, p_clean, p_polluted));
+            audit.push((fixture.name, c_stored, c_q, p_stored, p_q));
+        }
+
+        let mean_clean: f64 =
+            per_fixture.iter().map(|(_, c, _)| *c).sum::<f64>() / per_fixture.len() as f64;
+        let mean_polluted: f64 =
+            per_fixture.iter().map(|(_, _, p)| *p).sum::<f64>() / per_fixture.len() as f64;
+        let delta = mean_clean - mean_polluted;
+
+        println!("\n=== ISS-021 Phase 5b: Counterfactual (header pollution) ===");
+        println!("(controlled experiment: same corpus/query, header is the only variable)");
+        println!(
+            "{:<26} {:>10} {:>10} {:>10}",
+            "fixture", "P_clean", "P_polluted", "delta"
+        );
+        for (name, c, p) in &per_fixture {
+            println!(
+                "{:<26} {:>10.3} {:>10.3} {:>10.3}",
+                name,
+                c,
+                p,
+                c - p
+            );
+        }
+        println!("  ---");
+        println!("  mean P_clean    = {:.3}", mean_clean);
+        println!("  mean P_polluted = {:.3}", mean_polluted);
+        println!("  DELTA           = {:+.3}", delta);
+        println!("  gate threshold  = 0.150");
+        let decision = if delta >= 0.15 {
+            "ACCEPT — Phase 5c wet migration justified"
+        } else if delta <= -0.05 {
+            "REJECT + anomaly — polluted scored HIGHER; investigate embedding weirdness"
+        } else {
+            "REJECT — pollution not dominant; open new issue for real bottleneck"
+        };
+        println!("  decision        = {}", decision);
+        println!("============================================================\n");
+
+        println!("=== Phase 5b storage audit ===");
+        for (name, cs, cq, ps, pq) in &audit {
+            println!(
+                "  {:<26} clean(stored={}, q={})  polluted(stored={}, q={})",
+                name, cs, cq, ps, pq
+            );
+        }
+        println!("==============================\n");
+
+        // Integrity gates (same spirit as Phase 1 baseline audit).
+        for (name, cs, cq, ps, pq) in &audit {
+            assert_eq!(
+                *cs, 8,
+                "fixture '{}' clean-mode stored {} rows, expected 8",
+                name, cs
+            );
+            assert_eq!(
+                *cq, 0,
+                "fixture '{}' clean-mode quarantined {} rows (should be 0)",
+                name, cq
+            );
+            assert_eq!(
+                *ps, 8,
+                "fixture '{}' polluted-mode stored {} rows, expected 8 — \
+                 PII scanner may be reacting to the Telegram header",
+                name, ps
+            );
+            assert_eq!(
+                *pq, 0,
+                "fixture '{}' polluted-mode quarantined {} rows — \
+                 PII scanner rejected content with channel header; this \
+                 invalidates the Phase 5b counterfactual (different storage \
+                 population between modes). Investigate before interpreting delta.",
+                name, pq
+            );
+        }
+
+        // Sanity guard: harness produced SOME hits.
+        let any_hit = per_fixture.iter().any(|(_, c, p)| *c > 0.0 || *p > 0.0);
+        assert!(
+            any_hit,
+            "Phase 5b harness produced zero hits across all 20 runs — \
+             recall path is broken, measurement is invalid."
+        );
+        let _ = (mean_clean, mean_polluted, delta);
+    }
+
+    /// Sanity probe (NOT the Phase 5b measurement): confirm the harness
+    /// actually reacts to content changes. Seed corpus with each item
+    /// prepended by a LARGE off-topic text block. If the recall path is
+    /// content-sensitive, P@3 should drop noticeably vs. clean; if not,
+    /// the Phase 5b delta=0 result is uninterpretable (harness broken).
+    ///
+    /// This test asserts P_contaminated < P_clean by at least 0.10 on
+    /// average. If it fails, Phase 5b measurement is void.
+    #[test]
+    fn recall_harness_sanity_reacts_to_large_content_changes() {
+        const HEAVY_DISTRACTOR: &str = "\
+            The migratory patterns of the arctic tern span from pole to pole, \
+            covering roughly 70000 kilometers per year. Baleen whales filter \
+            krill through their keratin plates. Neolithic agriculture began \
+            in the Fertile Crescent around 10000 BCE. Ferromagnetic domains \
+            align under applied magnetic fields. The Doppler effect shifts \
+            perceived frequency for moving sources. Plate tectonics drives \
+            continental drift at a few centimeters per year. The citric acid \
+            cycle produces ATP in mitochondria. Sumerian cuneiform is the \
+            earliest known writing system. Nuclear fusion in stellar cores \
+            creates heavier elements from hydrogen. The speed of sound in \
+            air at sea level is roughly 343 meters per second.\n\n";
+
+        let mut clean_total = 0.0;
+        let mut heavy_total = 0.0;
+
+        for fixture in FIXTURES {
+            // Clean run.
+            let (mgr_c, _g1) = make_manager();
+            let key_c = format!("sanity-clean-{}", fixture.name);
+            for (i, item) in fixture.corpus.iter().enumerate() {
+                mgr_c
+                    .store(
+                        item,
+                        MemoryType::Factual,
+                        0.5,
+                        Some(&format!("sanity-clean-{}-{}", fixture.name, i)),
+                        None,
+                    )
+                    .expect("store");
+            }
+            let (r_c, _) = mgr_c
+                .session_recall(fixture.query, &key_c)
+                .expect("recall clean");
+            clean_total += precision_at_3_normalized(&r_c, fixture, false);
+
+            // Heavy-distractor run — each item gets a large off-topic prefix.
+            let (mgr_h, _g2) = make_manager();
+            let key_h = format!("sanity-heavy-{}", fixture.name);
+            for (i, item) in fixture.corpus.iter().enumerate() {
+                let content = format!("{}{}", HEAVY_DISTRACTOR, item);
+                mgr_h
+                    .store(
+                        &content,
+                        MemoryType::Factual,
+                        0.5,
+                        Some(&format!("sanity-heavy-{}-{}", fixture.name, i)),
+                        None,
+                    )
+                    .expect("store");
+            }
+            let (r_h, _) = mgr_h
+                .session_recall(fixture.query, &key_h)
+                .expect("recall heavy");
+            // Strip the heavy prefix before matching gold (same normalization
+            // idea as Phase 5b — isolate the embedding effect, not a string-
+            // equality artefact).
+            let gold: Vec<&str> = fixture
+                .relevant_ixs
+                .iter()
+                .map(|&i| fixture.corpus[i])
+                .collect();
+            let hits = r_h
+                .iter()
+                .take(3)
+                .filter(|r| {
+                    let c = r.content.strip_prefix(HEAVY_DISTRACTOR).unwrap_or(&r.content);
+                    gold.iter().any(|g| c == *g)
+                })
+                .count();
+            heavy_total += hits as f64 / 3.0;
+        }
+
+        let n = FIXTURES.len() as f64;
+        let p_clean = clean_total / n;
+        let p_heavy = heavy_total / n;
+        let drop = p_clean - p_heavy;
+
+        println!("\n=== Phase 5b sanity probe: does recall react to content? ===");
+        println!("  P_clean    = {:.3}", p_clean);
+        println!("  P_heavy    = {:.3}  (corpus with large off-topic prefix)", p_heavy);
+        println!("  drop       = {:+.3}", drop);
+        println!("===========================================================\n");
+
+        // If heavy-distractor content doesn't measurably hurt recall, the
+        // harness is not actually exercising the embedding-similarity path,
+        // and the Phase 5b delta=0 result cannot be trusted.
+        assert!(
+            drop >= 0.10,
+            "Phase 5b harness sanity check FAILED: a large off-topic prefix \
+             produced drop={:.3}, expected >= 0.10. Recall path likely not \
+             using content embeddings — Phase 5b measurement is invalid \
+             until this is explained.",
+            drop
+        );
+    }
 }
