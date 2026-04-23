@@ -1,19 +1,30 @@
 # ISS-020: Project Path Discovery Friction
 
-**Status**: superseded-by-feature (2026-04-23)
+**Status**: closed (2026-04-23 — resolved by feature-project-registry)
 **Created**: 2026-04-22
+**Closed**: 2026-04-23
 **Reporter**: potato
 **Severity**: medium (not blocking, but wastes 3-5 tool calls every cross-project session)
 
-> **2026-04-23 update**: This issue is being resolved by **feature-project-registry** in gid-rs.
-> Tracked as a 3-part effort:
-> - `gid-rs/.gid/issues/ISS-028-project-registry-cli.md` — gid CLI + `~/.config/gid/projects.yml` (directly resolves ISS-020)
-> - `gid-rs/.gid/issues/ISS-029-ritual-launcher-work-unit.md` — gid-core ritual API accepts work_unit only
-> - `gid-rs/.gid/issues/ISS-030-rustclaw-start-ritual-tool.md` — rustclaw tool adapter
->
-> ISS-020 stays open until ISS-028 ships, then close with a reference.
+## Resolution (2026-04-23)
+
+The underlying friction is resolved by the three-part **feature-project-registry** rollout:
+
+- ✅ **`~/.config/gid/projects.yml`** exists with 9 canonical project mappings (engram, rustclaw, agentctl, causal-agent, swebench, engram-ai-rust, gid-rs, xinfluencer, autoalpha). Registry entries include `aliases` (e.g., `gid-rs` → alias `gid`, `engram-ai-rust` → alias `old-engram`).
+- ✅ **gid-rs ISS-029** — gid-core `WorkUnit` + `RegistryResolver::load_default()` + `resolve_and_validate()`. Library-level resolution with loud failure on registry miss.
+- ✅ **rustclaw ISS-022** (this repo) — `start_ritual` tool now requires structured `work_unit`, resolves path via registry, no more text-grep inheritance. 284/284 tests pass.
+- ✅ **MEMORY.md** — Canonical Project Roots section (added 2026-04-23) is loaded every main session, gives the agent the registry contents in-context even before tool calls.
+
+**What's left** (tracked as gid-rs ISS-028, not blocking closure of this issue):
+- `gid project <list|add|resolve|remove>` CLI subcommands. `projects.yml` exists and the library can read it, but the CLI management commands aren't implemented yet. Current workflow: edit `~/.config/gid/projects.yml` manually. This is workable — the issue's acceptance criteria (agent finds right path on first try) are already met via registry + MEMORY.md + WorkUnit API.
+
+**Verification**:
+- Cross-project ritual launches now require explicit `work_unit` (enforced by tool schema) — impossible to silently land in wrong workspace.
+- Agent's in-context `MEMORY.md` table lists canonical paths for all 9 projects — no trial-and-error probing needed.
 
 ---
+
+## Original Report (kept for history)
 
 ## Symptom
 

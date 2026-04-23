@@ -212,6 +212,12 @@ impl RitualRunner {
     /// Start a new ritual with a task description.
     /// Extracts target project root from the task text if present (e.g., "Project location: /path/to/project").
     /// Otherwise uses the runner's workspace root.
+    ///
+    /// **Deprecated for new callers** — prefer [`start_with_work_unit`] which derives
+    /// the project root from a structured `WorkUnit` via the gid-core project registry
+    /// (see rustclaw ISS-022 / gid-rs ISS-029). This path uses text-grep inheritance
+    /// and is kept only for the `/ritual` Telegram command where the user has already
+    /// selected a project interactively.
     pub async fn start(&self, task: String) -> Result<RitualState> {
         let target_root = extract_target_project_dir(&task)
             .unwrap_or_else(|| self.project_root.clone());
@@ -222,6 +228,42 @@ impl RitualRunner {
             target_root = %target_root.display(),
             task = %truncate(&task, 80),
             "Starting new ritual"
+        );
+        self.save_state(&state)?;
+        self.advance(&state.id, RitualEvent::Start { task }).await
+    }
+
+    /// Start a new ritual from a structured [`WorkUnit`] (rustclaw ISS-022).
+    ///
+    /// The project root is resolved via gid-core's project registry and validated
+    /// before the ritual starts — failure modes are explicit and loud, no silent
+    /// fallback to a default workspace (which was the ISS-027 root cause).
+    ///
+    /// The `WorkUnit` is persisted on `RitualState.work_unit` so downstream phases,
+    /// resume paths, and state-file round-trips know which issue/feature/task is
+    /// the target of work.
+    pub async fn start_with_work_unit(
+        &self,
+        unit: gid_core::ritual::work_unit::WorkUnit,
+        task: String,
+    ) -> Result<RitualState> {
+        use gid_core::ritual::work_unit::{resolve_and_validate, RegistryResolver};
+
+        let resolver = RegistryResolver::load_default()
+            .map_err(|e| anyhow::anyhow!(
+                "failed to load project registry (~/.config/gid/projects.yml): {e}"
+            ))?;
+        let resolved_root = resolve_and_validate(&resolver, &unit).map_err(|e| {
+            anyhow::anyhow!("failed to resolve work unit '{}': {e}", unit.label())
+        })?;
+
+        let state = RitualState::new().with_work_unit(unit.clone(), resolved_root.clone());
+        tracing::info!(
+            ritual_id = %state.id,
+            work_unit = %unit.label(),
+            target_root = %resolved_root.display(),
+            task = %truncate(&task, 80),
+            "Starting new ritual (from work_unit)"
         );
         self.save_state(&state)?;
         self.advance(&state.id, RitualEvent::Start { task }).await
