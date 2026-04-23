@@ -1,7 +1,7 @@
 //! Discord channel adapter using serenity.
 //!
 //! Connects via Discord Gateway, handles messages, mentions, reactions,
-//! and file attachments. Supports structured MessageContext for rich
+//! and file attachments. Supports structured Envelope for rich
 //! sender metadata and reply-to propagation.
 
 use std::sync::Arc;
@@ -15,7 +15,7 @@ use serenity::Client;
 
 use crate::agent::AgentRunner;
 use crate::config::DiscordConfig;
-use crate::context::{self, ChannelCapabilities, ChatType, MessageContext, QuotedMessage};
+use crate::context::{self, ChannelCapabilities, ChatType, Envelope, QuotedMessage};
 use crate::text_utils;
 
 /// Discord bot handler.
@@ -134,8 +134,8 @@ impl DiscordHandler {
         result
     }
 
-    /// Build a MessageContext from a Discord message.
-    fn build_message_context(&self, msg: &Message) -> MessageContext {
+    /// Build an Envelope from a Discord message.
+    fn build_message_context(&self, msg: &Message) -> Envelope {
         let chat_type = if msg.guild_id.is_some() {
             // Guild message — try to get guild name
             ChatType::Group {
@@ -157,7 +157,7 @@ impl DiscordHandler {
             )
         });
 
-        MessageContext {
+        Envelope {
             sender_id: Some(msg.author.id.to_string()),
             sender_name: Some(msg.author.name.clone()),
             sender_username: msg.author.global_name.clone(),
@@ -323,7 +323,7 @@ impl EventHandler for DiscordHandler {
         // Process with agent using structured context
         match self
             .runner
-            .process_message_with_context(&session_key, &content, &msg_ctx, false)
+            .process_message_with_envelope(&session_key, &content, &msg_ctx, false)
             .await
         {
             Ok(response) => {

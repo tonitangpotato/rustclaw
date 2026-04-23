@@ -381,7 +381,7 @@ impl TelegramBot {
         // No hardcoded pattern matching — LLM understands any phrasing.
 
         // Build structured message context
-        let msg_ctx = crate::context::MessageContext {
+        let msg_ctx = crate::context::Envelope {
             sender_id: Some(user_id.to_string()),
             sender_name: message["from"]["first_name"].as_str().map(String::from),
             sender_username: message["from"]["username"].as_str().map(String::from),
@@ -472,23 +472,16 @@ impl TelegramBot {
             key: session_key.clone(),
         };
 
-        // Prepend message context as prefix
-        let channel_caps = self.runner.channel_caps.read().await;
-        let prefix = msg_ctx.format_prefix(&channel_caps.name);
-        let full_message = if prefix.is_empty() {
-            text.clone()
-        } else {
-            format!("{}{}", prefix, text)
-        };
-        drop(channel_caps);
-
-        // Process with event stream (unified path for both streaming and regular)
-        let mut rx = self.runner.process_message_events(
+        // ISS-021 Phase 2+3: no more content prefixing — envelope flows via
+        // process_message_events_with_envelope, renders into system prompt's
+        // "## Message Context" section, and persists in StorageMeta.user_metadata.
+        let mut rx = self.runner.process_message_events_with_envelope(
             &session_key,
-            &full_message,
+            &text,
             Some(&user_id.to_string()),
             Some("telegram"),
             false,
+            Some(msg_ctx.clone()),
         );
 
         // Consume events
@@ -2154,7 +2147,7 @@ Choose a model:", current),
         };
         let session_key = format!("telegram:{}", chat_id);
 
-        let msg_ctx = crate::context::MessageContext {
+        let msg_ctx = crate::context::Envelope {
             sender_id: Some(user_id.to_string()),
             chat_type: crate::context::ChatType::Direct,
             ..Default::default()
@@ -2162,7 +2155,7 @@ Choose a model:", current),
 
         match self
             .runner
-            .process_message_with_context(&session_key, &user_message, &msg_ctx, false)
+            .process_message_with_envelope(&session_key, &user_message, &msg_ctx, false)
             .await
         {
             Ok(response) => {

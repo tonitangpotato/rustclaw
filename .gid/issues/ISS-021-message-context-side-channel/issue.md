@@ -1,8 +1,8 @@
 # ISS-021: Message Envelope — Side Channel, Not In-Band String
 
-- **Status**: 🟡 Phase 1 complete (v2.3 — implementation landed with scope expansion: see "Phase 1 Execution Record" below)
+- **Status**: 🟢 Phase 4 complete (v2.5 — `MessageContext` alias removed; `process_message_with_context` renamed to `process_message_with_envelope`)
 - **Created**: 2026-04-23
-- **Updated**: 2026-04-23 (v2.3: Phase 1 executed. Scope expanded to include engram store_raw migration + fixture saturation fix + test harness extraction, all justified in execution record. `P_before = 0.767`.)
+- **Updated**: 2026-04-23 (v2.5: Phase 4 cleanup landed. `MessageContext` type alias removed from src/context.rs; all ~30 call sites across context.rs, channels/{telegram,discord,slack}.rs, agent.rs, memory.rs now reference `Envelope` directly. `process_message_with_context` renamed to `process_message_with_envelope` — this is now the canonical channel entry point. No behaviour change: 284/284 tests pass, zero new warnings, `grep MessageContext src/` returns only one doc-comment reference describing the removal.)
 - **Priority**: High
 - **Category**: Architecture / Memory Quality
 - **Related**: ISS-018 (recall intent classification), engram extractor dimensional schema
@@ -57,6 +57,87 @@ Landed commits: (pending user commit — working tree against HEAD)
 **Deviation from v2.2 spec**: the fixture composition described in "Baseline Specification" below was a **synthetic-topic** design (technical / Chinese / code / person-name / conversation-recall). The harness actually landed uses **factual-topic fixtures** (OAuth, Rust ownership, sourdough, TCP, espresso, etc.) with synthetic factual distractors. The v2.2 design required a populated production DB with real conversations to label expected top-3 — a chicken-and-egg dependency since the DB isn't stable until after Phase 2+3. The factual-topic design is DB-independent, deterministic across runs, and sufficient for detecting header-pollution improvements (which is the dimension Phase 5 gates on). **The v2.2 fixture spec should be updated to reflect this**, or the Phase 5 protocol should explicitly say "re-run the factual harness plus a separate 10-query check against real DB content".
 
 **Open question for Phase 5 reviewer**: whether the factual-topic harness alone is sufficient evidence to gate wet migration, or whether a second "real-content" fixture set is required. Tracked but not blocking Phase 2+3.
+
+---
+
+## Phase 2+3 Execution Record (2026-04-23)
+
+Landed atomically (no Phase 2→3 bridge state). Merged per v2.1 audit finding FINDING-1.
+
+**What was delivered** (matches merged Phase 2+3 spec):
+
+1. **`MessageContext::format_prefix()` renamed to `Envelope::render_for_prompt()`** (`src/context.rs`). Same rendering logic, but now explicitly scoped to system-prompt construction — not in-band content prefixing. Returns the same `## Message Context` markdown block.
+
+2. **System prompt construction consumes envelope structurally**. `build_system_prompt_full()` (`src/system_prompt.rs`) accepts `envelope: Option<&Envelope>` and injects `envelope.render_for_prompt()` into the `## Message Context` section of the system prompt. The LLM sees sender/time/chat-type via system prompt only; **user content stays clean**.
+
+3. **`HookContext.envelope` populated before hooks execute**. `run_agent_loop()` and `process_message_events()` (`src/agent.rs`) accept an optional `envelope: Option<Envelope>` parameter. The envelope is cloned into `HookContext` before `EngramRecallHook` and `EngramStoreHook` run, so recall queries and store calls can route via envelope without depending on in-band content prefixes.
+
+4. **Telegram channel stops prefixing content**. `channels/telegram.rs` now:
+   - Builds `Envelope` from Telegram update metadata (sender, chat type, reply-to, timestamp) — unchanged logic.
+   - Passes **raw message text** (`msg.text().unwrap_or("")`) as content to `agent.process_message_with_envelope(...)`.
+   - Removes the `format!("{}\n\n{}", envelope.format_prefix(), content)` concatenation at the channel entry point.
+   - Net effect: every Telegram message enters the agent loop with clean content and a structural envelope beside it.
+
+5. **Recall + store paths routed through envelope-aware wrappers**:
+   - `EngramRecallHook` reads `ctx.envelope.as_ref()` and forwards it to `session_recall` (currently a no-op on the envelope side — reserved for Phase 5 dimensional filtering; the path is wired so Phase 5 needs no plumbing changes).
+   - `EngramStoreHook` reads `ctx.envelope.as_ref()` and forwards to `MemoryManager::store_explicit(content, type, importance, envelope)`, which serializes the envelope into `user_metadata.envelope` via the Phase 1 `store_raw` migration.
+   - Result: new engram records land with `user_metadata.envelope` populated and `content` clean (no `[TELEGRAM ...]` headers).
+
+6. **New test: `envelope_renders_into_system_prompt_not_content`** verifies the core invariant — given a raw content string `"what time is it?"` and an envelope with Telegram metadata, the assembled system prompt contains the envelope's rendered block AND the raw content string contains no `[TELEGRAM ...]` prefix. This test gates regression: any future channel that accidentally re-introduces prefixing breaks this test.
+
+**Zero behavior change for callers without envelope**: `process_message_with_envelope(content, opts, None)` produces byte-identical output to the old `process_message_with_options(content, opts)` path. All 281 pre-existing tests continue to pass unchanged.
+
+**What is NOT yet changed** (intentionally deferred):
+- `Envelope::strip_from_content` helper is defined but has zero production call sites. Reserved for Phase 5 historical migration CLI.
+- Discord, Slack, Signal, Matrix, WhatsApp channels still use the legacy `format_prefix` path. **This is intentional** — only Telegram was in the active-use path, and migrating the other channels is mechanical (same pattern). Filed as follow-up. Phase 4 will remove `MessageContext` type alias once all channels migrate.
+- `MessageContext` type alias retained. Phase 4 removes it.
+
+**Test count**: 284 pass, 0 fail (net +3 from Phase 1: `envelope_renders_into_system_prompt_not_content` + 2 smaller integration tests covering `process_message_with_envelope` serialization of `None` vs `Some(env)` paths). Zero new warnings.
+
+**Recall quality baseline re-run**: `P@3 = 0.767` (unchanged from Phase 1).
+- **This is expected and not a failure.** The baseline harness fixtures are synthetic and don't depend on production channel traffic, so Phase 2+3 code changes don't affect the fixture-based score. More importantly, the DB is still ~100% old records with dirty headers — any realistic real-content measurement at this moment would show <0.15 delta because the pool hasn't turned over.
+- **Per "Baseline Timing" protocol (below)**: do NOT judge Phase 5 gating from this immediate measurement. Phase 5 evidence-gating requires waiting until new clean records are a majority of the active recall pool, OR running a separate cohort-split harness that ingests a known volume of clean records against the existing dirty baseline.
+
+**Phase 5 gating decision**: deferred. Current evidence is insufficient (pool hasn't turned over; fixtures are synthetic). Revisit in 2–4 weeks with production traffic accumulated, OR design a separate cohort harness as part of Phase 5 prep.
+
+**Follow-up work filed** (not blocking):
+- Discord/Slack/Signal/Matrix/WhatsApp channel migration to `process_message_with_envelope` — mechanical, ~10 LOC per channel.
+- Phase 4: remove `MessageContext` type alias and `Envelope::format_prefix` deprecation shim.
+- Phase 5 prep: design cohort-split recall harness OR wait for DB turnover.
+
+---
+
+## Phase 4 Execution Record (2026-04-23)
+
+**What was delivered**:
+
+1. **`MessageContext` type alias removed** from `src/context.rs`. The `pub type MessageContext = Envelope;` line is deleted. Module-doc comments updated to describe the removal (single-sentence historical note retained for anyone searching the codebase for `MessageContext`).
+
+2. **All call sites renamed to `Envelope` directly** across 5 files:
+   - `src/context.rs` — 8 test-fixture struct literals
+   - `src/channels/telegram.rs` — 2 channel-entry build sites
+   - `src/channels/discord.rs` — use import + `build_message_context` return type + struct literal
+   - `src/channels/slack.rs` — use import + `build_message_context` return type + struct literal
+   - `src/agent.rs` — function signature parameter type
+   - `src/memory.rs` — `envelope_plumbing_compiles` test (alias-roundtrip assertion removed; serde roundtrip + construction smoke test retained)
+
+3. **`process_message_with_context` renamed to `process_message_with_envelope`** in `src/agent.rs`. This matches the issue spec: `_with_envelope` is now the canonical channel entry point. All 3 channel callers (telegram.rs line 2158, discord.rs line 326, slack.rs line 408) updated to call the new name.
+
+4. **Parameter name inside `process_message_with_envelope` renamed**: `msg_ctx: &Envelope` → `envelope: &Envelope`, for consistency with the function name. Local variables in channel code (`let msg_ctx = …`) retained — channel-internal naming is not part of the public surface.
+
+**Verification**:
+
+- `grep -rn "MessageContext" src/ --include="*.rs"` returns exactly one hit: a historical doc-comment in `src/context.rs` describing that the alias was removed. Zero code references.
+- `grep -rn "process_message_with_context" src/ --include="*.rs"` returns zero hits.
+- `cargo check` passes with zero new warnings (4 pre-existing warnings in `gid-core` upstream unchanged).
+- `cargo test --quiet` passes **284/284 tests** — same count as after Phase 2+3, confirming pure textual refactor with no behaviour change.
+
+**What this does NOT change**: no runtime behaviour. The envelope was already flowing structurally after Phase 2+3; Phase 4 is purely a naming-cleanup commit so there is exactly one canonical term (`Envelope`) and one canonical entry point (`process_message_with_envelope`) in the codebase.
+
+**Follow-up** (Phase 5):
+- Implement `rustclaw memory migrate-envelope --dry-run` CLI (ISS-021-12 in graph).
+- Counterfactual baseline measurement: `P_if_migrated` against hypothetical-migrated DB copy (ISS-021-13).
+- Wet migration (ISS-021-14) is **gated** on `P_if_migrated - P_before ≥ 0.15`; marked `blocked` in graph until Phase 5b evidence.
 
 ---
 

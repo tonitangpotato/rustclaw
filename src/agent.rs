@@ -825,30 +825,31 @@ CRITICAL CONSTRAINTS:
         self.process_message_with_options(session_key, user_message, user_id, channel, false).await
     }
 
-    /// Process with structured context, returning ProcessedResponse.
-    pub async fn process_message_with_context(
+    /// Process a channel message with structured Envelope metadata.
+    ///
+    /// This is the canonical entry point for all channel traffic (ISS-021). The
+    /// envelope flows structurally through `HookContext` and renders into the
+    /// system prompt's `## Message Context` section — it is never concatenated
+    /// into `user_message`.
+    pub async fn process_message_with_envelope(
         self: &Arc<Self>,
         session_key: &str,
         user_message: &str,
-        msg_ctx: &crate::context::MessageContext,
+        envelope: &crate::context::Envelope,
         is_heartbeat: bool,
     ) -> anyhow::Result<crate::context::ProcessedResponse> {
-        // Prepend message context as prefix
-        let channel_caps = self.channel_caps.read().await;
-        let prefix = msg_ctx.format_prefix(&channel_caps.name);
-        let full_message = if prefix.is_empty() {
-            user_message.to_string()
-        } else {
-            format!("{}{}", prefix, user_message)
-        };
-        drop(channel_caps);
+        // ISS-021 Phase 2+3: no more content prefixing. The envelope flows
+        // structurally through HookContext and renders into the system prompt's
+        // `## Message Context` section. ctx.content is the raw user message.
+        let channel_name = self.channel_caps.read().await.name.clone();
 
-        let raw = self.process_message_with_options(
+        let raw = self.process_message_with_options_and_envelope(
             session_key,
-            &full_message,
-            msg_ctx.sender_id.as_deref(),
-            Some(&self.channel_caps.read().await.name),
+            user_message,
+            envelope.sender_id.as_deref(),
+            Some(&channel_name),
             is_heartbeat,
+            Some(envelope),
         ).await?;
 
         Ok(crate::context::ProcessedResponse::from_raw(&raw))
@@ -871,22 +872,14 @@ CRITICAL CONSTRAINTS:
         crate::events::collect_response(rx).await
     }
 
-    /// Process a message with an explicit `Envelope` side channel (ISS-021 Phase 1).
+    /// Process a message with an explicit `Envelope` side channel (ISS-021 Phase 2+3).
     ///
-    /// This is the **parallel entry point** introduced in Phase 1 — structurally
-    /// identical to `process_message_with_options`, but accepts a typed
-    /// `Envelope` that will carry channel metadata out-of-band in Phase 2+3.
+    /// The envelope flows into `HookContext.envelope` and into the system prompt's
+    /// `## Message Context` section via `build_system_prompt_full_with_envelope`.
+    /// `user_message` must be the raw message content — no `[CHANNEL ...]` prefix.
     ///
-    /// In Phase 1 the envelope is accepted but not consumed: the implementation
-    /// delegates to the existing method so behaviour is unchanged. This exists
-    /// now so channels / callers can start threading the envelope through
-    /// without coupling to Phase 2+3 landing atomically.
-    ///
-    /// **Zero-behaviour-change contract**: for any given `(session_key, user_message,
-    /// user_id, channel, is_heartbeat)`, the output of this method must be
-    /// byte-for-byte identical to `process_message_with_options` with the same
-    /// arguments, regardless of the envelope value. The baseline test in
-    /// `tests/recall_quality_baseline.rs` relies on this.
+    /// When `envelope = None`, behaves byte-identically to
+    /// `process_message_with_options` (internal tools, sub-agent continuations).
     pub async fn process_message_with_options_and_envelope(
         self: &Arc<Self>,
         session_key: &str,
@@ -894,15 +887,13 @@ CRITICAL CONSTRAINTS:
         user_id: Option<&str>,
         channel: Option<&str>,
         is_heartbeat: bool,
-        _envelope: Option<&crate::context::Envelope>,
+        envelope: Option<&crate::context::Envelope>,
     ) -> anyhow::Result<String> {
-        // Phase 1: envelope is plumbed but not consumed — delegate.
-        // Phase 2+3 will: (a) attach envelope to HookContext; (b) persist to
-        // engramai StorageMeta::user_metadata as `{"envelope": <json>}`;
-        // (c) render into system prompt via Envelope::render_for_prompt().
-        self.process_message_with_options(
+        let rx = self.process_message_events_with_envelope(
             session_key, user_message, user_id, channel, is_heartbeat,
-        ).await
+            envelope.cloned(),
+        );
+        crate::events::collect_response(rx).await
     }
 
     /// Core message processing — emits AgentEvents via a channel.
@@ -923,6 +914,27 @@ CRITICAL CONSTRAINTS:
         channel: Option<&str>,
         is_heartbeat: bool,
     ) -> tokio::sync::mpsc::Receiver<crate::events::AgentEvent> {
+        self.process_message_events_with_envelope(
+            session_key, user_message, user_id, channel, is_heartbeat, None,
+        )
+    }
+
+    /// Envelope-aware variant of `process_message_events` (ISS-021 Phase 2+3).
+    ///
+    /// When `envelope = Some(env)`:
+    /// - `env` is attached to `HookContext.envelope` (visible to all hooks)
+    /// - The system prompt gains a `## Message Context` section (sender / chat / time / reply)
+    /// - `EngramStoreHook` persists `env` into `StorageMeta::user_metadata.envelope`
+    /// - `user_message` is expected to be the **raw** user content — no `[CHANNEL ...]` prefix
+    pub fn process_message_events_with_envelope(
+        self: &Arc<Self>,
+        session_key: &str,
+        user_message: &str,
+        user_id: Option<&str>,
+        channel: Option<&str>,
+        is_heartbeat: bool,
+        envelope: Option<crate::context::Envelope>,
+    ) -> tokio::sync::mpsc::Receiver<crate::events::AgentEvent> {
         use crate::events::{event_channel, AgentEvent};
 
         let (tx, rx) = event_channel();
@@ -941,6 +953,7 @@ CRITICAL CONSTRAINTS:
                 user_id.as_deref(),
                 channel.as_deref(),
                 is_heartbeat,
+                envelope,
             ).await;
 
             if let Err(e) = result {
@@ -960,6 +973,7 @@ CRITICAL CONSTRAINTS:
         user_id: Option<&str>,
         channel: Option<&str>,
         is_heartbeat: bool,
+        envelope: Option<crate::context::Envelope>,
     ) -> anyhow::Result<()> {
         use crate::events::AgentEvent;
 
@@ -1012,7 +1026,7 @@ CRITICAL CONSTRAINTS:
             channel: channel.map(String::from),
             content: user_message.to_string(),
             metadata: serde_json::json!({}),
-            envelope: None,
+            envelope: envelope.clone(),
         };
 
         {
@@ -1045,11 +1059,12 @@ CRITICAL CONSTRAINTS:
 
         // 4. Build system prompt
         let caps = self.channel_caps.read().await;
-        let mut system_prompt = self.workspace.build_system_prompt_full(
+        let mut system_prompt = self.workspace.build_system_prompt_full_with_envelope(
             &self.runtime_ctx,
             &caps,
             is_heartbeat,
             Some(user_message),
+            envelope.as_ref(),
         );
         drop(caps);
         if !memory_context.is_empty() {

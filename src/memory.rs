@@ -1695,9 +1695,8 @@ mod recall_quality_baseline {
     #[test]
     fn envelope_plumbing_compiles() {
         // This test exists to pin the Phase 1 contract: `Envelope` must be
-        // constructible, cloneable, serde-roundtrippable, and fall back to the
-        // legacy `MessageContext` alias without any call-site changes.
-        use crate::context::{ChatType, Envelope, MessageContext, QuotedMessage};
+        // constructible, cloneable, and serde-roundtrippable.
+        use crate::context::{ChatType, Envelope, QuotedMessage};
 
         let env = Envelope {
             sender_id: Some("u1".into()),
@@ -1714,9 +1713,6 @@ mod recall_quality_baseline {
             message_id: Some(100),
         };
 
-        // Alias works — `MessageContext` is `Envelope`.
-        let _aliased: MessageContext = env.clone();
-
         // Serde roundtrip works — Phase 2 persists this into
         // `StorageMeta::user_metadata` as `{"envelope": <json>}`.
         let json = serde_json::to_value(&env).expect("serialize envelope");
@@ -1728,10 +1724,10 @@ mod recall_quality_baseline {
             _ => panic!("chat_type roundtrip lost variant"),
         }
 
-        // `format_prefix` still works — legacy header rendering path must
+        // `render_for_prompt` still works — legacy header rendering path must
         // remain intact through Phase 1 (Phase 2+3 introduce the envelope
         // side-channel, Phase 4 removes this call path).
-        let prefix = env.format_prefix("telegram");
+        let prefix = env.render_for_prompt("telegram");
         assert!(prefix.contains("POTATO") || prefix.contains("potato"));
         assert!(prefix.contains("testing"));
     }

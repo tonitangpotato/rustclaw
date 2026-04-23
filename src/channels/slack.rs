@@ -2,7 +2,7 @@
 //!
 //! Connects via WebSocket for real-time events. Uses Socket Mode which requires
 //! an app-level token in addition to the bot token. Supports structured
-//! MessageContext for rich sender metadata and thread-based reply routing.
+//! Envelope for rich sender metadata and thread-based reply routing.
 
 use std::sync::Arc;
 
@@ -12,7 +12,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
 use crate::agent::AgentRunner;
 use crate::config::SlackConfig;
-use crate::context::{ChannelCapabilities, ChatType, MessageContext, ProcessedResponse};
+use crate::context::{ChannelCapabilities, ChatType, Envelope, ProcessedResponse};
 use crate::text_utils;
 
 const SLACK_API: &str = "https://slack.com/api";
@@ -279,8 +279,8 @@ impl SlackBot {
         Ok(())
     }
 
-    /// Build a MessageContext from a Slack event.
-    fn build_message_context(&self, event: &serde_json::Value) -> MessageContext {
+    /// Build an Envelope from a Slack event.
+    fn build_message_context(&self, event: &serde_json::Value) -> Envelope {
         let user = event["user"].as_str().unwrap_or("unknown");
         let channel = event["channel"].as_str().unwrap_or("");
         let thread_ts = event["thread_ts"].as_str();
@@ -302,7 +302,7 @@ impl SlackBot {
             None // We'd need an API call to get parent message text
         });
 
-        MessageContext {
+        Envelope {
             sender_id: Some(user.to_string()),
             sender_name: None, // Would require users.info API call
             sender_username: Some(user.to_string()), // Slack user IDs as username fallback
@@ -405,7 +405,7 @@ impl SlackBot {
         // Process with agent using structured context
         match self
             .runner
-            .process_message_with_context(&session_key, &content, &msg_ctx, false)
+            .process_message_with_envelope(&session_key, &content, &msg_ctx, false)
             .await
         {
             Ok(response) => {

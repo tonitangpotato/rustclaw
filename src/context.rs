@@ -3,11 +3,12 @@
 //! ## Envelope (ISS-021)
 //!
 //! `Envelope` is the structured per-message metadata carried alongside — not inside —
-//! user content. The old name `MessageContext` is kept as a type alias for backward
-//! compatibility; prefer `Envelope` in new code. Deriving `Serialize`/`Deserialize`
-//! lets us persist an envelope to `engramai::StorageMeta::user_metadata` under the
-//! `envelope` key in Phase 2, enabling context-aware recall without header-string
-//! parsing.
+//! user content. Deriving `Serialize`/`Deserialize` lets us persist an envelope to
+//! `engramai::StorageMeta::user_metadata` under the `envelope` key, enabling
+//! context-aware recall without header-string parsing.
+//!
+//! The legacy name `MessageContext` (a type alias) was removed in Phase 4 — all
+//! call sites use `Envelope` directly.
 
 use chrono::Local;
 use serde::{Deserialize, Serialize};
@@ -15,11 +16,9 @@ use serde::{Deserialize, Serialize};
 /// Per-message metadata from the channel.
 ///
 /// This is the "side channel" for who/where/when context. It is **never**
-/// concatenated into the user message string in new code paths; instead it is
-/// rendered into the system prompt at the appropriate boundary and persisted
-/// as JSON on memory records.
-///
-/// The legacy name `MessageContext` is kept as a type alias — see module docs.
+/// concatenated into the user message string; instead it is rendered into the
+/// system prompt at the appropriate boundary (via `render_for_prompt`) and
+/// persisted as JSON on memory records (via `StorageMeta::user_metadata`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Envelope {
     pub sender_id: Option<String>,
@@ -30,16 +29,9 @@ pub struct Envelope {
     pub message_id: Option<i64>,
 }
 
-/// Backward-compatible alias. New code should use `Envelope`.
-///
-/// This alias will be removed in ISS-021 Phase 4 once all call sites have
-/// migrated. Struct-literal syntax (`MessageContext { … }`) works through the
-/// alias because `Envelope` has no generic parameters.
-pub type MessageContext = Envelope;
-
 impl Envelope {
     /// Format as a user message prefix (injected before the actual message).
-    pub fn format_prefix(&self, channel_name: &str) -> String {
+    pub fn render_for_prompt(&self, channel_name: &str) -> String {
         let mut parts = Vec::new();
 
         // Sender line
@@ -423,33 +415,33 @@ mod tests {
 
     #[test]
     fn test_message_context_prefix_direct() {
-        let ctx = MessageContext {
+        let ctx = Envelope {
             sender_name: Some("potato".into()),
             sender_username: Some("potatosoupup".into()),
             sender_id: Some("123".into()),
             chat_type: ChatType::Direct,
             ..Default::default()
         };
-        let prefix = ctx.format_prefix("telegram");
+        let prefix = ctx.render_for_prompt("telegram");
         assert!(prefix.contains("TELEGRAM potato (@potatosoupup) id:123"));
     }
 
     #[test]
     fn test_message_context_prefix_group() {
-        let ctx = MessageContext {
+        let ctx = Envelope {
             sender_name: Some("potato".into()),
             chat_type: ChatType::Group {
                 title: Some("Test Group".into()),
             },
             ..Default::default()
         };
-        let prefix = ctx.format_prefix("telegram");
+        let prefix = ctx.render_for_prompt("telegram");
         assert!(prefix.contains("in group \"Test Group\""));
     }
 
     #[test]
     fn test_message_context_prefix_with_reply() {
-        let ctx = MessageContext {
+        let ctx = Envelope {
             sender_name: Some("potato".into()),
             reply_to: Some(QuotedMessage {
                 text: "Original message".into(),
@@ -460,14 +452,14 @@ mod tests {
             }),
             ..Default::default()
         };
-        let prefix = ctx.format_prefix("telegram");
+        let prefix = ctx.render_for_prompt("telegram");
         assert!(prefix.contains("Replying to bot (msg_id:999):"));
         assert!(prefix.contains("> Original message"));
     }
 
     #[test]
     fn test_message_context_prefix_with_reply_username() {
-        let ctx = MessageContext {
+        let ctx = Envelope {
             sender_name: Some("potato".into()),
             reply_to: Some(QuotedMessage {
                 text: "Hello there".into(),
@@ -478,14 +470,14 @@ mod tests {
             }),
             ..Default::default()
         };
-        let prefix = ctx.format_prefix("telegram");
+        let prefix = ctx.render_for_prompt("telegram");
         assert!(prefix.contains("Replying to bot (@mybot) (msg_id:42):"));
         assert!(prefix.contains("> Hello there"));
     }
 
     #[test]
     fn test_message_context_prefix_reply_multiline() {
-        let ctx = MessageContext {
+        let ctx = Envelope {
             sender_name: Some("user".into()),
             reply_to: Some(QuotedMessage {
                 text: "Line one\nLine two\nLine three".into(),
@@ -496,7 +488,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let prefix = ctx.format_prefix("discord");
+        let prefix = ctx.render_for_prompt("discord");
         assert!(prefix.contains("> Line one\n> Line two\n> Line three"));
     }
 
@@ -719,7 +711,7 @@ mod tests {
             "text": "Here's the info you requested"
         });
         let quoted = QuotedMessage::from_telegram_json(&reply_json).unwrap();
-        let ctx = MessageContext {
+        let ctx = Envelope {
             sender_name: Some("potato".into()),
             sender_username: Some("potatosoupup".into()),
             sender_id: Some("300".into()),
@@ -729,7 +721,7 @@ mod tests {
             reply_to: Some(quoted),
             message_id: Some(101),
         };
-        let prefix = ctx.format_prefix("telegram");
+        let prefix = ctx.render_for_prompt("telegram");
         assert!(prefix.contains("TELEGRAM potato (@potatosoupup) id:300"));
         assert!(prefix.contains("in group \"Dev Chat\""));
         assert!(prefix.contains("Replying to RustClaw (@rustclawbot) (msg_id:100):"));
@@ -746,7 +738,7 @@ mod tests {
             "What's the weather like?",
             444555666,
         );
-        let ctx = MessageContext {
+        let ctx = Envelope {
             sender_name: Some("Replier".into()),
             sender_id: Some("777888999".into()),
             chat_type: ChatType::Group {
@@ -756,7 +748,7 @@ mod tests {
             message_id: Some(444555667),
             ..Default::default()
         };
-        let prefix = ctx.format_prefix("discord");
+        let prefix = ctx.render_for_prompt("discord");
         assert!(prefix.contains("DISCORD Replier id:777888999"));
         assert!(prefix.contains("in group \"General\""));
         assert!(prefix.contains("Replying to SomeUser (msg_id:444555666):"));
@@ -771,14 +763,14 @@ mod tests {
             "I can help with that!",
             900800700,
         );
-        let ctx = MessageContext {
+        let ctx = Envelope {
             sender_name: Some("User".into()),
             sender_id: Some("400500600".into()),
             chat_type: ChatType::Direct,
             reply_to: Some(quoted),
             ..Default::default()
         };
-        let prefix = ctx.format_prefix("discord");
+        let prefix = ctx.render_for_prompt("discord");
         assert!(prefix.contains("DISCORD User id:400500600"));
         assert!(!prefix.contains("in group"));
         assert!(prefix.contains("Replying to BotName (msg_id:900800700):"));

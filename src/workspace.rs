@@ -634,6 +634,25 @@ impl Workspace {
         is_heartbeat: bool,
         user_message: Option<&str>,
     ) -> String {
+        self.build_system_prompt_full_with_envelope(
+            runtime, channel, is_heartbeat, user_message, None,
+        )
+    }
+
+    /// Build system prompt with an optional envelope section (ISS-021 Phase 2+3).
+    ///
+    /// When `envelope` is `Some`, a `## Message Context` section is injected
+    /// with sender/chat/timestamp/reply info. The body matches what used to be
+    /// prepended to the user message (via `Envelope::render_for_prompt`), but
+    /// now lives in the system prompt — cleaner content, cleaner recall.
+    pub fn build_system_prompt_full_with_envelope(
+        &self,
+        runtime: &crate::context::RuntimeContext,
+        channel: &crate::context::ChannelCapabilities,
+        is_heartbeat: bool,
+        user_message: Option<&str>,
+        envelope: Option<&crate::context::Envelope>,
+    ) -> String {
         let current_time = Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
 
         let mut sections = Vec::new();
@@ -648,6 +667,25 @@ impl Workspace {
             self.root.display(),
             runtime.format_for_prompt(),
         ));
+
+        // 1b. Message Context (ISS-021 Phase 2+3) — envelope rendered structurally
+        //     into system prompt instead of prepended to user content. Same info,
+        //     cleaner recall (no [TELEGRAM ...] headers polluting semantic embeddings).
+        if let Some(env) = envelope {
+            let body = env.render_for_prompt(&channel.name);
+            if !body.is_empty() {
+                // render_for_prompt includes a trailing "\n\n" — strip it for section
+                let trimmed = body.trim_end();
+                sections.push(format!(
+                    "## Message Context\n\
+                     The current incoming message has the following channel-level metadata. \
+                     Use it to know who's speaking, when, and whether it's a reply — \
+                     but do not echo these fields verbatim into your response.\n\n\
+                     {}",
+                    trimmed
+                ));
+            }
+        }
 
         // 2. Context files notice
         sections.push(
@@ -1097,4 +1135,114 @@ mod tests {
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].dir_name, "url-detect");
     }
+
+    // ── ISS-021 Phase 2+3: Envelope rendering in system prompt ───────────
+
+    fn make_empty_workspace() -> (tempfile::TempDir, Workspace) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let skill_registry = SkillRegistry::load(tmp.path()).unwrap();
+        let ws = Workspace {
+            root: tmp.path().to_path_buf(),
+            soul: None,
+            agents: None,
+            user: None,
+            tools: None,
+            heartbeat: None,
+            memory: None,
+            identity: None,
+            bootstrap: None,
+            model: None,
+            skill_registry,
+            trigger_strategy: None,
+            ritual_registry: None,
+        };
+        (tmp, ws)
+    }
+
+    #[test]
+    fn test_system_prompt_without_envelope_has_no_message_context_section() {
+        let (_tmp, ws) = make_empty_workspace();
+        let runtime = crate::context::RuntimeContext::detect("claude-opus-4-6");
+        let caps = crate::context::ChannelCapabilities::default();
+        let prompt = ws.build_system_prompt_full(&runtime, &caps, false, Some("hello"));
+        assert!(
+            !prompt.contains("## Message Context"),
+            "system prompt should not carry ## Message Context when envelope=None"
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_with_envelope_renders_message_context_section() {
+        use crate::context::{ChatType, Envelope};
+        let (_tmp, ws) = make_empty_workspace();
+        let runtime = crate::context::RuntimeContext::detect("claude-opus-4-6");
+        let caps = crate::context::ChannelCapabilities {
+            name: "telegram".to_string(),
+            ..Default::default()
+        };
+        let envelope = Envelope {
+            sender_name: Some("potato".to_string()),
+            sender_username: Some("potatosoupup".to_string()),
+            sender_id: Some("7539582820".to_string()),
+            chat_type: ChatType::Direct,
+            reply_to: None,
+            message_id: Some(1),
+        };
+        let prompt = ws.build_system_prompt_full_with_envelope(
+            &runtime,
+            &caps,
+            false,
+            Some("what time is it?"),
+            Some(&envelope),
+        );
+        assert!(
+            prompt.contains("## Message Context"),
+            "envelope should render a ## Message Context heading"
+        );
+        assert!(prompt.contains("potato"), "sender_name must reach prompt");
+        assert!(prompt.contains("@potatosoupup"), "sender_username must reach prompt");
+        assert!(prompt.contains("TELEGRAM"), "channel name rendered in envelope body");
+    }
+
+    #[test]
+    fn test_system_prompt_with_envelope_preserves_reply_context() {
+        use crate::context::{ChatType, Envelope, QuotedMessage};
+        let (_tmp, ws) = make_empty_workspace();
+        let runtime = crate::context::RuntimeContext::detect("claude-opus-4-6");
+        let caps = crate::context::ChannelCapabilities {
+            name: "telegram".to_string(),
+            ..Default::default()
+        };
+        let envelope = Envelope {
+            sender_name: Some("potato".to_string()),
+            sender_username: None,
+            sender_id: Some("123".to_string()),
+            chat_type: ChatType::Group {
+                title: Some("marketing".to_string()),
+            },
+            reply_to: Some(QuotedMessage {
+                text: "previous agent turn".to_string(),
+                sender_name: Some("rustclaw".to_string()),
+                sender_username: None,
+                sender_id: None,
+                message_id: Some(42),
+            }),
+            message_id: Some(99),
+        };
+        let prompt = ws.build_system_prompt_full_with_envelope(
+            &runtime,
+            &caps,
+            false,
+            Some("继续"),
+            Some(&envelope),
+        );
+        assert!(prompt.contains("## Message Context"));
+        assert!(prompt.contains("marketing"), "group title rendered");
+        assert!(prompt.contains("Replying to"), "reply context rendered");
+        assert!(prompt.contains("msg_id:42"), "message id rendered");
+        // Content should NOT be prepended to user message path anymore — verify
+        // the envelope body appears in system prompt, not inline with user message.
+        assert!(!prompt.contains("继续"), "user message body should not leak into system prompt");
+    }
 }
+
