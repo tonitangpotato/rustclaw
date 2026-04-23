@@ -10,6 +10,89 @@ use std::sync::Arc;
 use crate::hooks::{Hook, HookContext, HookOutcome, HookPoint};
 use crate::memory::MemoryManager;
 
+/// Append a recall-trace line to `recall-trace.jsonl` for later offline analysis.
+///
+/// Writes one JSON object per recall event. Failures are logged via `tracing::warn!`
+/// but never propagated — this is diagnostic tooling and must never break the hook path.
+///
+/// Fields:
+/// - ts: RFC3339 timestamp
+/// - session_key: session identifier
+/// - query: user message content used as recall query
+/// - query_len: character length of query
+/// - ok: whether session_recall succeeded
+/// - full_recall_triggered: whether topic changed triggered full recall
+/// - error: error message if ok=false
+/// - result_count: number of memories returned
+/// - results: array of {content, type, confidence, confidence_label}
+fn write_recall_trace(
+    session_key: &str,
+    query: &str,
+    outcome: &Result<
+        (Vec<crate::memory::RecalledMemory>, bool),
+        anyhow::Error,
+    >,
+) {
+    use std::io::Write;
+
+    // Trace file lives next to the binary's CWD by default, overridable via
+    // RUSTCLAW_RECALL_TRACE for tests / alternate deployments. Using a relative
+    // path keeps this portable (the previous hardcoded /Users/potato/... only
+    // worked on one machine).
+    let trace_path = std::env::var("RUSTCLAW_RECALL_TRACE")
+        .unwrap_or_else(|_| "recall-trace.jsonl".to_string());
+    let ts = chrono::Local::now().to_rfc3339();
+
+    let entry = match outcome {
+        Ok((results, full_recall)) => serde_json::json!({
+            "ts": ts,
+            "session_key": session_key,
+            "query": query,
+            "query_len": query.chars().count(),
+            "ok": true,
+            "full_recall_triggered": full_recall,
+            "result_count": results.len(),
+            "results": results.iter().map(|r| serde_json::json!({
+                "content": r.content,
+                "type": r.memory_type,
+                "confidence": r.confidence,
+                "confidence_label": r.confidence_label,
+            })).collect::<Vec<_>>(),
+        }),
+        Err(e) => serde_json::json!({
+            "ts": ts,
+            "session_key": session_key,
+            "query": query,
+            "query_len": query.chars().count(),
+            "ok": false,
+            "error": e.to_string(),
+        }),
+    };
+
+    let line = match serde_json::to_string(&entry) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("recall-trace serialize failed: {}", e);
+            return;
+        }
+    };
+
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(trace_path)
+    {
+        Ok(mut f) => {
+            if let Err(e) = writeln!(f, "{}", line) {
+                tracing::warn!("recall-trace write failed: {}", e);
+            }
+        }
+        Err(e) => {
+            tracing::warn!("recall-trace open failed: {}", e);
+        }
+    }
+}
+
 /// Auto-recall relevant memories before processing user messages.
 /// Injects recalled memories into the hook context metadata so the agent
 /// can include them in the LLM prompt.
@@ -44,7 +127,12 @@ impl Hook for EngramRecallHook {
         }
 
         // Session-aware recall: uses working memory for topic continuity
-        match self.memory.session_recall(&ctx.content, &ctx.session_key) {
+        let recall_outcome = self.memory.session_recall(&ctx.content, &ctx.session_key);
+
+        // Write diagnostic trace (never fails the hook)
+        write_recall_trace(&ctx.session_key, &ctx.content, &recall_outcome);
+
+        match recall_outcome {
             Ok((results, full_recall_triggered)) => {
                 if !results.is_empty() {
                     // Format memories with confidence labels and timestamps
@@ -371,6 +459,7 @@ impl Hook for EngramStoreHook {
             engramai::MemoryType::Episodic,
             0.5,
             Some("auto"),
+            ctx.envelope.as_ref(),
         ) {
             Ok(()) => tracing::info!("Engram store hook: completed"),
             Err(e) => tracing::warn!("Engram auto-store failed: {}", e),

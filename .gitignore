@@ -21,6 +21,7 @@ target/
 *.ogg
 *.mp3
 hello.py
+recall-trace.jsonl
 
 # Internal docs (not for public repo)
 docs/

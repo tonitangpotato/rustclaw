@@ -1,10 +1,27 @@
 //! Context types for structured message metadata, channel capabilities, and response processing.
+//!
+//! ## Envelope (ISS-021)
+//!
+//! `Envelope` is the structured per-message metadata carried alongside — not inside —
+//! user content. The old name `MessageContext` is kept as a type alias for backward
+//! compatibility; prefer `Envelope` in new code. Deriving `Serialize`/`Deserialize`
+//! lets us persist an envelope to `engramai::StorageMeta::user_metadata` under the
+//! `envelope` key in Phase 2, enabling context-aware recall without header-string
+//! parsing.
 
 use chrono::Local;
+use serde::{Deserialize, Serialize};
 
 /// Per-message metadata from the channel.
-#[derive(Debug, Clone, Default)]
-pub struct MessageContext {
+///
+/// This is the "side channel" for who/where/when context. It is **never**
+/// concatenated into the user message string in new code paths; instead it is
+/// rendered into the system prompt at the appropriate boundary and persisted
+/// as JSON on memory records.
+///
+/// The legacy name `MessageContext` is kept as a type alias — see module docs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Envelope {
     pub sender_id: Option<String>,
     pub sender_name: Option<String>,
     pub sender_username: Option<String>,
@@ -13,7 +30,14 @@ pub struct MessageContext {
     pub message_id: Option<i64>,
 }
 
-impl MessageContext {
+/// Backward-compatible alias. New code should use `Envelope`.
+///
+/// This alias will be removed in ISS-021 Phase 4 once all call sites have
+/// migrated. Struct-literal syntax (`MessageContext { … }`) works through the
+/// alias because `Envelope` has no generic parameters.
+pub type MessageContext = Envelope;
+
+impl Envelope {
     /// Format as a user message prefix (injected before the actual message).
     pub fn format_prefix(&self, channel_name: &str) -> String {
         let mut parts = Vec::new();
@@ -77,7 +101,7 @@ impl MessageContext {
 }
 
 /// Chat type: direct message or group.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum ChatType {
     #[default]
     Direct,
@@ -87,7 +111,7 @@ pub enum ChatType {
 }
 
 /// A quoted/replied-to message.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuotedMessage {
     pub text: String,
     pub sender_name: Option<String>,

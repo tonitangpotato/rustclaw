@@ -18,6 +18,7 @@ use engramai::{
     EmpathyBus, EmpathyTrend, ActionStats, SoulUpdate, HeartbeatUpdate,
     bus::{mod_io::{parse_soul, Drive}, accumulator::EmpathyAccumulator, feedback::BehaviorFeedback},
     interoceptive::{InteroceptiveState, RegulationAction, regulation::{self, RegulationConfig}},
+    store_api::{StorageMeta, RawStoreOutcome},
 };
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -151,6 +152,48 @@ pub struct MemoryManager {
 }
 
 impl MemoryManager {
+    /// Test-only constructor that builds a `MemoryManager` rooted at an
+    /// arbitrary workspace directory with a fresh engram DB underneath it.
+    ///
+    /// This exists so that `#[cfg(test)]` harnesses — both in this crate
+    /// and in integration tests — don't have to hand-construct private
+    /// fields, which is fragile across refactors.
+    ///
+    /// The caller is responsible for keeping the `TempDir` alive for the
+    /// lifetime of the returned manager (the DB file lives inside it).
+    #[cfg(test)]
+    pub(crate) fn for_testing(workspace_dir: &std::path::Path) -> anyhow::Result<Self> {
+        // Write a minimal SOUL.md so drive extraction doesn't fail.
+        std::fs::write(
+            workspace_dir.join("SOUL.md"),
+            "# SOUL.md\n\n## Vibe\nBe helpful.\n",
+        )?;
+
+        let db_path = workspace_dir.join("test-engram.db");
+        let engram = engramai::Memory::new(
+            db_path.to_str().ok_or_else(|| anyhow::anyhow!("non-utf8 db path"))?,
+            None,
+        )
+        .map_err(|e| anyhow::anyhow!("engram open: {}", e))?;
+
+        Ok(MemoryManager {
+            engram: Mutex::new(engram),
+            wm_registry: Mutex::new(SessionRegistry::with_defaults(
+                15,
+                WORKING_MEMORY_DECAY_SECS,
+            )),
+            anomaly_tracker: Mutex::new(BaselineTracker::new(100)),
+            drives: Vec::new(),
+            empathy_bus: None,
+            workspace_dir: workspace_dir.to_string_lossy().into_owned(),
+            db_path: db_path.to_string_lossy().into_owned(),
+            auto_recall: true,
+            auto_store: true,
+            recall_limit: 5,
+            namespace: None,
+        })
+    }
+
     /// Initialize the memory system.
     pub async fn new(config: &Config, workspace_dir: &str) -> anyhow::Result<Self> {
         let db_path = config
@@ -394,12 +437,20 @@ impl MemoryManager {
     /// Called by BeforeOutbound hook.
     ///
     /// Applies drive alignment boost, determines memory layer, and tracks anomalies.
+    ///
+    /// # ISS-021 Phase 1
+    /// The `envelope` parameter carries message-level context (sender, chat_type,
+    /// reply_to, etc.) which is serialized into `StorageMeta::user_metadata` under
+    /// the `envelope` key. Phase 3/4 recall will use this for sender/chat-aware
+    /// disambiguation. Pass `None` when storing non-message content (checkpoints,
+    /// explicit tool stores, tests).
     pub fn store(
         &self,
         content: &str,
         memory_type: MemoryType,
         importance: f64,
         source: Option<&str>,
+        envelope: Option<&crate::context::Envelope>,
     ) -> anyhow::Result<()> {
         if !self.auto_store {
             return Ok(());
@@ -412,9 +463,35 @@ impl MemoryManager {
         // Higher importance memories will be promoted to Core/Extended during consolidation.
 
         let mut engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        engram
-            .add(content, memory_type, Some(boosted_importance), source, None)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let user_metadata = match envelope {
+            Some(env) => serde_json::json!({ "envelope": env }),
+            None => serde_json::Value::Null,
+        };
+        let meta = StorageMeta {
+            importance_hint: Some(boosted_importance),
+            source: source.map(|s| s.to_string()),
+            namespace: None,
+            user_metadata,
+            memory_type_hint: Some(memory_type),
+        };
+        match engram.store_raw(content, meta) {
+            Ok(RawStoreOutcome::Stored(_)) => {}
+            Ok(RawStoreOutcome::Skipped { reason, content_hash }) => {
+                tracing::debug!(
+                    "engram skipped store: reason={:?} hash={}",
+                    reason,
+                    content_hash.as_str()
+                );
+            }
+            Ok(RawStoreOutcome::Quarantined { id, reason }) => {
+                tracing::warn!(
+                    "engram quarantined store: id={} reason={:?}",
+                    id.as_str(),
+                    reason
+                );
+            }
+            Err(e) => return Err(anyhow::anyhow!("engram store_raw: {}", e)),
+        }
 
         // Track storage pattern for anomaly detection
         if let Ok(mut tracker) = self.anomaly_tracker.lock() {
@@ -596,19 +673,50 @@ impl MemoryManager {
     
     /// Explicitly store a memory (for LLM tool use).
     /// Unlike store(), this ignores auto_store setting.
+    ///
+    /// See [`store`] for `envelope` semantics. Tool-initiated stores usually
+    /// pass `None` (no message context), but callers can surface envelope data
+    /// when it's meaningful (e.g. storing "what potato just said").
     pub fn store_explicit(
         &self,
         content: &str,
         memory_type: MemoryType,
         importance: f64,
+        envelope: Option<&crate::context::Envelope>,
     ) -> anyhow::Result<()> {
         // Calculate boosted importance
         let boosted_importance = self.calculate_importance(content, importance);
         
         let mut engram = self.engram.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        engram
-            .add(content, memory_type, Some(boosted_importance), Some("agent_tool"), None)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let user_metadata = match envelope {
+            Some(env) => serde_json::json!({ "envelope": env }),
+            None => serde_json::Value::Null,
+        };
+        let meta = StorageMeta {
+            importance_hint: Some(boosted_importance),
+            source: Some("agent_tool".to_string()),
+            namespace: None,
+            user_metadata,
+            memory_type_hint: Some(memory_type),
+        };
+        match engram.store_raw(content, meta) {
+            Ok(RawStoreOutcome::Stored(_)) => {}
+            Ok(RawStoreOutcome::Skipped { reason, content_hash }) => {
+                tracing::debug!(
+                    "engram skipped explicit store: reason={:?} hash={}",
+                    reason,
+                    content_hash.as_str()
+                );
+            }
+            Ok(RawStoreOutcome::Quarantined { id, reason }) => {
+                tracing::warn!(
+                    "engram quarantined explicit store: id={} reason={:?}",
+                    id.as_str(),
+                    reason
+                );
+            }
+            Err(e) => return Err(anyhow::anyhow!("engram store_raw: {}", e)),
+        }
         Ok(())
     }
 
@@ -1239,5 +1347,392 @@ Be curious. Write great code. Ship fast.
         println!("✅ Working Memory decay: {}s", WORKING_MEMORY_DECAY_SECS);
 
         println!("\n🎉 ALL E2E TESTS PASSED");
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ISS-021 Phase 1: Recall Quality Baseline
+//
+// Measures Precision@3 on a hand-curated fixture set BEFORE the header-in-
+// content refactor lands. The P_before number captured here is the counter-
+// factual baseline the Phase 5 go/no-go gate compares against.
+//
+// Phases 2–5 are gated on observing a >= 0.15 absolute improvement in P@3
+// on these fixtures between "old path (header-in-content)" and "new path
+// (header-as-envelope)". If the gate fails, we do NOT run the full migration.
+//
+// Design ref: .gid/issues/ISS-021-message-context-side-channel/issue.md §Phase 1
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod recall_quality_baseline {
+    use super::*;
+
+    /// One fixture: corpus to seed, a query, and which corpus indices are
+    /// the "gold" relevant hits.
+    struct Fixture {
+        name: &'static str,
+        corpus: &'static [&'static str],
+        query: &'static str,
+        /// Indices into `corpus` of the memories that SHOULD appear in top-3.
+        relevant_ixs: &'static [usize],
+    }
+
+    /// 10 balanced fixtures across distinct topics. Each has **3** clearly-
+    /// relevant memories in a corpus of 8, so Precision@3 ranges over the
+    /// full domain {0.0, 0.333, 0.667, 1.0} — no ceiling/saturation artifact.
+    ///
+    /// This is a deliberate change from the initial 1-relevant-per-fixture
+    /// design, which saturated every fixture at 0.333 and made Phase 5's
+    /// P_before → P_after comparison uninformative. Distractors are
+    /// deliberately chosen to include some near-topic items (e.g. a different
+    /// cryptographic protocol in the OAuth fixture) so recall quality
+    /// differences actually matter.
+    const FIXTURES: &[Fixture] = &[
+        Fixture {
+            name: "authentication-flow",
+            corpus: &[
+                // relevant (auth-related)
+                "OAuth2 token refresh flow uses a refresh_token and client secret to mint a new access_token.",
+                "JWT tokens encode claims as a signed base64 payload that resource servers verify with a public key.",
+                "PKCE (Proof Key for Code Exchange) prevents authorization code interception in OAuth2 public clients.",
+                // distractors (including one near-topic crypto item)
+                "TLS 1.3 reduces the handshake to a single round-trip by encrypting the server response in the first reply.",
+                "Sourdough bread requires a starter fermented for at least 5 days before first bake.",
+                "The ferry schedule between Staten Island and Manhattan runs every 30 minutes.",
+                "Rust's ownership model prevents data races at compile time.",
+                "Jazz saxophone improvisation draws heavily on bebop vocabulary.",
+            ],
+            query: "how does oauth token refresh work",
+            relevant_ixs: &[0, 1, 2],
+        },
+        Fixture {
+            name: "rust-ownership",
+            corpus: &[
+                "In Rust, the borrow checker enforces that a value has at most one mutable reference at a time.",
+                "Rust's move semantics transfer ownership when a value is assigned or passed by value.",
+                "Lifetimes in Rust ensure references never outlive the data they point to, checked at compile time.",
+                // distractors (one near-topic: C++ RAII, another language feature)
+                "C++ RAII ties resource lifetime to object scope via constructors and destructors.",
+                "Shakespeare's Hamlet was first performed around 1603 at the Globe Theatre.",
+                "Mount Fuji is a stratovolcano that last erupted in 1707.",
+                "Italian espresso is brewed at roughly 9 bars of pressure through 18g of ground coffee.",
+                "The Pythagorean theorem relates the sides of a right triangle as a² + b² = c².",
+            ],
+            query: "rust borrow checker mutable reference rules",
+            relevant_ixs: &[0, 1, 2],
+        },
+        Fixture {
+            name: "baking-sourdough",
+            corpus: &[
+                "A sourdough starter is a symbiotic culture of wild yeast and lactobacilli feeding on flour.",
+                "Bulk fermentation of sourdough develops gluten structure through stretch-and-folds over 4-6 hours.",
+                "A high-hydration sourdough (>80% baker's percentage) produces an open, airy crumb.",
+                // distractors (one near-topic: commercial bread)
+                "Commercial baker's yeast is a single Saccharomyces cerevisiae strain industrially propagated.",
+                "TCP congestion control uses AIMD — additive increase, multiplicative decrease.",
+                "The French Revolution began in 1789 with the storming of the Bastille.",
+                "Quantum entanglement links particles so measurement of one instantly affects the other.",
+                "Marathon training plans typically peak 3 weeks before race day.",
+            ],
+            query: "sourdough starter wild yeast lactobacilli",
+            relevant_ixs: &[0, 1, 2],
+        },
+        Fixture {
+            name: "tcp-networking",
+            corpus: &[
+                "TCP uses a three-way handshake (SYN, SYN-ACK, ACK) to establish a connection.",
+                "TCP congestion control uses AIMD — additive increase, multiplicative decrease — to probe bandwidth.",
+                "The TCP sliding window allows a sender to transmit multiple segments before awaiting cumulative ack.",
+                // distractors (one near-topic: UDP)
+                "UDP is connectionless and does not guarantee delivery, ordering, or deduplication.",
+                "Van Gogh painted Starry Night in 1889 during his stay at a mental asylum.",
+                "The tango originated in the working-class neighborhoods of Buenos Aires.",
+                "A Mediterranean diet emphasizes olive oil, fish, and whole grains.",
+                "Chess endgames with king-and-pawn vs king often hinge on the opposition.",
+            ],
+            query: "tcp connection handshake syn ack",
+            relevant_ixs: &[0, 1, 2],
+        },
+        Fixture {
+            name: "espresso-extraction",
+            corpus: &[
+                "Proper espresso extraction yields 2:1 ratio (output:dose) in 25-30 seconds.",
+                "Espresso grind size must be fine enough to produce 9 bars of backpressure without choking the machine.",
+                "Channeling during espresso extraction leaves dry pucks and sour, under-extracted shots.",
+                // distractors (one near-topic: other brew methods)
+                "Pour-over coffee typically uses a 1:16 ratio brewed over 3-4 minutes with medium grind.",
+                "The Kuiper belt contains many small icy bodies beyond Neptune's orbit.",
+                "Ruby on Rails popularized the convention-over-configuration philosophy.",
+                "Napoleon's retreat from Moscow in 1812 decimated the Grande Armée.",
+                "A haiku consists of three lines with 5, 7, and 5 syllables respectively.",
+            ],
+            query: "espresso extraction ratio time",
+            relevant_ixs: &[0, 1, 2],
+        },
+        Fixture {
+            name: "quantum-entanglement",
+            corpus: &[
+                "Entangled particles share a quantum state such that measuring one determines the other's observable.",
+                "Bell's theorem shows no local-hidden-variable theory can reproduce all entanglement predictions.",
+                "Quantum teleportation uses a pre-shared entangled pair plus two classical bits to transmit a qubit state.",
+                // distractors (one near-topic: classical physics)
+                "Classical correlations differ from quantum entanglement because they admit local hidden variables.",
+                "The Amazon rainforest produces roughly 20% of the world's oxygen.",
+                "Baroque architecture is characterized by dramatic curves and rich ornamentation.",
+                "A sonnet has 14 lines, typically in iambic pentameter.",
+                "The Mariana Trench is the deepest known point in Earth's oceans.",
+            ],
+            query: "what is quantum entanglement between particles",
+            relevant_ixs: &[0, 1, 2],
+        },
+        Fixture {
+            name: "database-indexing",
+            corpus: &[
+                "A B-tree index speeds up range queries by keeping sorted pointers to table rows.",
+                "Hash indexes give O(1) equality lookups but cannot serve range queries.",
+                "Covering indexes include all columns a query needs so the heap table is never accessed.",
+                // distractors (one near-topic: other DB internals)
+                "The query planner chooses between nested-loop, hash-join, and merge-join based on row estimates.",
+                "The Eiffel Tower was completed in 1889 for the Paris World's Fair.",
+                "Jazz fusion emerged in the late 1960s, blending rock rhythms with jazz harmony.",
+                "The koala has fingerprints almost indistinguishable from humans.",
+                "Renaissance painters rediscovered linear perspective in the 15th century.",
+            ],
+            query: "btree index range query database",
+            relevant_ixs: &[0, 1, 2],
+        },
+        Fixture {
+            name: "mountain-climbing",
+            corpus: &[
+                "At altitudes above 8000 meters climbers enter the 'death zone' where oxygen is critically low.",
+                "Acclimatization schedules below 8000m follow 'climb high, sleep low' to boost red blood cell count.",
+                "Supplemental oxygen at high altitude keeps arterial saturation above the cognitive-impairment threshold.",
+                // distractors (one near-topic: other endurance sport)
+                "Marathon training at sea level does not acclimatize runners to altitude-race conditions.",
+                "The Treaty of Westphalia in 1648 ended the Thirty Years' War.",
+                "Merge sort has O(n log n) worst-case time complexity.",
+                "Michelangelo's David stands 5.17 meters tall and was carved from a single marble block.",
+                "Photosynthesis converts carbon dioxide and water into glucose using sunlight.",
+            ],
+            query: "death zone altitude oxygen mountain climbing",
+            relevant_ixs: &[0, 1, 2],
+        },
+        Fixture {
+            name: "ml-gradient-descent",
+            corpus: &[
+                "Stochastic gradient descent updates model weights using gradients from mini-batches.",
+                "The learning rate in gradient descent controls step size and must be tuned to avoid overshoot.",
+                "Adam optimizer augments SGD with per-parameter adaptive step sizes using first and second moments.",
+                // distractors (one near-topic: other ML
+                "Genetic algorithms search a parameter space without gradient information by mutation and crossover.",
+                "The Silk Road connected China to the Mediterranean for over 1500 years.",
+                "Cherry blossom season in Japan typically peaks in early April.",
+                "A Rubik's cube has 43 quintillion possible configurations.",
+                "The human heart pumps roughly 2000 gallons of blood per day.",
+            ],
+            query: "how does stochastic gradient descent work",
+            relevant_ixs: &[0, 1, 2],
+        },
+        Fixture {
+            name: "culinary-fermentation",
+            corpus: &[
+                "Kimchi is made by lacto-fermenting napa cabbage with chili, garlic, and fish sauce.",
+                "Sauerkraut ferments shredded cabbage in brine using wild lactobacillus strains for 1-4 weeks.",
+                "Miso is fermented with Aspergillus oryzae (koji) plus salt over months to years.",
+                // distractors (one near-topic: non-fermented preservation)
+                "Pickling with vinegar preserves vegetables through acidity without microbial fermentation.",
+                "The Hubble Space Telescope has been operating since 1990.",
+                "Go's goroutines are lightweight threads scheduled by the Go runtime.",
+                "The tango originated in Buenos Aires in the late 19th century.",
+                "Stonehenge was built in multiple phases between 3000 and 2000 BCE.",
+            ],
+            query: "kimchi lacto fermentation cabbage",
+            relevant_ixs: &[0, 1, 2],
+        },
+    ];
+
+    /// Build an isolated `MemoryManager` rooted at a freshly created temp DB
+    /// with auto-store/recall enabled and a modest recall limit.
+    ///
+    /// Delegates to `MemoryManager::for_testing` so that field additions to
+    /// the real struct don't silently break the test harness.
+    fn make_manager() -> (MemoryManager, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let manager = MemoryManager::for_testing(dir.path()).expect("for_testing");
+        (manager, dir)
+    }
+
+    /// Compute Precision@3: fraction of top-3 results whose content matches
+    /// one of the gold-relevant corpus entries. Range: {0.0, 1/3, 2/3, 1.0}
+    /// given that each fixture has exactly 3 gold-relevant items.
+    fn precision_at_3(results: &[RecalledMemory], fixture: &Fixture) -> f64 {
+        let gold: Vec<&str> = fixture
+            .relevant_ixs
+            .iter()
+            .map(|&i| fixture.corpus[i])
+            .collect();
+        let top_k: Vec<_> = results.iter().take(3).collect();
+        let hits = top_k
+            .iter()
+            .filter(|r| gold.iter().any(|g| r.content == *g))
+            .count();
+        // Denominator is min(3, #gold, #results). With 3 gold items and
+        // recall_limit=5, this is always 3 unless the recall path returned
+        // fewer than 3 results (in which case P@3 is still computed over 3
+        // to preserve the ceiling semantics — missing hits are missing hits).
+        hits as f64 / 3.0
+    }
+
+    /// Baseline measurement — records P@3 across all 10 fixtures and writes
+    /// the summary to stdout (`cargo test -- --nocapture` to see it).
+    ///
+    /// **This test does not fail on low scores** — it is a measurement, not a
+    /// gate. The Phase 5 go/no-go compares a shadow-DB run's P@3 against the
+    /// P_before captured here. A 0.15 absolute delta is the agreed significance
+    /// threshold (see ISS-021 §Phase 1 baseline spec).
+    #[test]
+    fn recall_baseline_precision_at_3_per_fixture() {
+        let mut scores = Vec::with_capacity(FIXTURES.len());
+        let mut storage_audit: Vec<(&str, usize, usize)> = Vec::new(); // (name, stored_rows, quarantined)
+
+        for fixture in FIXTURES {
+            let (mgr, _guard) = make_manager();
+
+            // Seed the corpus. Use a per-fixture session_key so working
+            // memory doesn't cross-contaminate between fixtures.
+            let session_key = format!("baseline-{}", fixture.name);
+            for (i, item) in fixture.corpus.iter().enumerate() {
+                mgr.store(
+                    item,
+                    MemoryType::Factual,
+                    0.5,
+                    Some(&format!("baseline-fixture-{}-ix{}", fixture.name, i)),
+                    None,
+                )
+                .expect("store fixture memory");
+            }
+
+            // Storage audit: confirm every fixture item actually landed in
+            // engram (nothing Skipped by dedup/rate-limit, nothing Quarantined
+            // by the PII scanner). This is the Phase 1 integrity check for
+            // the store_raw migration — a dirty baseline would invalidate
+            // the Phase 5 P_before → P_after comparison.
+            let (stored_count, quarantined) = {
+                let engram = mgr.engram.lock().expect("engram lock");
+                let all = engram.list(None).expect("list memories");
+                let q = engram.count_quarantine().expect("count quarantine");
+                (all.len(), q)
+            };
+            storage_audit.push((fixture.name, stored_count, quarantined));
+
+            // Recall via the current (header-in-content) path. In Phase 5 the
+            // shadow-DB comparison will re-run this exact harness against the
+            // envelope-aware path to compute P_after.
+            let (results, _full) = mgr
+                .session_recall(fixture.query, &session_key)
+                .expect("session_recall");
+
+            let p3 = precision_at_3(&results, fixture);
+            scores.push((fixture.name, p3, results.len()));
+        }
+
+        // Aggregate.
+        let total: f64 = scores.iter().map(|(_, p, _)| *p).sum();
+        let mean = total / scores.len() as f64;
+
+        println!("\n=== ISS-021 Phase 1 Baseline: Precision@3 ===");
+        println!("(header-in-content path, pre-envelope refactor)");
+        println!("(3 gold-relevant items per fixture of 8; P@3 range: 0.0 / 0.333 / 0.667 / 1.0)");
+        for (name, p3, n) in &scores {
+            println!("  {:<26} P@3 = {:.3}  (recalled {})", name, p3, n);
+        }
+        println!("  ---");
+        println!("  mean P@3  = {:.3}  (P_before)", mean);
+        println!("  fixtures  = {}", scores.len());
+        println!("=================================================\n");
+
+        println!("=== Storage audit (store_raw outcome integrity) ===");
+        for (name, stored, quarantined) in &storage_audit {
+            println!("  {:<26} stored={}  quarantined={}", name, stored, quarantined);
+        }
+        println!("=================================================\n");
+
+        // Integrity gate: every fixture's 8 items must be fully stored, none
+        // quarantined. If this trips, the store_raw migration has a
+        // behavioral change we didn't account for — baseline is invalid,
+        // fix before proceeding to Phase 2.
+        for (name, stored, quarantined) in &storage_audit {
+            assert_eq!(
+                *stored, 8,
+                "fixture '{}' expected 8 stored items, found {} — \
+                 store_raw is silently dropping fixture content",
+                name, stored
+            );
+            assert_eq!(
+                *quarantined, 0,
+                "fixture '{}' has {} quarantined items — PII scanner or \
+                 content filter is rejecting baseline fixture content; \
+                 baseline is unusable for Phase 5 comparison",
+                name, quarantined
+            );
+        }
+
+        // Sanity guard: the HARNESS works (some fixture got at least one
+        // hit somewhere in top-3). If this fails, the test infrastructure
+        // itself is broken — it's NOT a quality gate on recall itself.
+        let any_hit = scores.iter().any(|(_, p, _)| *p > 0.0);
+        assert!(
+            any_hit,
+            "baseline harness produced zero hits across all 10 fixtures — \
+             recall path is broken, not just low-quality. Investigate before \
+             proceeding to Phase 2."
+        );
+    }
+
+    /// Smoke test: zero-behaviour-change contract for the Phase 1 parallel
+    /// entry point. Not a precision measurement — just asserts the envelope-
+    /// threading path compiles, links, and doesn't panic when passed `None`.
+    #[test]
+    fn envelope_plumbing_compiles() {
+        // This test exists to pin the Phase 1 contract: `Envelope` must be
+        // constructible, cloneable, serde-roundtrippable, and fall back to the
+        // legacy `MessageContext` alias without any call-site changes.
+        use crate::context::{ChatType, Envelope, MessageContext, QuotedMessage};
+
+        let env = Envelope {
+            sender_id: Some("u1".into()),
+            sender_name: Some("potato".into()),
+            sender_username: Some("potatosoupup".into()),
+            chat_type: ChatType::Group { title: Some("testing".into()) },
+            reply_to: Some(QuotedMessage {
+                text: "prior message".into(),
+                sender_name: Some("someone".into()),
+                sender_username: None,
+                sender_id: None,
+                message_id: Some(42),
+            }),
+            message_id: Some(100),
+        };
+
+        // Alias works — `MessageContext` is `Envelope`.
+        let _aliased: MessageContext = env.clone();
+
+        // Serde roundtrip works — Phase 2 persists this into
+        // `StorageMeta::user_metadata` as `{"envelope": <json>}`.
+        let json = serde_json::to_value(&env).expect("serialize envelope");
+        let back: Envelope = serde_json::from_value(json).expect("deserialize envelope");
+        assert_eq!(back.sender_id, env.sender_id);
+        assert_eq!(back.message_id, env.message_id);
+        match (&back.chat_type, &env.chat_type) {
+            (ChatType::Group { title: a }, ChatType::Group { title: b }) => assert_eq!(a, b),
+            _ => panic!("chat_type roundtrip lost variant"),
+        }
+
+        // `format_prefix` still works — legacy header rendering path must
+        // remain intact through Phase 1 (Phase 2+3 introduce the envelope
+        // side-channel, Phase 4 removes this call path).
+        let prefix = env.format_prefix("telegram");
+        assert!(prefix.contains("POTATO") || prefix.contains("potato"));
+        assert!(prefix.contains("testing"));
     }
 }

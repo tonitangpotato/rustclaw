@@ -1617,7 +1617,7 @@ impl Tool for EngramStoreTool {
             }
         };
 
-        match self.memory.store_explicit(content, memory_type, importance) {
+        match self.memory.store_explicit(content, memory_type, importance, None) {
             Ok(()) => Ok(ToolResult {
                 output: format!(
                     "Memory stored successfully: {} (type: {}, importance: {:.2})",

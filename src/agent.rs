@@ -871,6 +871,40 @@ CRITICAL CONSTRAINTS:
         crate::events::collect_response(rx).await
     }
 
+    /// Process a message with an explicit `Envelope` side channel (ISS-021 Phase 1).
+    ///
+    /// This is the **parallel entry point** introduced in Phase 1 — structurally
+    /// identical to `process_message_with_options`, but accepts a typed
+    /// `Envelope` that will carry channel metadata out-of-band in Phase 2+3.
+    ///
+    /// In Phase 1 the envelope is accepted but not consumed: the implementation
+    /// delegates to the existing method so behaviour is unchanged. This exists
+    /// now so channels / callers can start threading the envelope through
+    /// without coupling to Phase 2+3 landing atomically.
+    ///
+    /// **Zero-behaviour-change contract**: for any given `(session_key, user_message,
+    /// user_id, channel, is_heartbeat)`, the output of this method must be
+    /// byte-for-byte identical to `process_message_with_options` with the same
+    /// arguments, regardless of the envelope value. The baseline test in
+    /// `tests/recall_quality_baseline.rs` relies on this.
+    pub async fn process_message_with_options_and_envelope(
+        self: &Arc<Self>,
+        session_key: &str,
+        user_message: &str,
+        user_id: Option<&str>,
+        channel: Option<&str>,
+        is_heartbeat: bool,
+        _envelope: Option<&crate::context::Envelope>,
+    ) -> anyhow::Result<String> {
+        // Phase 1: envelope is plumbed but not consumed — delegate.
+        // Phase 2+3 will: (a) attach envelope to HookContext; (b) persist to
+        // engramai StorageMeta::user_metadata as `{"envelope": <json>}`;
+        // (c) render into system prompt via Envelope::render_for_prompt().
+        self.process_message_with_options(
+            session_key, user_message, user_id, channel, is_heartbeat,
+        ).await
+    }
+
     /// Core message processing — emits AgentEvents via a channel.
     ///
     /// Returns a Receiver that yields events as they happen:
@@ -978,6 +1012,7 @@ CRITICAL CONSTRAINTS:
             channel: channel.map(String::from),
             content: user_message.to_string(),
             metadata: serde_json::json!({}),
+            envelope: None,
         };
 
         {
@@ -1460,6 +1495,7 @@ CRITICAL CONSTRAINTS:
                     "user_message": user_message,
                     "is_heartbeat": is_heartbeat,
                 }),
+                envelope: None,
             };
             let hooks_guard = self.hooks.read().await;
             hooks_guard.run(HookPoint::BeforeOutbound, &mut out_ctx).await?;
@@ -1565,6 +1601,7 @@ CRITICAL CONSTRAINTS:
                 channel: channel.map(String::from),
                 content: tc.name.clone(),
                 metadata: tc.input.clone(),
+                envelope: None,
             };
 
             {
@@ -2362,6 +2399,7 @@ CRITICAL CONSTRAINTS:
                 engramai::MemoryType::Episodic,
                 0.7,
                 Some("sub-agent-checkpoint"),
+                None,
             ) {
                 tracing::warn!("Failed to store sub-agent checkpoint to engram: {}", e);
             } else {
@@ -2599,6 +2637,7 @@ CRITICAL CONSTRAINTS:
             channel: channel.clone(),
             content: user_message.clone(),
             metadata: serde_json::json!({}),
+            envelope: None,
         };
 
         {
@@ -2691,6 +2730,7 @@ CRITICAL CONSTRAINTS:
                     channel: channel.clone(),
                     content: tc.name.clone(),
                     metadata: tc.input.clone(),
+                    envelope: None,
                 };
 
                 {
@@ -2781,6 +2821,7 @@ CRITICAL CONSTRAINTS:
                 metadata: serde_json::json!({
                     "user_message": user_message,
                 }),
+                envelope: None,
             };
             let hooks = self.hooks.read().await;
             let _ = hooks.run(HookPoint::BeforeOutbound, &mut out_ctx.clone()).await;

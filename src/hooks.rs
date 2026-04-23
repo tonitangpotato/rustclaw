@@ -35,6 +35,11 @@ pub enum HookOutcome {
 }
 
 /// Context passed to hooks.
+///
+/// The `envelope` field (ISS-021) is `None` in Phase 1 and populated in Phase 2+3
+/// by channel layer and `process_message_with_options_and_envelope`. It carries
+/// structured per-message metadata (sender, chat type, reply) as a side channel,
+/// so hooks can read it without parsing header strings from `content`.
 #[derive(Debug, Clone)]
 pub struct HookContext {
     pub session_key: String,
@@ -42,6 +47,7 @@ pub struct HookContext {
     pub channel: Option<String>,
     pub content: String,
     pub metadata: serde_json::Value,
+    pub envelope: Option<crate::context::Envelope>,
 }
 
 /// Trait for implementing hooks.
