@@ -20,7 +20,9 @@ mod hooks;
 mod llm;
 mod markdown;
 mod interoceptive;
+mod lifecycle;
 mod memory;
+mod notify_targets;
 mod oauth;
 mod orchestrator;
 mod plugins;
@@ -199,6 +201,10 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Run { config, workspace } => {
             tracing::info!("Starting RustClaw gateway...");
+            // Register per-instance id for shutdown marker filename so multiple
+            // rustclaw instances (different --config files) don't share a marker
+            // and trigger false "dirty shutdown" alerts for each other.
+            lifecycle::set_instance_id(&config);
             let cfg = config::load_config(&config)?;
             let workspace_dir = workspace
                 .or(cfg.workspace.clone())
@@ -520,14 +526,52 @@ async fn main() -> anyhow::Result<()> {
             // Start web dashboard (if enabled)
             dashboard::start_dashboard(cfg.dashboard.clone(), cfg.clone(), runner.clone()).await?;
 
+            // Install global lifecycle notifier so restart_self tool + SIGTERM
+            // handler can broadcast to Telegram without passing config around.
+            // Uses the three-tier resolver: notify_chat_ids → autodiscovered →
+            // allowed_users. See src/notify_targets.rs.
+            if let Some(tg) = cfg.channels.telegram.as_ref() {
+                lifecycle::install_notifier(
+                    tg.bot_token.clone(),
+                    tg.notify_chat_ids.clone(),
+                    tg.allowed_users.clone(),
+                );
+            }
+
+            // Detect dirty shutdown from previous run and notify Telegram.
+            // take_previous_shutdown() consumes the marker file; absence on
+            // subsequent startups correctly indicates dirty (SIGKILL/OOM/panic).
+            match lifecycle::take_previous_shutdown() {
+                Some(rec) => {
+                    tracing::info!(
+                        "Previous shutdown: clean={} reason={} at {}",
+                        rec.clean, rec.reason, rec.ts
+                    );
+                    // Only notify for restart_self (user-initiated); SIGTERM already
+                    // had a "stopping" notification, no need to spam "reborn".
+                    if rec.clean && rec.reason.starts_with("restart:") {
+                        lifecycle::broadcast(&format!("✅ Reborn. Previous: {}", rec.reason));
+                    }
+                }
+                None => {
+                    tracing::warn!("No previous shutdown marker — likely dirty exit (SIGKILL/OOM/panic)");
+                    lifecycle::broadcast(
+                        "⚠️ RustClaw recovered from unclean shutdown (SIGKILL/OOM/panic — no marker found). Check ~/.rustclaw/logs/ for clues.",
+                    );
+                }
+            }
+
             // Start channels + graceful shutdown on SIGTERM/SIGINT
             // launchd sends SIGTERM on stop/restart; KeepAlive restarts on exit(0)
+            let shutdown_reason: &str;
             tokio::select! {
                 result = channels::start_gateway(cfg, runner) => {
                     result?;
+                    shutdown_reason = "gateway_exited";
                 }
                 _ = tokio::signal::ctrl_c() => {
                     tracing::info!("Received SIGINT, shutting down gracefully...");
+                    shutdown_reason = "SIGINT";
                 }
                 _ = async {
                     let mut sigterm = tokio::signal::unix::signal(
@@ -536,8 +580,16 @@ async fn main() -> anyhow::Result<()> {
                     sigterm.recv().await;
                 } => {
                     tracing::info!("Received SIGTERM, shutting down gracefully...");
+                    shutdown_reason = "SIGTERM";
                 }
             }
+
+            // Notify Telegram and write clean-shutdown marker before exit.
+            lifecycle::broadcast(&format!(
+                "🛑 RustClaw stopping ({}). See you on the other side.",
+                shutdown_reason
+            ));
+            lifecycle::mark_shutdown(shutdown_reason, true);
             tracing::info!("RustClaw shutdown complete");
         }
         Commands::Chat { config } => {

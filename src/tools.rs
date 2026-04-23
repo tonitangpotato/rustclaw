@@ -517,6 +517,17 @@ impl Tool for RestartSelfTool {
         let reason = input["reason"].as_str().unwrap_or("no reason given");
         tracing::info!("Restart requested: {}", reason);
 
+        // Notify Telegram BEFORE exiting so potato knows we're coming back.
+        // Best-effort; no-op if no telegram config loaded.
+        crate::lifecycle::broadcast(&format!(
+            "🔄 Restarting in 2s: {}\nWill notify when back up.",
+            reason
+        ));
+
+        // Write clean shutdown marker with restart: prefix so startup
+        // detection can distinguish this from SIGTERM and emit "Reborn" message.
+        crate::lifecycle::mark_shutdown(&format!("restart:{}", reason), true);
+
         // Spawn a delayed exit so the tool result can be sent back first
         tokio::spawn(async {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;

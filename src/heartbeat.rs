@@ -164,7 +164,10 @@ pub async fn start_heartbeat(
     Ok(())
 }
 
-/// Route a heartbeat response to the first owner user in Telegram config.
+/// Route a heartbeat response to the configured operational recipients.
+/// Uses the same three-tier resolver as lifecycle notifications
+/// (notify_chat_ids → autodiscovered → allowed_users). See
+/// `src/notify_targets.rs` for the rationale.
 async fn route_to_telegram(
     client: &reqwest::Client,
     config: &Config,
@@ -175,11 +178,23 @@ async fn route_to_telegram(
         None => return Ok(()), // Telegram not configured
     };
 
-    // Find the first allowed user (typically the owner)
-    let chat_id = match tg_config.allowed_users.first() {
-        Some(id) => *id,
-        None => return Ok(()), // No users configured
-    };
+    let autodisc = crate::notify_targets::load_autodiscovered();
+    let (chat_ids, src) = crate::notify_targets::resolve_recipients(
+        &tg_config.notify_chat_ids,
+        &autodisc,
+        &tg_config.allowed_users,
+    );
+    if chat_ids.is_empty() {
+        tracing::warn!(
+            "Heartbeat alert SKIPPED: 0 recipients (source: {}). \
+             Set telegram.notify_chat_ids or message the bot once.",
+            src.as_str()
+        );
+        return Ok(());
+    }
+    // Only send to the primary (most-recent / first-listed) recipient for
+    // heartbeat alerts — they can be noisy, don't want to fan out.
+    let chat_id = chat_ids[0];
 
     let url = format!("{}/bot{}/sendMessage", TELEGRAM_API, tg_config.bot_token);
 
@@ -196,6 +211,10 @@ async fn route_to_telegram(
         anyhow::bail!("Telegram API error: {}", body);
     }
 
-    tracing::debug!("Heartbeat routed to Telegram chat {}", chat_id);
+    tracing::debug!(
+        "Heartbeat routed to Telegram chat {} (via {})",
+        chat_id,
+        src.as_str()
+    );
     Ok(())
 }

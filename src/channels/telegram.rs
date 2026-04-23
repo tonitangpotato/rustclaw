@@ -243,6 +243,12 @@ impl TelegramBot {
         let mut text = message["text"].as_str().unwrap_or("").to_string();
         let chat_type = message["chat"]["type"].as_str().unwrap_or("private");
 
+        // Autodiscover operational notification targets: record this chat so
+        // lifecycle (restart/dirty-shutdown) and heartbeat alerts have
+        // somewhere to go even when telegram.notify_chat_ids is unset.
+        // See src/notify_targets.rs.
+        crate::notify_targets::record_chat(chat_id);
+
         // Set ritual notify for this request so start_ritual tool can send Telegram messages
         if let Ok(mut guard) = self.runner.tools.ritual_notify.lock() {
             *guard = Some(self.make_notify_fn(chat_id));

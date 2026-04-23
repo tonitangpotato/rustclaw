@@ -454,6 +454,15 @@ pub struct TelegramConfig {
     #[serde(default)]
     pub allowed_users: Vec<i64>,
 
+    /// Operational notification recipients — used by lifecycle (restart/
+    /// dirty-shutdown) and heartbeat alerts. Decoupled from `allowed_users`
+    /// (auth whitelist) because an "allow all" setup has empty allowed_users
+    /// but still needs somewhere to send restart pings. Empty = fall back to
+    /// autodiscovery (recent inbound chats), then to `allowed_users`.
+    /// See `src/notify_targets.rs`.
+    #[serde(default)]
+    pub notify_chat_ids: Vec<i64>,
+
     /// DM policy: "owner" | "open"
     #[serde(default = "default_dm_policy")]
     pub dm_policy: String,
