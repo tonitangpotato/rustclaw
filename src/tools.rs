@@ -5577,7 +5577,10 @@ impl Tool for StartRitualTool {
         "Start a V2 development ritual (design → implement → verify pipeline). \
          Use this when the task involves writing or modifying source code. \
          The ritual automatically detects project state and runs appropriate phases. \
-         Returns when the ritual completes, fails, or needs intervention."
+         Requires a structured `work_unit` identifying the target project and what \
+         is being worked on (issue / feature / task). The project root is resolved \
+         via the gid project registry (~/.config/gid/projects.yml) — no ambiguous \
+         path-from-text inheritance (rustclaw ISS-022 / gid-rs ISS-029)."
     }
 
     fn input_schema(&self) -> Value {
@@ -5588,12 +5591,41 @@ impl Tool for StartRitualTool {
                     "type": "string",
                     "description": "Description of the development task to accomplish"
                 },
-                "workspace": {
-                    "type": "string",
-                    "description": "Optional workspace/project root directory path. If not provided, extracts from task text or uses default workspace."
+                "work_unit": {
+                    "type": "object",
+                    "description": "Structured identifier of what the ritual targets. The project root is resolved from the registry — do NOT pass raw paths.",
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "const": "issue" },
+                                "project": { "type": "string", "description": "Project name or alias from ~/.config/gid/projects.yml (e.g., 'rustclaw', 'engram')" },
+                                "id": { "type": "string", "description": "Issue identifier (e.g., 'ISS-022')" }
+                            },
+                            "required": ["kind", "project", "id"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "const": "feature" },
+                                "project": { "type": "string" },
+                                "name": { "type": "string", "description": "Feature name (matches feature directory under .gid/features/)" }
+                            },
+                            "required": ["kind", "project", "name"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "const": "task" },
+                                "project": { "type": "string" },
+                                "task_id": { "type": "string", "description": "Task node ID in the project graph" }
+                            },
+                            "required": ["kind", "project", "task_id"]
+                        }
+                    ]
                 }
             },
-            "required": ["task"]
+            "required": ["task", "work_unit"]
         })
     }
 
@@ -5603,24 +5635,25 @@ impl Tool for StartRitualTool {
             .ok_or_else(|| anyhow::anyhow!("Missing 'task' parameter"))?
             .to_string();
 
-        // Determine project root: explicit workspace param > extract from task > default
-        let workspace_override = input["workspace"]
-            .as_str()
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute() && p.exists() && p.is_dir());
+        // Parse work_unit — structured input, no path-from-text inheritance.
+        // This is the ISS-027 root-cause fix: ritual target is explicit, or we fail loud.
+        let work_unit_value = input.get("work_unit").ok_or_else(|| {
+            anyhow::anyhow!(
+                "Missing 'work_unit' parameter. Pass a structured work unit like \
+                 {{\"kind\":\"issue\",\"project\":\"rustclaw\",\"id\":\"ISS-022\"}}. \
+                 See ~/.config/gid/projects.yml for known project names."
+            )
+        })?;
 
-        let project_root = if let Some(ref ws) = workspace_override {
-            ws.clone()
-        } else {
-            self.workspace_root.clone()
-        };
-
-        // If workspace was provided, append it to task text so extract_target_project_dir can use it
-        let task = if let Some(ref ws) = workspace_override {
-            format!("{}\nProject location: {}", task, ws.display())
-        } else {
-            task
-        };
+        let work_unit: gid_core::ritual::work_unit::WorkUnit =
+            serde_json::from_value(work_unit_value.clone()).map_err(|e| {
+                anyhow::anyhow!(
+                    "Invalid 'work_unit' structure: {e}. Expected one of: \
+                     {{kind:\"issue\", project, id}}, \
+                     {{kind:\"feature\", project, name}}, \
+                     {{kind:\"task\", project, task_id}}."
+                )
+            })?;
 
         let llm_client = match &self.llm_client {
             Some(c) => c.clone(),
@@ -5642,8 +5675,10 @@ impl Tool for StartRitualTool {
                 Box::pin(async {})
             }));
 
+        // Runner's own workspace_root is only a fallback for other code paths;
+        // `start_with_work_unit` derives the real target from the registry.
         let runner = crate::ritual_runner::RitualRunner::new(
-            project_root,
+            self.workspace_root.clone(),
             llm_client,
             notify,
         );
@@ -5655,7 +5690,7 @@ impl Tool for StartRitualTool {
             reg.invalidate();
         }
 
-        let result = runner.start(task).await;
+        let result = runner.start_with_work_unit(work_unit, task).await;
 
         // Invalidate again after the ritual has transitioned — captures the
         // terminal phase (Done/Escalated/Cancelled/WaitingApproval/…) so the

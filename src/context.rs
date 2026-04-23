@@ -11,7 +11,71 @@
 //! call sites use `Envelope` directly.
 
 use chrono::Local;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
+
+/// Channels whose headers are recognised by [`Envelope::strip_from_content`].
+///
+/// The whitelist is deliberately closed: any prefix `[FOO ...]` where `FOO` is
+/// not in this list is treated as legitimate content, not a header. This makes
+/// `strip_from_content` safe to apply to arbitrary memory records — a message
+/// whose body genuinely starts with `[` (e.g. a user pasting JSON or a tag
+/// like `[RFC]`) will never be mis-identified as a channel header.
+pub const KNOWN_CHANNELS: &[&str] = &[
+    "TELEGRAM", "DISCORD", "SLACK", "SIGNAL", "MATRIX", "WHATSAPP",
+];
+
+/// Compiled channel-header regex (lazy, single compile per process).
+///
+/// Pattern breakdown:
+///   `^\[(TELEGRAM|DISCORD|...) ` — anchored channel label + space
+///   `([^\]\n]+)`                  — header body: no embedded `]` or newline
+///   `\]\n`                        — closing bracket + single newline
+///
+/// Note: we match only up to `]\n` (not `]\n\n`) because the line after the
+/// header may be either a blank line (no reply) or `Replying to ...` (reply
+/// block present). The caller distinguishes these cases after the match.
+fn header_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        let channels = KNOWN_CHANNELS.join("|");
+        let pattern = format!(r"^\[({}) ([^\]\n]+)\]\n", channels);
+        Regex::new(&pattern).expect("header_regex: hardcoded pattern must compile")
+    })
+}
+
+/// Compiled reply-block regex for the optional quoted-message section that
+/// follows the header line (see `Envelope::render_for_prompt`).
+///
+/// Matches `Replying to <sender>[ (@user)][ (msg_id:N)]:\n> <text...>\n\n`
+/// where the quoted body is one or more lines each prefixed with `> `.
+fn reply_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        // Non-greedy quoted body: consume `> ...` lines up to the first blank.
+        Regex::new(r"^Replying to [^\n]+:\n(?:> [^\n]*\n)+\n")
+            .expect("reply_regex: hardcoded pattern must compile")
+    })
+}
+
+/// Result of a successful [`Envelope::strip_from_content`] match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StripResult {
+    /// The channel label (e.g. `"TELEGRAM"`). Always upper-case.
+    pub channel: String,
+    /// Raw header body — everything between `[CHANNEL ` and `]`. Not parsed
+    /// into sub-fields; callers that need sender_id/timestamp should parse it
+    /// themselves. We keep it raw on purpose: the on-disk format has drifted
+    /// across versions and any structured parse would have to tolerate every
+    /// historical variant, which is more risk than Phase 5a warrants.
+    pub header_body: String,
+    /// Raw reply block (if present) — verbatim `Replying to ...\n> ...\n\n`.
+    pub reply_block: Option<String>,
+    /// Content with header (and optional reply block) removed. All other bytes
+    /// preserved byte-for-byte — no trimming, no normalisation.
+    pub stripped_content: String,
+}
 
 /// Per-message metadata from the channel.
 ///
@@ -88,6 +152,71 @@ impl Envelope {
             String::new()
         } else {
             parts.join("\n") + "\n\n"
+        }
+    }
+
+    /// Attempt to recognise and strip a legacy channel-header prefix from
+    /// `content`. Returns `None` if the content does not start with a
+    /// recognised header — never mutates or guesses.
+    ///
+    /// This is the inverse of [`Envelope::render_for_prompt`] for historical
+    /// records stored before ISS-021 Phase 2+3, when channel code concatenated
+    /// the rendered prefix into the user message string. The function is
+    /// intentionally conservative:
+    ///
+    /// * Channel label must be in [`KNOWN_CHANNELS`].
+    /// * Header body must not contain `]` or newline (tight character class).
+    /// * A blank line (`\n\n`) must separate header from body.
+    /// * Reply blocks are only stripped when they immediately follow the
+    ///   header and end with a blank line.
+    /// * Everything else is left byte-identical.
+    ///
+    /// The returned [`StripResult`] carries the raw header body; callers that
+    /// need to persist structured envelope fields must parse it themselves.
+    /// Phase 5a only reports counts + previews, so raw is sufficient.
+    pub fn strip_from_content(content: &str) -> Option<StripResult> {
+        // Phase 1: match the header line. `header_regex` matches through the
+        // single newline after `]`, leaving us positioned at either the body
+        // (blank line next) or a reply block (`Replying to ...` next).
+        let caps = header_regex().captures(content)?;
+        let header_match = caps.get(0)?;
+        debug_assert_eq!(header_match.start(), 0);
+        let after_header = header_match.end();
+        let channel = caps.get(1)?.as_str().to_string();
+        let header_body = caps.get(2)?.as_str().to_string();
+
+        let remainder = &content[after_header..];
+
+        // Phase 2: distinguish reply-block vs blank-line-then-body.
+        // Case A: remainder starts with `\n` → header line was followed by
+        //         a second `\n` (i.e. original had `]\n\n`). Body begins
+        //         after that blank.
+        // Case B: remainder starts with `Replying to ` → try to consume the
+        //         full reply block, which ends with `\n\n`. Body begins after.
+        // Case C: anything else → malformed structure, refuse to strip.
+        if let Some(body) = remainder.strip_prefix('\n') {
+            // Case A — no reply block.
+            Some(StripResult {
+                channel,
+                header_body,
+                reply_block: None,
+                stripped_content: body.to_string(),
+            })
+        } else if remainder.starts_with("Replying to ") {
+            // Case B — try to consume reply block.
+            let m = reply_regex().find(remainder)?;
+            debug_assert_eq!(m.start(), 0);
+            let reply_block = m.as_str().to_string();
+            let body = &remainder[m.end()..];
+            Some(StripResult {
+                channel,
+                header_body,
+                reply_block: Some(reply_block),
+                stripped_content: body.to_string(),
+            })
+        } else {
+            // Case C — structure doesn't match either shape. Refuse.
+            None
         }
     }
 }
@@ -775,5 +904,242 @@ mod tests {
         assert!(!prefix.contains("in group"));
         assert!(prefix.contains("Replying to BotName (msg_id:900800700):"));
         assert!(prefix.contains("> I can help with that!"));
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // ISS-021 Phase 5a: strip_from_content()
+    //
+    // These cover every invariant the migration dry-run depends on:
+    // channel whitelist, leading-`[` false positives, malformed headers,
+    // multi-channel variants, reply-block preservation/preservation, UTF-8,
+    // and the round-trip shape produced by `render_for_prompt`.
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn strip_matches_bare_telegram_header() {
+        let content = "[TELEGRAM id:7539582820 Mon 2026-03-30 10:50 -04:00]\n\nhello world";
+        let r = Envelope::strip_from_content(content).expect("should match");
+        assert_eq!(r.channel, "TELEGRAM");
+        assert_eq!(r.header_body, "id:7539582820 Mon 2026-03-30 10:50 -04:00");
+        assert!(r.reply_block.is_none());
+        assert_eq!(r.stripped_content, "hello world");
+    }
+
+    #[test]
+    fn strip_matches_telegram_with_name_and_username() {
+        let content = "[TELEGRAM potato (@potatosoupup) id:7539582820 Wed 2026-04-01 17:13 -04:00]\n\nactual message body";
+        let r = Envelope::strip_from_content(content).expect("should match");
+        assert_eq!(r.channel, "TELEGRAM");
+        assert!(r.header_body.contains("potato (@potatosoupup)"));
+        assert_eq!(r.stripped_content, "actual message body");
+    }
+
+    #[test]
+    fn strip_matches_group_chat_header() {
+        let content = "[TELEGRAM alice id:123 in group \"devs\" Mon 2026-04-20 09:00 -04:00]\n\nmorning";
+        let r = Envelope::strip_from_content(content).expect("should match");
+        assert_eq!(r.channel, "TELEGRAM");
+        assert!(r.header_body.contains("in group \"devs\""));
+        assert_eq!(r.stripped_content, "morning");
+    }
+
+    #[test]
+    fn strip_matches_all_known_channels() {
+        for channel in KNOWN_CHANNELS {
+            let content = format!("[{} id:1 Mon 2026-01-01 00:00 UTC]\n\nbody", channel);
+            let r = Envelope::strip_from_content(&content)
+                .unwrap_or_else(|| panic!("channel {} should strip", channel));
+            assert_eq!(r.channel, *channel);
+            assert_eq!(r.stripped_content, "body");
+        }
+    }
+
+    #[test]
+    fn strip_rejects_unknown_channel() {
+        // IRC is not in the whitelist — must pass through unchanged.
+        let content = "[IRC nick!user@host Mon 2026-01-01]\n\nhello";
+        assert!(Envelope::strip_from_content(content).is_none());
+    }
+
+    #[test]
+    fn strip_rejects_content_starting_with_bracket_but_not_header() {
+        // User legitimately pasted a JSON / tag / code snippet.
+        let cases = &[
+            "[RFC] Proposal: support foo\n\nbody",
+            "[DRAFT]\n\nsome thoughts",
+            "[{\"key\": \"value\"}]\n\nmore",
+            "[not-a-channel] nope\n\nbody",
+            "[telegram lowercase]\n\nbody", // case-sensitive — must not match
+        ];
+        for c in cases {
+            assert!(
+                Envelope::strip_from_content(c).is_none(),
+                "should NOT strip: {:?}",
+                c
+            );
+        }
+    }
+
+    #[test]
+    fn strip_rejects_header_without_blank_line() {
+        // Single \n after ] is insufficient; format demands \n\n.
+        let content = "[TELEGRAM id:1 Mon 2026-01-01]\nbody";
+        assert!(Envelope::strip_from_content(content).is_none());
+    }
+
+    #[test]
+    fn strip_rejects_header_with_embedded_newline() {
+        // Character class forbids \n inside the header body.
+        let content = "[TELEGRAM id:1\nMon 2026-01-01]\n\nbody";
+        assert!(Envelope::strip_from_content(content).is_none());
+    }
+
+    #[test]
+    fn strip_rejects_header_with_embedded_bracket() {
+        // Our `[^\]\n]+` class refuses embedded `]` inside the header body.
+        // Here the first `]` closes the header but is followed by ` tail]`,
+        // not by `\n` — so the header regex can't match at all.
+        let content = "[TELEGRAM id:1 weird] tail]\n\nbody";
+        assert!(
+            Envelope::strip_from_content(content).is_none(),
+            "malformed header (bracket not followed by newline) must not strip"
+        );
+    }
+
+    #[test]
+    fn strip_rejects_empty_content() {
+        assert!(Envelope::strip_from_content("").is_none());
+    }
+
+    #[test]
+    fn strip_rejects_header_not_at_start() {
+        // Header anywhere other than position 0 must not match (anchored).
+        let content = "preamble\n[TELEGRAM id:1 Mon 2026-01-01]\n\nbody";
+        assert!(Envelope::strip_from_content(content).is_none());
+    }
+
+    #[test]
+    fn strip_preserves_utf8_body() {
+        let content = "[TELEGRAM id:1 Mon 2026-01-01]\n\n你好 🐾 café";
+        let r = Envelope::strip_from_content(content).expect("should match");
+        assert_eq!(r.stripped_content, "你好 🐾 café");
+    }
+
+    #[test]
+    fn strip_preserves_body_with_leading_whitespace() {
+        let content = "[TELEGRAM id:1 Mon 2026-01-01]\n\n    indented line";
+        let r = Envelope::strip_from_content(content).expect("should match");
+        assert_eq!(r.stripped_content, "    indented line");
+    }
+
+    #[test]
+    fn strip_preserves_multiline_body() {
+        let content = "[TELEGRAM id:1 Mon 2026-01-01]\n\nline1\nline2\n\nline3";
+        let r = Envelope::strip_from_content(content).expect("should match");
+        assert_eq!(r.stripped_content, "line1\nline2\n\nline3");
+    }
+
+    #[test]
+    fn strip_captures_reply_block() {
+        let content = "[TELEGRAM alice id:1 Mon 2026-04-20 09:00 -04:00]\nReplying to bob (@b) (msg_id:42):\n> hi there\n> second line\n\nthe actual reply";
+        let r = Envelope::strip_from_content(content).expect("should match");
+        let reply = r.reply_block.as_deref().expect("reply present");
+        assert!(reply.starts_with("Replying to bob"));
+        assert!(reply.contains("> hi there"));
+        assert!(reply.contains("> second line"));
+        assert_eq!(r.stripped_content, "the actual reply");
+    }
+
+    #[test]
+    fn strip_no_reply_when_block_malformed() {
+        // "Replying to" line without the `> ` quoted body — the reply block
+        // is malformed. Conservative behaviour: refuse to strip anything
+        // rather than risk splitting content at the wrong place.
+        let content = "[TELEGRAM id:1 Mon 2026-04-20]\nReplying to bob:\nno quote marker\n\nbody";
+        assert!(
+            Envelope::strip_from_content(content).is_none(),
+            "malformed reply block must cause full strip rejection"
+        );
+    }
+
+    #[test]
+    fn strip_roundtrip_from_render_for_prompt() {
+        // Render a realistic envelope, then strip. The stripped result must
+        // leave no header residue.
+        let env = Envelope {
+            sender_id: Some("7539582820".to_string()),
+            sender_name: Some("potato".to_string()),
+            sender_username: Some("potatosoupup".to_string()),
+            chat_type: ChatType::Direct,
+            reply_to: None,
+            message_id: Some(1),
+        };
+        let prefix = env.render_for_prompt("telegram");
+        let full = format!("{}actual user message", prefix);
+        let r = Envelope::strip_from_content(&full).expect("rendered header must strip");
+        assert_eq!(r.channel, "TELEGRAM");
+        assert_eq!(r.stripped_content, "actual user message");
+    }
+
+    #[test]
+    fn strip_roundtrip_with_reply() {
+        let env = Envelope {
+            sender_id: Some("1".to_string()),
+            sender_name: Some("alice".to_string()),
+            sender_username: None,
+            chat_type: ChatType::Direct,
+            reply_to: Some(QuotedMessage {
+                text: "original question".to_string(),
+                sender_name: Some("bob".to_string()),
+                sender_username: Some("bobby".to_string()),
+                sender_id: None,
+                message_id: Some(42),
+            }),
+            message_id: Some(2),
+        };
+        let prefix = env.render_for_prompt("telegram");
+        let full = format!("{}my answer", prefix);
+        let r = Envelope::strip_from_content(&full).expect("should match");
+        assert!(
+            r.reply_block.is_some(),
+            "reply block must be captured, got content={:?}",
+            r.stripped_content
+        );
+        assert_eq!(r.stripped_content, "my answer");
+    }
+
+    #[test]
+    fn strip_idempotent_on_stripped_content() {
+        // Running strip twice: second call must return None (no header left).
+        let content = "[TELEGRAM id:1 Mon 2026-01-01]\n\nbody";
+        let first = Envelope::strip_from_content(content).expect("first pass matches");
+        assert!(
+            Envelope::strip_from_content(&first.stripped_content).is_none(),
+            "second pass must find nothing"
+        );
+    }
+
+    #[test]
+    fn strip_rejects_just_header_no_body() {
+        // Header with no following blank line — regex requires \n\n.
+        let content = "[TELEGRAM id:1 Mon 2026-01-01]";
+        assert!(Envelope::strip_from_content(content).is_none());
+    }
+
+    #[test]
+    fn strip_allows_empty_body_after_header() {
+        // Header + \n\n + empty body — legitimate edge case.
+        let content = "[TELEGRAM id:1 Mon 2026-01-01]\n\n";
+        let r = Envelope::strip_from_content(content).expect("should match");
+        assert_eq!(r.stripped_content, "");
+    }
+
+    #[test]
+    fn known_channels_covers_all_supported_platforms() {
+        // Regression guard: adding a new channel requires updating this test.
+        assert_eq!(
+            KNOWN_CHANNELS,
+            &["TELEGRAM", "DISCORD", "SLACK", "SIGNAL", "MATRIX", "WHATSAPP"]
+        );
     }
 }

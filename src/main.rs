@@ -38,6 +38,7 @@ mod events;mod stt;
 mod message_queue;
 mod text_utils;
 mod ritual_adapter;
+mod memory_migrate;
 mod ritual_registry;
 mod ritual_runner;
 mod tools;
@@ -129,6 +130,39 @@ enum Commands {
     /// Manage the RustClaw daemon service
     #[command(subcommand)]
     Daemon(DaemonCommands),
+    /// Engram memory maintenance tools (diagnostics + migrations)
+    #[command(subcommand)]
+    Memory(MemoryCommands),
+}
+
+/// Subcommands for `rustclaw memory ...`.
+///
+/// Currently scoped to ISS-021 Phase 5a — a read-only dry-run that reports
+/// which legacy memory records still carry an in-content channel header.
+/// Wet-run migration is **intentionally not wired in** until Phase 5b
+/// produces evidence that migration would improve recall quality
+/// (see `.gid/issues/ISS-021-message-context-side-channel/issue.md`).
+#[derive(clap::Subcommand, Debug)]
+enum MemoryCommands {
+    /// Scan for legacy in-content channel headers and report migration candidates.
+    MigrateEnvelope {
+        /// Path to the engram SQLite database.
+        #[arg(long, default_value = "engram-memory.db")]
+        db: String,
+        /// Only dry-run mode is supported in Phase 5a. Passing --dry-run=false
+        /// will print an error and exit; wet-run is gated on Phase 5b.
+        #[arg(long, default_value_t = true)]
+        dry_run: bool,
+        /// Destination for a DB backup copy (`.db` + `-wal` + `-shm`). Required
+        /// for any future wet run; ignored in dry-run mode but accepted so the
+        /// flag surface is stable across Phase 5a/5b/5c.
+        #[arg(long)]
+        backup_to: Option<String>,
+        /// Cap the number of matched records shown in the sample output.
+        /// Scanning itself is always exhaustive; this only trims the preview.
+        #[arg(long, default_value_t = 5)]
+        sample_limit: usize,
+    },
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -624,6 +658,23 @@ async fn main() -> anyhow::Result<()> {
                 }
                 DaemonCommands::Uninstall => {
                     daemon::daemon_uninstall()?;
+                }
+            }
+        }
+        Commands::Memory(cmd) => {
+            match cmd {
+                MemoryCommands::MigrateEnvelope {
+                    db,
+                    dry_run,
+                    backup_to,
+                    sample_limit,
+                } => {
+                    memory_migrate::run_migrate_envelope(
+                        &db,
+                        dry_run,
+                        backup_to.as_deref(),
+                        sample_limit,
+                    )?;
                 }
             }
         }
