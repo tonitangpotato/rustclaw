@@ -655,6 +655,10 @@ fn kc_incremental_compile(
             updated_at: m.created_at,
             tags,
             embedding: embedding_map.get(&m.id).cloned(),
+            dimensions: None,
+            type_weights: None,
+            confidence: None,
+            valence: None,
         }
     }).collect();
 

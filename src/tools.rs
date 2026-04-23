@@ -71,9 +71,9 @@ pub trait Tool: Send + Sync {
 pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
     llm_client: Option<Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>>,
-    /// Shared LLM slot for tools that need late-binding LLM access (e.g. KnowledgeCompileTool).
-    /// Created empty at registry init, filled by set_llm_client().
-    shared_llm_slot: Arc<tokio::sync::RwLock<Option<Box<dyn crate::llm::LlmClient>>>>,
+    /// Memory manager stored for late-binding tool registration (e.g. KnowledgeCompileTool
+    /// which needs the LLM client but is constructed before `set_llm_client()` is called).
+    memory: Option<Arc<MemoryManager>>,
     workspace_root: Option<std::path::PathBuf>,
     /// Shared mutable slot for ritual notify — set per-request with chat context,
     /// read by StartRitualTool at execution time.
@@ -94,7 +94,7 @@ impl ToolRegistry {
         Self {
             tools: Vec::new(),
             llm_client: None,
-            shared_llm_slot: Arc::new(tokio::sync::RwLock::new(None)),
+            memory: None,
             workspace_root: None,
             ritual_notify: Arc::new(std::sync::Mutex::new(None)),
             ritual_registry: Arc::new(std::sync::Mutex::new(None)),
@@ -103,16 +103,15 @@ impl ToolRegistry {
         }
     }
 
-    /// Set the LLM client for ritual tools.
+    /// Set the LLM client for ritual tools. Must be called after `with_defaults_and_memory`
+    /// (or equivalent) — this is the point at which late-bound tools like
+    /// `KnowledgeCompileTool` are actually registered (they need both memory and LLM).
     pub fn set_llm_client(&mut self, client: Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>) {
-        // Also fill the shared LLM slot for tools that need late-binding access
-        {
-            let client_ref = client.blocking_read();
-            let cloned = client_ref.clone_boxed();
-            let mut slot = self.shared_llm_slot.blocking_write();
-            *slot = Some(cloned);
+        self.llm_client = Some(client.clone());
+        // Late-bind KnowledgeCompileTool now that both memory and LLM are available.
+        if let Some(mem) = self.memory.clone() {
+            self.register(Box::new(KnowledgeCompileTool::new(mem, client)));
         }
-        self.llm_client = Some(client);
     }
 
 
@@ -181,7 +180,9 @@ impl ToolRegistry {
         registry.register(Box::new(KnowledgeQueryTool::new(memory.clone())));
         registry.register(Box::new(KnowledgeListTool::new(memory.clone())));
         registry.register(Box::new(KnowledgeHealthTool::new(memory.clone())));
-        registry.register(Box::new(KnowledgeCompileTool::new(memory, registry.shared_llm_slot.clone())));
+        // KnowledgeCompileTool is late-bound in `set_llm_client()` once the LLM client
+        // is available — it needs both memory and LLM, and we avoid wrapping in Option.
+        registry.memory = Some(memory);
         // TTS and STT tools
         registry.register(Box::new(TtsTool));
         registry.register(Box::new(SttTool));
@@ -2258,11 +2259,11 @@ impl Tool for KnowledgeHealthTool {
 /// Compile memories into knowledge topics.
 pub struct KnowledgeCompileTool {
     memory: Arc<MemoryManager>,
-    llm_client: Arc<tokio::sync::RwLock<Option<Box<dyn crate::llm::LlmClient>>>>,
+    llm_client: Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>,
 }
 
 impl KnowledgeCompileTool {
-    pub fn new(memory: Arc<MemoryManager>, llm_client: Arc<tokio::sync::RwLock<Option<Box<dyn crate::llm::LlmClient>>>>) -> Self {
+    pub fn new(memory: Arc<MemoryManager>, llm_client: Arc<tokio::sync::RwLock<Box<dyn crate::llm::LlmClient>>>) -> Self {
         Self { memory, llm_client }
     }
 }
@@ -2299,11 +2300,12 @@ impl Tool for KnowledgeCompileTool {
 
         let db_path = self.memory.db_path().to_string();
 
-        // Load all memories
-        let engram = self.memory.lock_engram()?;
-        let all_memories = engram.list_ns(None, None)
-            .map_err(|e| anyhow::anyhow!("Failed to list memories: {}", e))?;
-        drop(engram);
+        // Load all memories (scope to drop the !Send MutexGuard before any await)
+        let all_memories = {
+            let engram = self.memory.lock_engram()?;
+            engram.list_ns(None, None)
+                .map_err(|e| anyhow::anyhow!("Failed to list memories: {}", e))?
+        };
 
         if all_memories.is_empty() {
             return Ok(ToolResult {
@@ -2339,6 +2341,10 @@ impl Tool for KnowledgeCompileTool {
                 updated_at: m.created_at,
                 tags,
                 embedding: embedding_map.get(&m.id).cloned(),
+                dimensions: None,
+                type_weights: None,
+                confidence: None,
+                valence: None,
             }
         }).collect();
 
@@ -2375,16 +2381,16 @@ impl Tool for KnowledgeCompileTool {
             }
             Ok(ToolResult { output, is_error: false })
         } else {
-            // Create LLM provider for topic labeling — reuses RustClaw's LlmClient
+            // Create LLM provider for topic labeling — reuses RustClaw's LlmClient.
+            // Use `.read().await` (async context); the old `blocking_read()` panicked
+            // inside the tokio runtime due to deadlock protection.
             let kc_provider: Option<Box<dyn KcLlmProvider>> = {
-                let guard = self.llm_client.blocking_read();
-                guard.as_ref().map(|client| {
-                    Box::new(RustClawKcProvider {
-                        client: client.clone_boxed(),
-                        runtime: tokio::runtime::Handle::current(),
-                        model: "claude-haiku-4-5-20251001".to_string(),
-                    }) as Box<dyn KcLlmProvider>
-                })
+                let guard = self.llm_client.read().await;
+                Some(Box::new(RustClawKcProvider {
+                    client: guard.clone_boxed(),
+                    runtime: tokio::runtime::Handle::current(),
+                    model: "claude-haiku-4-5-20251001".to_string(),
+                }) as Box<dyn KcLlmProvider>)
             };
 
             // Actually compile — use recompile_all to purge old topics first

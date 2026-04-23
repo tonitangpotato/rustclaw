@@ -30,7 +30,7 @@ serde_json = "1"
 serde_yaml = "0.9"
 
 # Memory
-engramai = { path = "/Users/potato/clawd/projects/engram-ai-rust" }
+engramai = { path = "/Users/potato/clawd/projects/engram/crates/engramai" }
 
 # GID (task graph)
 gid-core = { path = "/Users/potato/clawd/projects/gid-rs/crates/gid-core", features = ["full"] }
