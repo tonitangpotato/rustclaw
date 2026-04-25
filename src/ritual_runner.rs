@@ -187,6 +187,30 @@ impl RitualRunner {
         }))
     }
 
+    /// Sweep zombie ritual state files left behind by dead processes.
+    ///
+    /// A "zombie" is a ritual file with a non-terminal `phase` whose
+    /// `adapter_pid` no longer maps to a live process — i.e. the runner that
+    /// owned it crashed, was killed, or shut down without calling
+    /// `UserCancel`. ISS-019 / ISS-025 created several of these (background
+    /// task races, panics inside skill phases).
+    ///
+    /// Files with `adapter_pid = None` are also swept when stale (no
+    /// `updated_at` activity in the last `STALE_HOURS` hours), since they
+    /// pre-date PID stamping and cannot be probed.
+    ///
+    /// The sweep marks each zombie as `Cancelled` (status + phase) via the
+    /// canonical `transition(state, UserCancel)` path so the resulting file
+    /// is indistinguishable from a user-driven cancel. The dead PID and the
+    /// reason ("orphaned: pid {n} dead" / "orphaned: stale {h}h, no pid") are
+    /// recorded in the transition log for forensics.
+    ///
+    /// Returns the list of (ritual_id, reason) pairs that were swept.
+    /// Idempotent: re-running on already-terminal files is a no-op.
+    pub fn sweep_orphans(&self) -> Result<Vec<(String, String)>> {
+        sweep_orphans_in(&self.rituals_dir)
+    }
+
     /// Get the target project root for a ritual.
     /// Returns state.target_root if set, otherwise self.project_root.
     fn target_root_for(&self, state: &RitualState) -> PathBuf {
@@ -1931,6 +1955,141 @@ impl RitualRunner {
 }
 
 /// Parse the LLM output to determine implementation strategy.
+/// Check whether a process with the given PID is alive on a POSIX host.
+///
+/// Uses `kill(pid, 0)` — the standard liveness probe. Returns true if the
+/// signal could be delivered (process exists and we have permission), false
+/// if `ESRCH` (no such process) or any other error.
+///
+/// PID reuse is a known caveat: a long-dead ritual whose PID has been
+/// reassigned to an unrelated process will read as alive. We accept that
+/// trade-off — the orphan sweep is best-effort cleanup, not a hard guarantee.
+/// In practice the window is bounded by sweep frequency (every daemon start)
+/// and PID space size (32k on macOS, 4M on modern Linux).
+fn is_pid_alive(pid: u32) -> bool {
+    // Safety: `kill(pid, 0)` is a pure liveness probe — no signal is actually
+    // delivered. The libc call is signal-safe and reentrant; passing any pid
+    // is well-defined (returns -1 with errno=ESRCH for unknown pids).
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if rc == 0 {
+        return true;
+    }
+    // EPERM means the process exists but we lack permission to signal it —
+    // still alive for our purposes.
+    let errno = std::io::Error::last_os_error().raw_os_error();
+    matches!(errno, Some(libc::EPERM))
+}
+
+/// Stale threshold for files without an `adapter_pid` (legacy or
+/// pre-ISS-019 rituals). 24h matches the longest realistic ritual.
+const ORPHAN_STALE_HOURS: i64 = 24;
+
+/// Implementation of the orphan sweep, decoupled from `RitualRunner` so it
+/// can be unit-tested without constructing a full runner (which requires an
+/// LLM client and notify fn that the sweep itself never uses).
+///
+/// Walks every `*.json` file in `rituals_dir`, classifies each as either
+/// a zombie (non-terminal phase whose `adapter_pid` is dead, or non-terminal
+/// with no pid and `updated_at` older than `ORPHAN_STALE_HOURS`) or live,
+/// and rewrites zombies as `Cancelled` via `transition(state, UserCancel)`.
+///
+/// Returns `(ritual_id, reason)` for each file that was swept.
+fn sweep_orphans_in(rituals_dir: &Path) -> Result<Vec<(String, String)>> {
+    let mut swept = Vec::new();
+
+    if !rituals_dir.exists() {
+        return Ok(swept);
+    }
+
+    for entry in std::fs::read_dir(rituals_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().map_or(true, |e| e != "json") {
+            continue;
+        }
+
+        // Read & parse defensively — corrupt/in-progress writes shouldn't
+        // abort the entire sweep.
+        let data = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(?path, "sweep: read failed: {}", e);
+                continue;
+            }
+        };
+        let state: RitualState = match serde_json::from_str(&data) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(?path, "sweep: parse failed: {}", e);
+                continue;
+            }
+        };
+
+        // Already-terminal phases are never zombies.
+        if state.phase.is_terminal() {
+            continue;
+        }
+        // Idle states are not in flight by definition.
+        if state.phase == RitualPhase::Idle {
+            continue;
+        }
+
+        let reason = match state.adapter_pid {
+            Some(pid) if !is_pid_alive(pid) => {
+                Some(format!("orphaned: pid {} dead", pid))
+            }
+            Some(_) => None, // pid is alive — not a zombie
+            None => {
+                // No PID stamp. Sweep only if the file has gone cold —
+                // otherwise we'd race against a runner that is mid-write
+                // on a state file from before PID stamping landed.
+                let age = chrono::Utc::now()
+                    .signed_duration_since(state.updated_at);
+                if age.num_hours() >= ORPHAN_STALE_HOURS {
+                    Some(format!(
+                        "orphaned: stale {}h, no pid",
+                        age.num_hours()
+                    ))
+                } else {
+                    None
+                }
+            }
+        };
+
+        let Some(reason) = reason else { continue };
+
+        // Drive through the canonical state machine so the resulting file
+        // matches a user-driven cancel exactly (status, transitions,
+        // notes — everything). Side-effect actions like `Notify` are
+        // discarded: there is no user to inform about a sweep of a
+        // long-dead ritual.
+        let (mut cancelled, _actions) =
+            transition(&state, RitualEvent::UserCancel);
+
+        // Overwrite the synthesized event string in the latest transition
+        // record with the sweep reason for forensics. The state machine
+        // appended exactly one new TransitionRecord during UserCancel.
+        if let Some(last) = cancelled.transitions.last_mut() {
+            last.event = reason.clone();
+        }
+
+        // Persist directly without stamping our PID — we want to preserve
+        // the *original* dead `adapter_pid` for forensics. The sweep writes
+        // a frozen, terminal record; no further updates are expected.
+        let out = serde_json::to_string_pretty(&cancelled)?;
+        std::fs::write(&path, out)?;
+
+        tracing::warn!(
+            ritual_id = %cancelled.id,
+            reason = %reason,
+            "swept orphan ritual"
+        );
+        swept.push((cancelled.id, reason));
+    }
+
+    Ok(swept)
+}
+
 fn parse_strategy(output: &str) -> ImplementStrategy {
     // Try to find JSON in the output
     if let Some(start) = output.find('{') {
@@ -2479,5 +2638,317 @@ pub fn parse_phase_name(name: &str) -> Option<RitualPhase> {
         "verify" | "verifying" | "test" | "testing" => Some(RitualPhase::Verifying),
         "done" => Some(RitualPhase::Done),
         _ => None,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Tests — orphan sweep (ISS-019 part 3)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod orphan_sweep_tests {
+    use super::*;
+    use gid_core::ritual::RitualV2Status;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    /// Write a state file directly to `dir/<id>.json`, bypassing
+    /// `RitualRunner::save_state` so the test fully controls every field
+    /// (including `adapter_pid`, which `save_state` would otherwise stamp).
+    fn write_state(dir: &Path, state: &RitualState) {
+        let path = dir.join(format!("{}.json", state.id));
+        let data = serde_json::to_string_pretty(state).unwrap();
+        std::fs::write(path, data).unwrap();
+    }
+
+    fn read_state(dir: &Path, id: &str) -> RitualState {
+        let path = dir.join(format!("{}.json", id));
+        let data = std::fs::read_to_string(path).unwrap();
+        serde_json::from_str(&data).unwrap()
+    }
+
+    /// Build a fresh state in a non-terminal phase, with the given pid and
+    /// updated_at. Uses `Implementing` as a representative non-terminal phase
+    /// (matches the real-world zombie observed in `.gid/rituals/r-e4e1f7.json`).
+    fn make_active_state(
+        id: &str,
+        pid: Option<u32>,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> RitualState {
+        let mut s = RitualState::new();
+        s.id = id.to_string();
+        s.task = "test ritual".into();
+        s = s.with_phase(RitualPhase::Implementing);
+        s.adapter_pid = pid;
+        s.updated_at = updated_at;
+        s
+    }
+
+    /// PID that is virtually guaranteed to be dead: pid 1 is init/launchd
+    /// (alive), but pid 999_999 won't exist on macOS (32k pid limit). On
+    /// Linux this could theoretically map to a real process — we mitigate
+    /// in `assert!` by sanity-checking via `is_pid_alive` first.
+    const DEAD_PID: u32 = 999_999;
+
+    #[test]
+    fn dead_pid_is_detected_dead() {
+        // Sanity: if this ever passes, the rest of the suite is meaningless.
+        assert!(!is_pid_alive(DEAD_PID),
+            "DEAD_PID is alive on this host — choose a different pid");
+    }
+
+    #[test]
+    fn live_pid_is_detected_alive() {
+        // Our own pid is, by definition, alive.
+        assert!(is_pid_alive(std::process::id()));
+    }
+
+    #[test]
+    fn empty_directory_sweeps_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let swept = sweep_orphans_in(tmp.path()).unwrap();
+        assert!(swept.is_empty());
+    }
+
+    #[test]
+    fn nonexistent_directory_sweeps_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+        let swept = sweep_orphans_in(&missing).unwrap();
+        assert!(swept.is_empty());
+    }
+
+    #[test]
+    fn dead_pid_with_active_phase_is_swept() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_active_state("r-zombie", Some(DEAD_PID), chrono::Utc::now());
+        write_state(tmp.path(), &state);
+
+        let swept = sweep_orphans_in(tmp.path()).unwrap();
+        assert_eq!(swept.len(), 1);
+        assert_eq!(swept[0].0, "r-zombie");
+        assert!(swept[0].1.contains(&format!("pid {}", DEAD_PID)),
+            "reason should mention dead pid: {}", swept[0].1);
+
+        // Disk state: phase=Cancelled, status=Cancelled, original pid preserved.
+        let after = read_state(tmp.path(), "r-zombie");
+        assert_eq!(after.phase, RitualPhase::Cancelled);
+        assert_eq!(after.status, RitualV2Status::Cancelled);
+        assert_eq!(after.adapter_pid, Some(DEAD_PID),
+            "sweep must preserve the original dead pid for forensics");
+        // Last transition records the sweep reason, not the canonical event string.
+        let last = after.transitions.last().expect("should have a transition");
+        assert!(last.event.contains("orphaned"), "sweep reason in event: {}", last.event);
+        assert_eq!(last.to, RitualPhase::Cancelled);
+    }
+
+    #[test]
+    fn live_pid_with_active_phase_is_left_alone() {
+        let tmp = TempDir::new().unwrap();
+        let live_pid = std::process::id();
+        let state = make_active_state("r-live", Some(live_pid), chrono::Utc::now());
+        write_state(tmp.path(), &state);
+
+        let swept = sweep_orphans_in(tmp.path()).unwrap();
+        assert!(swept.is_empty(), "live ritual must not be swept");
+
+        let after = read_state(tmp.path(), "r-live");
+        assert_eq!(after.phase, RitualPhase::Implementing,
+            "untouched: phase preserved");
+        assert_eq!(after.status, RitualV2Status::Active);
+    }
+
+    #[test]
+    fn terminal_phase_is_left_alone_even_with_dead_pid() {
+        let tmp = TempDir::new().unwrap();
+        let mut state = RitualState::new();
+        state.id = "r-done".into();
+        state = state.with_phase(RitualPhase::Done);
+        state.adapter_pid = Some(DEAD_PID); // dead, but doesn't matter
+
+        write_state(tmp.path(), &state);
+
+        let swept = sweep_orphans_in(tmp.path()).unwrap();
+        assert!(swept.is_empty(),
+            "Done ritual is already terminal — sweep must skip");
+
+        let after = read_state(tmp.path(), "r-done");
+        assert_eq!(after.phase, RitualPhase::Done);
+        assert_eq!(after.status, RitualV2Status::Done,
+            "Done status must be preserved unchanged");
+    }
+
+    #[test]
+    fn already_cancelled_is_left_alone() {
+        let tmp = TempDir::new().unwrap();
+        let mut state = RitualState::new();
+        state.id = "r-cancelled".into();
+        state = state.with_phase(RitualPhase::Implementing);
+        state = state.with_phase(RitualPhase::Cancelled);
+        state.adapter_pid = Some(DEAD_PID);
+
+        write_state(tmp.path(), &state);
+
+        let swept = sweep_orphans_in(tmp.path()).unwrap();
+        assert!(swept.is_empty(),
+            "Cancelled is terminal — re-sweeping must be a no-op");
+        let after = read_state(tmp.path(), "r-cancelled");
+        assert_eq!(after.status, RitualV2Status::Cancelled);
+    }
+
+    #[test]
+    fn idle_phase_is_left_alone() {
+        // Idle is the initial state from RitualState::new() — not in flight.
+        let tmp = TempDir::new().unwrap();
+        let mut state = RitualState::new();
+        state.id = "r-idle".into();
+        // No with_phase call → still Idle.
+        state.adapter_pid = Some(DEAD_PID);
+        write_state(tmp.path(), &state);
+
+        let swept = sweep_orphans_in(tmp.path()).unwrap();
+        assert!(swept.is_empty(),
+            "Idle phase is not in flight — sweep must skip");
+    }
+
+    #[test]
+    fn no_pid_recent_update_is_left_alone() {
+        // Legacy file: no pid stamp, but updated recently. Could be a live
+        // pre-PID-stamping runner mid-write; sweep must not race against it.
+        let tmp = TempDir::new().unwrap();
+        let state = make_active_state("r-legacy-fresh", None, chrono::Utc::now());
+        write_state(tmp.path(), &state);
+
+        let swept = sweep_orphans_in(tmp.path()).unwrap();
+        assert!(swept.is_empty(),
+            "no-pid + recent updated_at must NOT be swept (race window)");
+    }
+
+    #[test]
+    fn no_pid_stale_update_is_swept() {
+        // Legacy zombie: no pid stamp, last touched >24h ago. Definitely dead.
+        let tmp = TempDir::new().unwrap();
+        let stale_ts = chrono::Utc::now() - chrono::Duration::hours(48);
+        let state = make_active_state("r-legacy-stale", None, stale_ts);
+        write_state(tmp.path(), &state);
+
+        let swept = sweep_orphans_in(tmp.path()).unwrap();
+        assert_eq!(swept.len(), 1);
+        assert_eq!(swept[0].0, "r-legacy-stale");
+        assert!(swept[0].1.contains("stale"),
+            "reason should mention staleness: {}", swept[0].1);
+        assert!(swept[0].1.contains("48h") || swept[0].1.contains("47h"),
+            "reason should include hours: {}", swept[0].1);
+
+        let after = read_state(tmp.path(), "r-legacy-stale");
+        assert_eq!(after.status, RitualV2Status::Cancelled);
+        assert_eq!(after.adapter_pid, None,
+            "no-pid sweep must preserve None pid");
+    }
+
+    #[test]
+    fn sweep_is_idempotent() {
+        // Running sweep twice on the same input produces the same output;
+        // the second pass is a no-op.
+        let tmp = TempDir::new().unwrap();
+        let state = make_active_state("r-zombie", Some(DEAD_PID), chrono::Utc::now());
+        write_state(tmp.path(), &state);
+
+        let first = sweep_orphans_in(tmp.path()).unwrap();
+        assert_eq!(first.len(), 1);
+
+        let second = sweep_orphans_in(tmp.path()).unwrap();
+        assert!(second.is_empty(),
+            "second sweep must find nothing — first already cancelled it");
+
+        // State on disk is still Cancelled, not double-cancelled.
+        let after = read_state(tmp.path(), "r-zombie");
+        assert_eq!(after.phase, RitualPhase::Cancelled);
+    }
+
+    #[test]
+    fn mixed_population_only_zombies_swept() {
+        // Realistic scenario: a directory containing live, zombie, terminal,
+        // and idle rituals. Only the zombie is touched.
+        let tmp = TempDir::new().unwrap();
+
+        let zombie = make_active_state("r-zombie", Some(DEAD_PID), chrono::Utc::now());
+        let live = make_active_state("r-live", Some(std::process::id()), chrono::Utc::now());
+
+        let mut done = RitualState::new();
+        done.id = "r-done".into();
+        done = done.with_phase(RitualPhase::Done);
+
+        let mut idle = RitualState::new();
+        idle.id = "r-idle".into();
+
+        write_state(tmp.path(), &zombie);
+        write_state(tmp.path(), &live);
+        write_state(tmp.path(), &done);
+        write_state(tmp.path(), &idle);
+
+        let swept = sweep_orphans_in(tmp.path()).unwrap();
+        assert_eq!(swept.len(), 1);
+        assert_eq!(swept[0].0, "r-zombie");
+
+        // Verify the others are untouched.
+        assert_eq!(read_state(tmp.path(), "r-live").phase, RitualPhase::Implementing);
+        assert_eq!(read_state(tmp.path(), "r-done").phase, RitualPhase::Done);
+        assert_eq!(read_state(tmp.path(), "r-idle").phase, RitualPhase::Idle);
+    }
+
+    #[test]
+    fn corrupt_file_does_not_abort_sweep() {
+        // A garbage / partial-write file in the rituals dir must not stop
+        // the sweep from processing valid neighbours. This was a real
+        // failure mode in early v2 development.
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("garbage.json"), "{ not valid json").unwrap();
+        let zombie = make_active_state("r-zombie", Some(DEAD_PID), chrono::Utc::now());
+        write_state(tmp.path(), &zombie);
+
+        let swept = sweep_orphans_in(tmp.path()).unwrap();
+        assert_eq!(swept.len(), 1, "corrupt sibling must not block sweep");
+        assert_eq!(swept[0].0, "r-zombie");
+    }
+
+    #[test]
+    fn non_json_files_are_ignored() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("readme.txt"), "not a ritual").unwrap();
+        std::fs::write(tmp.path().join("notes.md"), "ignore me").unwrap();
+
+        let swept = sweep_orphans_in(tmp.path()).unwrap();
+        assert!(swept.is_empty());
+    }
+
+    #[test]
+    fn legacy_state_without_status_field_round_trips_correctly() {
+        // Files written before the `status` field existed deserialize as
+        // status=Active. After being swept, they must end up status=Cancelled
+        // with the field present in the output JSON.
+        let tmp = TempDir::new().unwrap();
+        // Synthesize a legacy file: serialize a normal state, then strip the
+        // status field by re-parsing as Value, removing the key, re-writing.
+        let state = make_active_state("r-legacy", Some(DEAD_PID), chrono::Utc::now());
+        let data = serde_json::to_string_pretty(&state).unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&data).unwrap();
+        v.as_object_mut().unwrap().remove("status");
+        std::fs::write(tmp.path().join("r-legacy.json"),
+            serde_json::to_string_pretty(&v).unwrap()).unwrap();
+
+        // Confirm the field really is absent on disk.
+        let raw = std::fs::read_to_string(tmp.path().join("r-legacy.json")).unwrap();
+        assert!(!raw.contains("\"status\""), "status field must be missing pre-sweep");
+
+        let swept = sweep_orphans_in(tmp.path()).unwrap();
+        assert_eq!(swept.len(), 1);
+
+        // Post-sweep: status field exists and is Cancelled.
+        let after = read_state(tmp.path(), "r-legacy");
+        assert_eq!(after.status, RitualV2Status::Cancelled);
+        let raw_after = std::fs::read_to_string(tmp.path().join("r-legacy.json")).unwrap();
+        assert!(raw_after.contains("\"status\""),
+            "sweep must write the status field for downstream consumers");
     }
 }

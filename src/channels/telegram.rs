@@ -2531,6 +2531,62 @@ pub async fn start(config: TelegramConfig, runner: Arc<AgentRunner>) -> anyhow::
     // Register channel capabilities with the agent runner
     bot.runner.set_channel_capabilities(bot.capabilities()).await;
 
+    // ISS-019 part 3: sweep zombie ritual state files left by previous
+    // crashes / killed processes / aborted background tasks. We do this
+    // once at daemon start, before any new rituals can be created, so
+    // `/ritual status` and `find_latest_active` never surface a phantom.
+    //
+    // The sweep is workspace-scoped: state files always live under the
+    // *runner's* `.gid/rituals/` (not the ritual's `target_root`), so a
+    // single pass against the rustclaw workspace covers every ritual
+    // this daemon has ever spawned.
+    {
+        // Build a throwaway runner just for the sweep. The sweep itself is
+        // pure FSM + filesystem (no LLM calls), but RitualRunner::new()
+        // requires an LLM client and notify fn — we satisfy them with the
+        // configured client and a no-op notify, then drop the runner.
+        let workspace = bot.runner.workspace_root().to_path_buf();
+        match crate::llm::create_client(&bot.runner.config().llm) {
+            Ok(client) => {
+                let sweep_llm = Arc::new(tokio::sync::RwLock::new(client));
+                let no_notify: crate::ritual_runner::NotifyFn = Arc::new(|_| {
+                    Box::pin(async {})
+                });
+                let sweep_runner = crate::ritual_runner::RitualRunner::new(
+                    workspace,
+                    sweep_llm,
+                    no_notify,
+                );
+                match sweep_runner.sweep_orphans() {
+                    Ok(swept) if !swept.is_empty() => {
+                        tracing::warn!(
+                            count = swept.len(),
+                            "swept {} zombie ritual(s) at startup",
+                            swept.len()
+                        );
+                        for (id, reason) in &swept {
+                            tracing::warn!(ritual_id = %id, %reason, "  → cancelled");
+                        }
+                    }
+                    Ok(_) => {
+                        tracing::debug!("orphan sweep: no zombies found");
+                    }
+                    Err(e) => {
+                        tracing::error!("orphan sweep failed: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                // LLM creation failed — daemon will likely fail later anyway,
+                // but the sweep is best-effort so we don't abort startup.
+                tracing::error!(
+                    "orphan sweep skipped: could not build LLM client: {}",
+                    e
+                );
+            }
+        }
+    }
+
     // Spawn sub-agent event listener for proactive completion handling
     let bot_clone = bot.clone();
     let mut event_rx = bot.runner.subagent_events.subscribe();
