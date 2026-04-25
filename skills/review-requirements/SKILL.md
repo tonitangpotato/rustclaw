@@ -1,7 +1,7 @@
 ---
 name: review-requirements
 description: Systematically review requirements documents for completeness, testability, and consistency
-version: "1.0.0"
+version: "1.1.0"
 author: potato
 triggers:
   patterns:
@@ -198,6 +198,31 @@ After writing the review file, report a **brief summary** to the user:
 - Total findings count by severity
 - List of finding IDs with one-line descriptions
 - Ask: "Which findings should I apply? (e.g., 'apply FINDING-1,3,5' or 'apply all')"
+
+## ⚠️ Incremental Output Protocol (MANDATORY)
+
+**Reviews MUST be written incrementally.** A single `write_file` with all findings frequently fails mid-write and loses all analysis work.
+
+**Step 1** — Write skeleton with `write_file` (~40 lines): header, summary table with TBD counts, empty `<!-- FINDINGS -->` marker, empty `## Applied` section.
+
+**Step 2** — Append each finding with `edit_file` as you discover it. Anchor against `<!-- FINDINGS -->`:
+
+```
+edit_file(
+  old_string: "<!-- FINDINGS -->",
+  new_string: "## FINDING-{N} {icon} {severity} — {title}\n\n{body}\n\n---\n\n<!-- FINDINGS -->"
+)
+```
+
+**Step 3** — Update the summary table counts with a final `edit_file` after all findings are written.
+
+**Hard rules:**
+- NEVER write a >300-line review in a single `write_file` call.
+- NEVER accumulate 5+ findings in memory before writing any.
+- If a finding append fails, retry just that one; continue with the rest.
+- Finding numbering is monotonic in discovery order, not check order.
+
+Exception: if review has ≤3 findings and doc is <100 lines, a single write is fine.
 
 ## Rules
 

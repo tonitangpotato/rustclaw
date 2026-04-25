@@ -1,7 +1,7 @@
 ---
 name: review-tasks
 description: Systematically review task breakdowns for completeness, dependency correctness, and implementability
-version: "1.0.0"
+version: "1.1.0"
 author: potato
 triggers:
   patterns:
@@ -132,6 +132,21 @@ After writing the review file, report a **brief summary** to the user:
 - Total findings count by severity
 - List of finding IDs with one-line descriptions
 - Ask: "Which findings should I apply? (e.g., 'apply FINDING-1,3,5' or 'apply all')"
+
+## ⚠️ Incremental Output Protocol (MANDATORY)
+
+Reviews MUST be written incrementally. Large reviews (>300 lines) frequently fail in a single `write_file` call.
+
+- **Skeleton first** via `write_file` (~40 lines): header, summary table with TBD counts, `<!-- FINDINGS -->` marker, empty `## Applied` section.
+- **Append each finding** via `edit_file` anchoring against `<!-- FINDINGS -->`:
+  ```
+  edit_file(old_string: "<!-- FINDINGS -->", new_string: "## FINDING-{N} ...\n\n---\n\n<!-- FINDINGS -->")
+  ```
+- **Update summary** counts with a final `edit_file` after all findings are written.
+
+Never accumulate 5+ findings in memory and dump them at once. If an append fails, retry just that one.
+
+Exception: ≤3 findings on a small graph — single write is fine.
 
 ## Output Format
 

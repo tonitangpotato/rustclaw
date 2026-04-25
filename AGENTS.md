@@ -126,6 +126,14 @@ Any output expected to exceed 200 lines — whether main agent or sub-agent:
 3. **Never write 500+ lines in a single tool call** — if you need to, split into multiple calls
 This is not optional. Large single-write calls are the #1 cause of truncation and context exhaustion.
 
+**Rule 3b: Skeleton-First Append Pattern (for structured list documents)**
+For documents that are a **structured list of items** (review findings, task lists, migration checklists, catalogs — anything with N repeated sub-sections):
+1. **Write the skeleton** with `write_file` once: header, overview, summary counts, and a terminal marker comment like `<!-- Items appended below -->`
+2. **Append each item** with a single `edit_file` call that replaces the previous item's tail (or the marker) with the new item + carry the marker forward
+3. **One item = one tool call.** Never batch multiple items into one edit.
+4. **Partial progress survives disconnection** — each committed edit is a durable checkpoint, and you can resume from where you left off by reading the file.
+This is what `skills/review-design/SKILL.md` and `skills/review-requirements/SKILL.md` v1.1.0+ use (Incremental Output Protocol). It is more specific than Rule 3 and should be preferred whenever the document has a repeated-item structure.
+
 ### Cross-Workspace Sub-Agent Rule
 When the target code is NOT in the sub-agent's default workspace:
 1. Set `workspace` parameter to the target project root, OR
@@ -195,7 +203,7 @@ Your tools are defined in `rustclaw.yaml` (Read, Write, Edit, exec, web_search, 
 
 ### GID Integration
 GID is built into RustClaw (gid-core crate). Key paths:
-- **Graph:** `.gid/graph.yml` — project structure, tasks, dependencies
+- **Graph:** `.gid/graph.db` — SQLite, canonical since 2026-04. **YAML backend is DEPRECATED**, do not create `.gid/graph.yml` or pass `--backend yaml` unless explicitly migrating old data with `gid migrate`.
 - **Features:** `.gid/features/<feature-name>/` — per-feature documents:
   - `requirements-*.md` — split requirement docs (numbered)
   - `requirements-master.md` — master requirements overview
@@ -206,6 +214,58 @@ GID is built into RustClaw (gid-core crate). Key paths:
 - **Config:** `.gid/config.yml` — ritual gating, tool scope settings
 
 **Always check `.gid/features/` first** when looking for project documents (requirements, designs). They are split into numbered sub-documents for manageability.
+
+### 🔧 GID Tool Usage — MANDATORY REFLEXES
+
+GID has first-class tools (`gid_*`) and a CLI (`gid ...`). Use them. These rules exist because I've repeatedly fallen back to grep/sqlite/find when a GID tool would have been correct.
+
+**Rule 1: DB is canonical, YML is deprecated.**
+- Current format: **SQLite at `.gid/graph.db`**. Never `.gid/graph.yml`.
+- Never pass `--backend yaml` to `gid extract`, `gid init`, or any other gid command that writes. If you see yourself typing it, **stop** — you're about to create a deprecated format.
+- `--backend yaml` is only valid when reading/migrating legacy data (e.g., `gid migrate --source old.yml --target new.db`).
+- If the user says "build a separate/isolated graph" → use `gid extract -g /path/to/new/graph.db --backend sqlite`, NOT `--backend yaml`. Isolation is via file path, not format.
+- If you find an existing `.gid-*/graph.yml` anywhere in a project, **flag it to potato as deprecated legacy**, don't use it as a data source.
+
+**Rule 2: For ANY question about code structure or impact, use GID tools first — not grep/find/sqlite.**
+
+| Question | Wrong reflex | Right tool |
+|---|---|---|
+| "What calls function X?" | `grep -rn "X(" src/` | `gid_query_impact` on `func:file.rs:X` |
+| "What does module X depend on?" | `grep "use .*X"` | `gid_query_deps` |
+| "What files are in the code graph?" | `ls src/**/*.rs` | `gid_schema` |
+| "How big is this change?" | visual scan | `gid_working_memory` with changed files |
+| "Is X already implemented?" | `grep "fn X"` | `gid_schema` or `gid code-search` |
+| "What tasks are pending?" | read `.gid/*.md` | `gid_tasks` |
+
+Raw tools (grep, sqlite, find) are only correct when:
+- You need to read a specific line of source code (grep is fine for "show me file:line")
+- GID doesn't have the query (then tell potato the capability gap, don't silently fall back)
+
+**Rule 3: Before `gid_extract`, check if the graph already has code nodes.**
+- Run `gid_schema` or try one `gid_query_impact` first. If nodes exist, do NOT re-extract — just query.
+- `gid_extract` is a destructive-ish operation (rebuilds code layer, invalidates extract-meta). Only run it when:
+  - Graph is known empty (new project, or you just created `.gid/`)
+  - Code has changed significantly since last extract (check `extract-meta.json` mtime vs source mtime)
+  - User explicitly asks to rebuild
+
+**Rule 4: Use correct node ID format when querying.**
+Node IDs follow `{kind}:{file}:{name}`:
+- `file:path/to/file.rs`
+- `func:path/to/file.rs:function_name`
+- `method:path/to/file.rs:ClassName.method_name`
+- `class:path/to/file.rs:ClassName` (also structs/enums/traits use `class:`)
+
+If a query returns "no such node", run `gid_schema` on the target file to discover the real ID format. Don't guess.
+
+**Rule 5: For non-workspace projects, always pass `project:` parameter.**
+- RustClaw's `gid_*` tools default to the workspace (`/Users/potato/rustclaw/`).
+- For engram, gid-rs, xinfluencer etc, always pass `project: /path/to/that/project`.
+- Canonical project roots are listed in MEMORY.md — look them up, don't search/guess.
+
+**Rule 6: Never directly edit `.gid/graph.db` with sqlite3.**
+- Use `gid_update_task`, `gid_refactor`, `gid add-node`, `gid remove-node`, `gid remove-edge`.
+- Exception: clearing orphan edges after bulk node deletion (gid has no clean-orphans command yet — this is a gid capability gap, flag it).
+- If you find yourself writing raw SQL to "fix" the graph, stop and check if a gid subcommand exists.
 
 ### 🔧 Development Workflow — Ritual Pipeline (v2)
 

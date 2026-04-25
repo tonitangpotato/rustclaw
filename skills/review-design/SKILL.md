@@ -1,7 +1,7 @@
 ---
 name: review-design
 description: Systematically review design documents for bugs, inconsistencies, and missing cases
-version: "1.0.0"
+version: "1.1.0"
 author: potato
 triggers:
   patterns:
@@ -25,8 +25,8 @@ subagent_preamble: |
   - The design document is ALREADY pre-loaded in your context. Do NOT call read_file to re-read it.
   - Read the pre-loaded content carefully, then run review checks against it.
   - If you need to check existing source code (Phase 7), those reads are legitimate — but only read files directly named in the design.
-  - Write findings to the review file EARLY — start writing after Phase 2 at latest, then append as you go.
-  - Budget: max 30% reading (source code for verification), 70% analysis and writing findings.
+  - MANDATORY: write the review INCREMENTALLY. First write_file the skeleton (~40 lines), then append each finding as you discover it via edit_file. Never accumulate findings and write them all at once. See 'Incremental Output Protocol' section in the skill body.
+  - Budget: max 30% reading (source code for verification), 70% analysis and incremental writing.
 ---
 # SKILL: Design Document Reviewer
 
@@ -240,9 +240,86 @@ After writing the review file, report a **brief summary** to the user:
 - List of finding IDs with one-line descriptions
 - Ask: "Which findings should I apply? (e.g., 'apply FINDING-1,3,5' or 'apply all')"
 
+## ⚠️ Incremental Output Protocol (MANDATORY)
+
+**Reviews MUST be written incrementally.** Never accumulate all findings in memory and dump them in a single write_file call. Large review dumps (>300 lines / >15KB in one write) fail at the network/context layer and lose all work.
+
+### Why this matters
+
+- Design review output for a large doc is 400-700+ lines across 15-25 findings.
+- A single `write_file` of that size frequently fails mid-write on unstable connections.
+- When it fails, ALL analysis work is lost — the sub-agent has no checkpoint to resume from.
+- This was the #1 cause of review failures prior to v1.1 of this skill.
+
+### The protocol
+
+**Step 1 — Write skeleton first** (single `write_file`, ~40 lines):
+
+```markdown
+# Design Review r{N} — {feature-name}
+
+> **Reviewer:** {agent}
+> **Date:** {YYYY-MM-DD}
+> **Target:** {path/to/design.md}
+> **Requirements:** {path/to/requirements.md}
+> **Method:** {N}-check review-design skill, depth={quick|standard|full}
+
+## Summary
+
+| Severity   | Count |
+|------------|-------|
+| Critical   | TBD   |
+| Important  | TBD   |
+| Minor      | TBD   |
+| **Total**  | TBD   |
+
+_Review in progress — findings appended below as they are discovered._
+
+---
+
+<!-- FINDINGS -->
+
+## Applied
+
+(None — awaiting human approval before apply phase.)
+```
+
+**Step 2 — Append each finding as you discover it** (one `edit_file` per finding):
+
+After each check that produces a finding, immediately append it to the file using `edit_file`. Anchor against the `<!-- FINDINGS -->` marker so each new finding lands above it in order, OR append right before `## Applied`. Example pattern:
+
+```
+edit_file(
+  old_string: "<!-- FINDINGS -->",
+  new_string: "## FINDING-{N} {severity-icon} {severity} — {title}\n\n{body}\n\n---\n\n<!-- FINDINGS -->"
+)
+```
+
+Each finding is 30-80 lines. If `edit_file` fails, only that one finding is lost — retry it, don't restart the review.
+
+**Step 3 — Update summary at the end** (single `edit_file`):
+
+After all checks run, compute final counts and replace the TBD rows in the summary table, and remove the "_Review in progress_" line.
+
+### Hard rules
+
+- **NEVER** write a review file in a single >300-line `write_file` call.
+- **NEVER** accumulate 5+ findings in memory before writing. Write after each finding is analyzed.
+- **If the skeleton write fails** — retry once, then stop and report the error to the user (don't proceed analyzing into the void).
+- **If a finding append fails** — retry that one finding, continue with the rest.
+- **Finding numbering** is monotonic. If you discover findings out of "check order", that's fine — number them in discovery order, not check order.
+
+### When incremental writes are NOT required
+
+- Review has ≤3 findings total AND full doc is <100 lines: single write is OK.
+- Quick-depth reviews often fall into this category. Use judgment.
+
+This protocol applies the "incremental write pattern" from AGENTS.md Rule 3 specifically to the review workflow.
+
 ## Rules
 
 - **Run ALL 35 checks.** Don't skip checks even if the first few find nothing.
+- **Write incrementally.** Skeleton first (write_file), then append each finding (edit_file) as you discover it. Never accumulate and dump. See 'Incremental Output Protocol' section — this is mandatory, not optional.
 - **No "looks good" without evidence.** For each passed check, briefly note what you verified.
 - **Find the ROOT issue, not symptoms.** If check #5 and #12 both flag the same underlying problem, consolidate into one finding with the root cause.
 - **Suggest concrete fixes.** Not "this could be improved" — show the actual code/spec change.
