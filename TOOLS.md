@@ -91,7 +91,8 @@ RustClaw has **built-in voice support** via the `VOICE:` prefix. No external too
 
 ### GID (Graph Indexed Development)
 - **Built-in**: GID is integrated into RustClaw (gid-core crate)
-- Graph path: `.gid/graph.yml`
+- **Graph path**: `.gid/graph.db` (SQLite, canonical). **`.gid/graph.yml` is DEPRECATED** — never create new yml graphs.
+- **Backend rule**: always `--backend sqlite` (or omit, it's the default). `--backend yaml` only for migration.
 - **Core capabilities**:
   - **Code intelligence**: dependency analysis, impact queries, architecture visualization
   - **Task management**: status tracking, dependency DAGs, blockers
@@ -99,6 +100,7 @@ RustClaw has **built-in voice support** via the `VOICE:` prefix. No external too
 - Use GID for: understanding codebase structure, tracking what depends on what, finding impact of changes, managing tasks with dependencies
 - **`gid design` workflow**: `gid design <file>` outputs a *prompt*, not a graph. You (the agent/LLM) generate the YAML yourself based on that prompt, then pipe it back: `echo "<yaml>" | gid design --parse` to merge into the graph. Two-step loop.
 - 39 commands: `gid tasks`, `gid query impact <node>`, `gid query deps <node>`, `gid visual`, `gid analyze`, etc.
+- **See AGENTS.md → "GID Tool Usage — MANDATORY REFLEXES" for rules on when to use gid tools vs grep/sqlite.**
 
 ### Dashboard
 - **URL**: http://localhost:8081
