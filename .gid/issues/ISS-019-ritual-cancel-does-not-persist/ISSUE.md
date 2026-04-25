@@ -1,9 +1,26 @@
 # ISS-019: `/ritual cancel` Does Not Persist Cancellation to State File
 
 **Created**: 2026-04-22
+**Resolved**: 2026-04-25
 **Priority**: Medium
-**Status**: Open — investigation done, fix not started
-**Related**: ISS-016 (main agent ritual awareness — explicitly deferred this fix)
+**Status**: ✅ Resolved — 3-part root fix landed (commits b10c9f9, 6e5782b + gid-rs schema)
+**Related**: ISS-016 (main agent ritual awareness — explicitly deferred this fix), ISS-025 (separate no-op-implementation symptom)
+
+---
+
+## Resolution
+
+Three-part root fix:
+
+1. **Part 1 — schema** (gid-rs): Added `status: Option<RitualStatus>` field to `RitualState`. `Active | Cancelled | Done | Failed`. The FSM transition arm `(_, UserCancel)` now sets `status = Some(Cancelled)` and `phase = Cancelled`. Status defaults to `None` on legacy files for backward compat (deserialized as Active by callers).
+
+2. **Part 2 — cancel handler rewire** (rustclaw `b10c9f9`): `/ritual cancel` no longer trusts the spawned EP-action task to call `advance(UserCancel)` itself. It fires the cancellation token (interrupts in-flight work) and then *unconditionally* drives the FSM via `send_event_to(id, UserCancel)`. Single authoritative path; both running and paused branches converge on the same FSM transition. Idempotent.
+
+3. **Part 3 — orphan sweep** (rustclaw `6e5782b`): Daemon startup walks `.gid/rituals/*.json` and rewrites zombies (non-terminal phase + dead `adapter_pid`, OR no pid + stale >24h) as `Cancelled` via `transition(state, UserCancel)`. Result is byte-identical to a user-driven cancel. Dead PID preserved on disk for forensics. 16 unit tests cover dead/live pid, terminal-skip, idempotency, legacy-no-status, no-pid stale, corrupt JSON.
+
+Validated against real zombie `.gid/rituals/r-e4e1f7.json` (Implementing, pid 49668 dead, status field absent) — fixture-perfect match with sweep tests; will be cleaned on next daemon restart.
+
+Tests: 336/336 rustclaw + 48/48 gid-core state machine.
 
 ---
 
