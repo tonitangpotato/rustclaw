@@ -1,8 +1,8 @@
 # ISS-007: Engram Memory Recall Quality — Three Bugs
 
-**Status:** 🟡 Partial — Bug 1 ✅ fixed, Bug 2 ✅ fixed, Bug 3 🔴 open (engramai side)
-**Priority:** High (Bug 3 still impacts every cached recall)
-**Components:** `src/memory.rs`, `src/engram_hooks.rs`, engramai `src/memory.rs`
+**Status:** 🟡 Blocked on engram ISS-032 — Bug 1 ✅ fixed (rustclaw), Bug 2 ✅ fixed (rustclaw), Bug 3 → migrated to engram ISS-032
+**Priority:** Medium (RustClaw-side work complete; awaiting engramai release)
+**Components:** `src/memory.rs`, `src/engram_hooks.rs` (RustClaw side complete)
 **Discovered:** 2026-04-10
 **Reporter:** potato + RustClaw (code-level investigation)
 **Last verified:** 2026-04-25
@@ -11,7 +11,7 @@
 
 ## Executive Summary
 
-Three bugs in the Engram memory recall pipeline cause inaccurate confidence scoring and cross-session contamination. Together they degrade recall quality — memories appear with misleading confidence labels, unrelated memories from other conversations leak into the current session, and the cached path produces uniformly low (~0.2) confidence regardless of actual relevance.
+Three bugs in the Engram memory recall pipeline were originally reported here. Bugs 1 and 2 lived on the RustClaw side and have been fixed. Bug 3 lives entirely inside the engramai crate and was migrated to the engram monorepo on 2026-04-25 as **engram ISS-032** (`/Users/potato/clawd/projects/engram/.gid/issues/ISS-032-cached-recall-confidence.md`). This issue stays open in RustClaw until engram ships the fix and RustClaw bumps the engramai dependency.
 
 ---
 
@@ -88,136 +88,86 @@ Replace global `wm: Mutex<SessionWorkingMemory>` with `wm: Mutex<SessionRegistry
 
 ---
 
-## Bug 3: Broken Confidence in Cached WM Path (CRITICAL)
+## Bug 3: Broken Confidence in Cached WM Path → Migrated
 
-**Severity:** Critical  
-**Location:** engramai `src/memory.rs` lines 1659-1680  
-**Root cause:** When session_recall uses the cached WM path (topic continuous), `compute_query_confidence()` receives zero values for all meaningful signals.
+**Status:** Migrated to **engram ISS-032** on 2026-04-25.
 
-### The Problem
+This bug lives entirely inside the engramai crate (`crates/engramai/src/memory.rs` lines 4164, 4314, 4685, plus a redundant probe in the cached path). RustClaw is a downstream consumer — there is no fix to apply here.
 
-In the cached WM path (`session_recall_ns`), for each active memory ID:
-```rust
-let confidence = compute_query_confidence(
-    None,   // no embedding similarity
-    false,  // not an FTS match
-    0.0,    // no entity score
-    age_hours,
-);
-```
+See `/Users/potato/clawd/projects/engram/.gid/issues/ISS-032-cached-recall-confidence.md` for the full report (problem, root cause, three sub-fixes, verification plan).
 
-With `compute_query_confidence`'s weights:
-- Embedding (0.55 weight) → None → 0
-- FTS (0.20 weight) → false → 0
-- Entity (0.20 weight) → 0.0 → 0
-- Recency (0.05 weight) → only non-zero signal
-
-Result: `confidence ≈ 0.05 * recency / 0.45` ≈ 0.11-0.22 regardless of actual relevance.
-All memories get `confidence_label: "very low"` or `"low"` in the cached path.
-
-Additionally, a **redundant second probe** is executed purely to calculate `continuity_ratio` for metrics:
-```rust
-// After already returning cached results:
-let probe = self.recall_from_namespace(query, 3, None, None, namespace)?;
-```
-This is a full recall (embedding + FTS + scoring) of 3 items — wasted computation.
-
-### Impact
-
-- All cached WM memories appear as "very low" or "low" confidence
-- The `min_confidence` filter may exclude perfectly relevant memories
-- The label "low" undermines trust in recalled memories ("You may have prior context" + "[low]" = agent ignores it)
-- Redundant probe adds ~50ms latency per cached recall
-
-### Fix (engramai side)
-
-Two sub-fixes:
-1. **Restore confidence for cached results**: Either re-compute embedding similarity for cached items, or carry the original confidence/similarity from the full recall that populated the WM in the first place.
-2. **Eliminate redundant probe**: The continuity_ratio metric is informational only. Remove the second probe call, or compute ratio from the initial probe (already done before entering the cached path).
+**RustClaw's role going forward:**
+1. Wait for engram ISS-032 to land and engramai to publish a new version.
+2. Bump `engramai = "x.y.z"` in `Cargo.toml`.
+3. Run RustClaw's recall regression tests against the new version.
+4. Close ISS-007.
 
 ---
 
 ## Implementation Order
 
-| Fix | Complexity | Risk | Dependency |
-|-----|-----------|------|------------|
-| Bug 1: Use r.confidence | Trivial (2 lines) | None | None |
-| Bug 3a: Eliminate redundant probe | Low | None | None (engramai) |
-| Bug 3b: Restore confidence in cached path | Medium | Low | Bug 1 done first |
-| Bug 2: SessionRegistry | Medium | Low-Medium | Bug 1 done first |
-
-Recommended order: Bug 1 → Bug 3a → Bug 3b → Bug 2
+| Fix | Status | Where |
+|-----|--------|-------|
+| Bug 1: Use r.confidence | ✅ Done | rustclaw `src/memory.rs` |
+| Bug 2: SessionRegistry | ✅ Done | rustclaw `src/memory.rs`, `src/engram_hooks.rs` |
+| Bug 3: Cached path confidence | 🔄 Migrated | engram ISS-032 |
 
 ---
 
-## Files to Modify
+## Files Modified (RustClaw side)
 
-### RustClaw side
-- `src/memory.rs` — Fix confidence mapping (Bug 1), replace global WM with SessionRegistry (Bug 2), thread session_key through API
-- `src/engram_hooks.rs` — Pass session_key to memory.session_recall (Bug 2)
-
-### engramai side  
-- `src/memory.rs` — Fix cached WM confidence (Bug 3b), remove redundant probe (Bug 3a)
-- `src/session_wm.rs` — Potentially extend SessionWorkingMemory to cache confidence scores
+- `src/memory.rs` — confidence mapping fix (Bug 1, 4 call sites); `wm: Mutex<SessionWorkingMemory>` → `wm_registry: Mutex<SessionRegistry>` (Bug 2); `session_recall(query, session_key)` API
+- `src/engram_hooks.rs` — threads `session_key` into `memory.session_recall` (Bug 2)
 
 ---
 
 ## Verification
 
-### Bug 1
-- Unit test: Verify `RecalledMemory.confidence` matches the label ranges (high: ≥0.8, medium: 0.5-0.79, low: 0.2-0.49)
-- Before: confidence could be 3.7 with label "medium"
-- After: confidence=0.65 with label "medium"
+### Bug 1 ✅
+- All 4 `RecalledMemory` construction sites bind `confidence: r.confidence` (line 425, 538, 567, 663)
+- `confidence_label` and numeric `confidence` now correspond
+- Before: confidence could be 3.7 with label "medium". After: confidence=0.65 with label "medium".
 
-### Bug 2
-- Integration test: Two sequential session_recall calls with different session_keys should have independent WM states
-- Before: second call may return stale results from first session's WM
-- After: each session gets its own WM via SessionRegistry
+### Bug 2 ✅
+- `MemoryManager` now holds `wm_registry: Mutex<SessionRegistry>` (line 136, 181, 286)
+- Test fixtures at lines 1632, 1798, 2000, 2020 confirm session-scoped behavior
+- Sub-agents and different chats no longer share a single WM
 
-### Bug 3
-- Unit test: Cached WM path returns confidence comparable to full recall path for the same memories
-- Before: cached path confidence ≈ 0.2 always
-- After: cached path confidence matches the score from original full recall
+### Bug 3 → engram ISS-032
+- Verification plan lives in engram ISS-032
+- RustClaw verification on dependency bump: existing recall regression tests must pass; sample `engram_recall` traces should no longer collapse to `[low]` labels in steady-state conversation
 
 ---
 
 ## Implementation Record
 
-### 2026-04-25 — Bugs 1 & 2 verified fixed (status reconciliation)
+### 2026-04-25 — Bugs 1 & 2 verified fixed; Bug 3 migrated
 
-While auditing open issues, code inspection of `src/memory.rs` showed that
-Bug 1 and Bug 2 had already been fixed in earlier work but the issue header
-was never updated.
+While auditing open issues, code inspection of `src/memory.rs` showed Bug 1 and
+Bug 2 had already been fixed in earlier work but the issue header was never
+updated.
 
 **Bug 1 — Confidence mapping** ✅
 - All 4 `RecalledMemory` construction sites in `src/memory.rs` (lines 425, 538,
-  567, 663) now bind `confidence: r.confidence` (the normalized 0.0–1.0 score)
-  rather than `r.activation` (raw ACT-R log-scale).
-- `confidence_label` and the numeric `confidence` field now correspond.
+  567, 663) now bind `confidence: r.confidence` rather than `r.activation`.
 
 **Bug 2 — Session isolation** ✅
 - `MemoryManager` now holds `wm_registry: Mutex<SessionRegistry>` instead of
-  the old global `wm: Mutex<SessionWorkingMemory>` (see line 136, 181, 286).
+  the old global `wm: Mutex<SessionWorkingMemory>`.
 - `session_recall(query, session_key)` accepts a `session_key` and routes
-  through the registry → `SessionRegistry::session_recall()`.
-- Sub-agents and different chats no longer share a single WM — each session
-  gets its own.
-- Test fixtures at lines 1632, 1798, 2000, 2020 confirm session-scoped behavior.
+  through the registry.
 
-**Bug 3 — Cached WM confidence** 🔴 still open
-- `engramai/src/memory.rs:4164` (and three other `compute_query_confidence`
-  call sites in cached / causal recall paths) still pass
-  `(None, false, 0.0, age_hours)` → confidence collapses to ~0.05–0.22
-  regardless of relevance.
-- Fix lives in **engramai**, not rustclaw. Needs a separate ritual touching
-  `crates/engramai/src/memory.rs` in the engram monorepo
-  (`/Users/potato/clawd/projects/engram/`).
-- Sub-fixes still pending: (3a) eliminate redundant probe in cached path,
-  (3b) carry original confidence/similarity from the full recall that
-  populated the WM.
+**Bug 3 — Cached WM confidence** → migrated to **engram ISS-032**
+- The fix lives entirely inside engramai. Filing it under rustclaw was a
+  category error; the report has been moved to
+  `/Users/potato/clawd/projects/engram/.gid/issues/ISS-032-cached-recall-confidence.md`
+  with the full problem statement, three sub-fixes (3a redundant probe,
+  3b carry-forward confidence, 3c call-site audit), and verification plan.
+- ISS-007 stays open in RustClaw, status "Blocked on engram ISS-032",
+  until engramai ships the fix and RustClaw bumps the dep.
 
 ## Next Step
 
-Open a follow-up issue in the engram monorepo (likely ISS-030 or next free
-slot) scoped specifically to Bug 3 — and link it back here. ISS-007 stays
-open until that engramai-side fix lands.
+Run a `start_ritual` against the engram project for ISS-032. Once engramai
+publishes a new version with the fix, bump the dep in RustClaw's `Cargo.toml`,
+re-run recall regression tests, and close this issue.
