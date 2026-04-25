@@ -2,7 +2,8 @@
 
 **Created**: 2026-04-25
 **Priority**: High
-**Status**: Open — needs investigation
+**Status**: **Resolved 2026-04-25** — fix landed in gid-rs `52a84ee` (see Resolution below)
+**Resolved by**: gid-rs ISS-038 (file_snapshot post-condition)
 
 ---
 
@@ -119,3 +120,59 @@ ISS-019 lives in `rustclaw` (issue files) but the code to fix is in `gid-rs` (`c
 - Ritual `r-af714a` state file (concrete reproducer — do not delete).
 - ISS-019 — the original task that exposed this bug.
 - ISS-016 — main-agent ritual awareness (must surface this kind of false-success).
+- gid-rs ISS-038 — sibling issue tracking the actual code fix.
+
+---
+
+## Resolution (2026-04-25)
+
+Confirmed root cause: **hypothesis (b)** — sub-agent ran but only "researched", and there was no enforcement that it actually wrote files. Hypothesis (c) (skip_design + missing design) and (d) (cross-workspace target) were aggravating factors but not the root.
+
+### What was actually broken
+
+The `api_llm_client` skill execution path in `crates/gid-core/src/ritual/api_llm_client.rs` returned `SkillResult { artifacts_created: vec![], ... }` regardless of whether the LLM made `Write`/`Edit` tool calls. The intent was that the executor layer would own artifact accounting — but the executor never did. So:
+
+1. LLM produces 19k tokens of commentary, zero `Write`/`Edit` tool calls.
+2. `api_llm_client` returns `artifacts_created = []` (as designed — but the contract was never finished).
+3. `v2_executor` emits `SkillCompleted { artifacts: [] }` (no post-condition check).
+4. Verify phase runs against an unchanged tree, trivially passes.
+5. State machine reaches `Done` with `failed_phase = None`.
+
+The bug was a **missing contract enforcement**, not a missing feature. The artifact list always existed in the data flow — nothing was checking it against ground truth.
+
+### Fix (root, not patch)
+
+Filesystem snapshot before/after the LLM invocation, for any phase that requires file changes (currently just `implement`). The diff is the authoritative artifact list — the LLM-reported list is ignored. Zero diff on `implement` → `SkillFailed` with diagnostic message naming tokens consumed and tool calls made.
+
+Implementation in gid-rs (`52a84ee fix(ritual): enforce implement-phase post-condition via fs snapshot`):
+
+- New `crates/gid-core/src/ritual/file_snapshot.rs` (390 lines): `snapshot_dir` / `diff_snapshots`, `FsDiff { added, modified, deleted }`. Uses sha256 with a 64-byte head/tail+size fingerprint fallback for files >1 MiB. Reuses the project's `.gidignore` so build artifacts don't trip detection.
+- `v2_executor` wraps `run_skill` with `snapshot_before` / `snapshot_after` when `phase_requires_file_changes`. Mutation root resolved via `resolve_mutation_root` — prefers ritual's `target_root` over `config.project_root` (this is the cross-workspace fix that addresses hypothesis (d) as a side-effect: post-conditions are now evaluated against the actual code root, not the project config root).
+- On real diff, executor builds the `artifacts` list from the diff itself — the LLM-reported list is now explicitly ignored. `api_llm_client` retains `artifacts_created: vec![]` with a comment documenting the contract: empty vec is intentional, executor owns artifact accounting.
+- Cross-workspace warning: when `target_root != project_root`, executor logs a one-line warning so the discrepancy is visible in logs/notifications (addresses ISS-016 surface area).
+
+### Design choices (and why)
+
+1. **fs-diff over LLM self-reporting.** The LLM's claim that it wrote a file is one signal; the filesystem actually having the file is another. The latter is ground truth. We chose ground truth.
+2. **Hash fingerprint with large-file fallback.** Full-file sha256 on every snapshot would be wasteful for large binary blobs (model weights, generated assets). 64-byte head + 64-byte tail + size catches all real edits; only adversarial edits (changing the middle of a >1 MiB file by exactly the same byte count) would slip through, and ritual targets aren't adversarial.
+3. **Reuse `.gidignore`, not a separate ignore list.** Diverging ignore rules between graph extraction and ritual snapshot would create silent mismatches. One source of truth.
+4. **Per-phase opt-in via `phase_requires_file_changes`, not global.** Some phases (triage, planning) legitimately produce no file changes. Hard-coding "implement requires changes" is correct for now; if `verify` ever wants self-correcting edits, we add it to the predicate.
+5. **`target_root` preference over `project_root`.** ISS-029 introduced work-unit binding, where the ritual can target a different project than the one it's running from. The post-condition must be evaluated against where the code actually lives, not where the ritual was invoked.
+
+### Verification
+
+- 7 new `file_snapshot` unit tests (added/modified/deleted detection, empty-diff identity, large-file fallback, gidignore filtering, cross-platform path handling).
+- 3 new `v2_executor` end-to-end tests:
+  - `implement_phase_with_zero_changes_emits_skill_failed`
+  - `implement_phase_with_file_writes_emits_skill_completed_with_artifacts`
+  - `non_implement_phase_does_not_enforce_changes`
+- 187/187 ritual tests pass. No regressions.
+- One pre-existing unrelated failure (`storage::tests::test_load_graph_auto_empty_dir_returns_default`) — sqlite feature-gate issue present on origin/main, not introduced here.
+
+### Follow-up suggestions (deferred — separate issues if needed)
+
+- **F1: Prompt-time enforcement.** Currently we detect the failure post-hoc (phase ran, then we check). A future improvement: detect mid-stream that the LLM hasn't called `Write`/`Edit` after N turns and inject a corrective system message. Cheaper than burning the full token budget. Tradeoff: more invasive, harder to reason about.
+- **F2: Surface `phase_tokens` ↔ `files_changed` mismatch in completion notification.** Even with the fix, an operator skimming a Telegram completion message can't tell at a glance whether the diff was substantial. Add `Δfiles=N` to the `Done` notification. Ties into ISS-016.
+- **F3: Doc-only / investigation rituals.** Some legitimate rituals produce zero code changes (writing a design doc, writing this very issue file). Currently they'd fail the post-condition. Either route them to a different phase predicate, or tag the work-unit as `kind: doc` and skip the implement-phase enforcement.
+- **F4: Sandbox/worktree merge protocol** (hypothesis (a)). Not needed for this fix — the no-op rituals were not running in a sandbox, they were running directly against `target_root` and just not writing. But if the ritual subsystem ever moves to sandboxed execution, the snapshot needs to be taken at the merge point, not the sandbox.
+- **F5: `skip_design=true` + missing design artifact** (hypothesis (c)). Not the root, but still real: rituals shouldn't enter `Implementing` with no implementation plan. Either auto-generate a minimal design from the issue body, or fail-fast with "no design, no implement". Lower priority now that the post-condition catches the symptom.
