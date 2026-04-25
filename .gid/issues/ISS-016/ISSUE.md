@@ -2,7 +2,8 @@
 
 **Created**: 2026-04-20
 **Priority**: High
-**Status**: Analysis Complete → Ready for Fix
+**Status**: ✅ Resolved
+**Resolution**: RitualRegistry landed — main agent now sees active rituals via injected context. See Implementation Notes below.
 
 ---
 

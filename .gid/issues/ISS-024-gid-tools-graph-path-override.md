@@ -1,9 +1,10 @@
 # ISS-024: gid_* built-in tools cannot target arbitrary graph.db paths
 
-**Status:** todo
+**Status:** ✅ Resolved (2026-04-25)
 **Priority:** P1
 **Filed:** 2026-04-24
 **Related:** ISS-020 (project path discovery friction)
+**Resolution:** All 24 gid_* built-in tools now accept an optional `graph_path` parameter. `resolve_by_graph_path()` honors explicit DB paths anywhere on disk. Verified by inspecting `src/tools.rs` — `graph_path` plumbed through every gid_* tool definition.
 
 ## Problem
 

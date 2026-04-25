@@ -1,10 +1,11 @@
 # ISS-007: Engram Memory Recall Quality — Three Bugs
 
-**Status:** Open  
-**Priority:** High  
-**Components:** `src/memory.rs`, `src/engram_hooks.rs`, engramai `src/memory.rs`  
-**Discovered:** 2026-04-10  
+**Status:** 🟡 Partial — Bug 1 ✅ fixed, Bug 2 ✅ fixed, Bug 3 🔴 open (engramai side)
+**Priority:** High (Bug 3 still impacts every cached recall)
+**Components:** `src/memory.rs`, `src/engram_hooks.rs`, engramai `src/memory.rs`
+**Discovered:** 2026-04-10
 **Reporter:** potato + RustClaw (code-level investigation)
+**Last verified:** 2026-04-25
 
 ---
 
@@ -177,3 +178,46 @@ Recommended order: Bug 1 → Bug 3a → Bug 3b → Bug 2
 - Unit test: Cached WM path returns confidence comparable to full recall path for the same memories
 - Before: cached path confidence ≈ 0.2 always
 - After: cached path confidence matches the score from original full recall
+
+---
+
+## Implementation Record
+
+### 2026-04-25 — Bugs 1 & 2 verified fixed (status reconciliation)
+
+While auditing open issues, code inspection of `src/memory.rs` showed that
+Bug 1 and Bug 2 had already been fixed in earlier work but the issue header
+was never updated.
+
+**Bug 1 — Confidence mapping** ✅
+- All 4 `RecalledMemory` construction sites in `src/memory.rs` (lines 425, 538,
+  567, 663) now bind `confidence: r.confidence` (the normalized 0.0–1.0 score)
+  rather than `r.activation` (raw ACT-R log-scale).
+- `confidence_label` and the numeric `confidence` field now correspond.
+
+**Bug 2 — Session isolation** ✅
+- `MemoryManager` now holds `wm_registry: Mutex<SessionRegistry>` instead of
+  the old global `wm: Mutex<SessionWorkingMemory>` (see line 136, 181, 286).
+- `session_recall(query, session_key)` accepts a `session_key` and routes
+  through the registry → `SessionRegistry::session_recall()`.
+- Sub-agents and different chats no longer share a single WM — each session
+  gets its own.
+- Test fixtures at lines 1632, 1798, 2000, 2020 confirm session-scoped behavior.
+
+**Bug 3 — Cached WM confidence** 🔴 still open
+- `engramai/src/memory.rs:4164` (and three other `compute_query_confidence`
+  call sites in cached / causal recall paths) still pass
+  `(None, false, 0.0, age_hours)` → confidence collapses to ~0.05–0.22
+  regardless of relevance.
+- Fix lives in **engramai**, not rustclaw. Needs a separate ritual touching
+  `crates/engramai/src/memory.rs` in the engram monorepo
+  (`/Users/potato/clawd/projects/engram/`).
+- Sub-fixes still pending: (3a) eliminate redundant probe in cached path,
+  (3b) carry original confidence/similarity from the full recall that
+  populated the WM.
+
+## Next Step
+
+Open a follow-up issue in the engram monorepo (likely ISS-030 or next free
+slot) scoped specifically to Bug 3 — and link it back here. ISS-007 stays
+open until that engramai-side fix lands.

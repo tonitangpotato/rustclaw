@@ -2,7 +2,8 @@
 
 **Created**: 2026-04-20
 **Priority**: High
-**Status**: Analysis Complete → Ready for Fix
+**Status**: ✅ Resolved (2026-04-21)
+**Resolution**: Fix landed — see Implementation Notes below. 270/270 tests pass.
 
 ---
 
