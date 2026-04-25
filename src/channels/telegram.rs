@@ -931,27 +931,72 @@ Choose a model:", current),
                 if target_state.phase.is_terminal() || target_state.phase == gid_core::ritual::V2Phase::Idle {
                     self.send_message(chat_id, "No active ritual to cancel.", None).await?;
                 } else {
-                    // Immediately interrupt running ritual via cancellation token
-                    let interrupted = runner.cancel_running(&target_state.id);
-                    if interrupted {
-                        tracing::info!(ritual_id = %target_state.id, "Interrupted running ritual via cancel token");
-                        self.send_message(
-                            chat_id,
-                            &format!("🛑 Interrupting ritual `{}` (was in {} phase)...", target_state.id, target_state.phase.display_name()),
-                            None,
-                        ).await?;
-                    } else {
-                        // Ritual not actively running (paused/escalated) — update state directly
-                        let cancelled = target_state.clone()
-                            .with_phase(gid_core::ritual::V2Phase::Cancelled);
-                        if let Err(e) = runner.save_state(&cancelled) {
-                            tracing::error!("Failed to save cancelled state: {}", e);
+                    // ISS-019: Cancel is now a single authoritative path:
+                    //   1. Fire the cancellation token (interrupts any running EP action).
+                    //   2. Drive the FSM with UserCancel — this is what writes the
+                    //      terminal `Cancelled` transition and `status = cancelled`
+                    //      to disk via `save_state`.
+                    //
+                    // Previously the "running" branch trusted the spawned EP-action
+                    // task to call `advance(UserCancel)` itself when it observed the
+                    // cancel token, but that was racy: if the task had already
+                    // finished by the time the user typed `/ritual cancel`, no one
+                    // ever wrote the terminal transition and the state file became
+                    // a zombie (phase stuck at Implementing/etc., status = null).
+                    //
+                    // The "paused" branch hand-rolled `with_phase(Cancelled) +
+                    // save_state` directly, bypassing the FSM. That worked but
+                    // duplicated the transition logic — and missed the new `status`
+                    // field maintenance until it was inlined here too. Going through
+                    // `send_event_to` keeps a single source of truth.
+                    //
+                    // Idempotency: the FSM's `(_, UserCancel)` arm accepts UserCancel
+                    // from any state (including Cancelled), and `with_phase` is
+                    // safe to call repeatedly.
+                    let was_running = runner.cancel_running(&target_state.id);
+                    if was_running {
+                        tracing::info!(
+                            ritual_id = %target_state.id,
+                            "Fired cancellation token for running ritual"
+                        );
+                    }
+
+                    match runner.send_event_to(&target_state.id, RitualEvent::UserCancel).await {
+                        Ok(new_state) => {
+                            tracing::info!(
+                                ritual_id = %new_state.id,
+                                phase = ?new_state.phase,
+                                status = ?new_state.status,
+                                "Ritual cancellation persisted"
+                            );
+                            let suffix = if was_running { " (interrupted running phase)" } else { "" };
+                            self.send_message(
+                                chat_id,
+                                &format!(
+                                    "🛑 Ritual `{}` cancelled (was in {} phase){}.",
+                                    target_state.id,
+                                    target_state.phase.display_name(),
+                                    suffix,
+                                ),
+                                None,
+                            ).await?;
                         }
-                        self.send_message(
-                            chat_id,
-                            &format!("🛑 Ritual `{}` cancelled (was in {} phase).", target_state.id, target_state.phase.display_name()),
-                            None,
-                        ).await?;
+                        Err(e) => {
+                            tracing::error!(
+                                ritual_id = %target_state.id,
+                                "Failed to advance ritual to Cancelled: {}",
+                                e
+                            );
+                            self.send_message(
+                                chat_id,
+                                &format!(
+                                    "⚠️ Ritual `{}`: cancel signal sent but state update failed: {}.\n\
+                                     Re-run `/ritual cancel {}` to retry.",
+                                    target_state.id, e, target_state.id,
+                                ),
+                                None,
+                            ).await?;
+                        }
                     }
                 }
             }
