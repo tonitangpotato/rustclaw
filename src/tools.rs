@@ -3211,6 +3211,15 @@ impl GraphManager {
             None => Ok(self.workspace_gid_dir.clone()),
             Some(project_dir) => {
                 let project_path = std::path::Path::new(project_dir);
+                // Explicit project path must exist. Without this check, a typo or
+                // stale path would silently walk up to an ancestor's `.gid/` and
+                // operate on the wrong project's graph (ISS-011).
+                if !project_path.exists() {
+                    anyhow::bail!(
+                        "project path does not exist: {} (no walk-up fallback for explicit paths — fix the path or omit `project`)",
+                        project_dir
+                    );
+                }
                 let root = find_project_root(project_path)
                     .unwrap_or_else(|| project_path.to_path_buf());
                 Ok(root.join(".gid"))
@@ -3271,6 +3280,19 @@ impl GraphManager {
     /// Load (or return cached) an external project's graph.
     async fn resolve_external(&self, project_dir: &str) -> anyhow::Result<(SharedGraph, SharedPath)> {
         let project_path = std::path::Path::new(project_dir);
+        // Explicit project path must exist. Without this check, a typo or stale
+        // path would silently walk up via `find_project_root` to an ancestor's
+        // `.gid/` and load the wrong project's graph (ISS-011).
+        //
+        // Example bug case: `project = "/Users/potato/clawd/projects/engramai"`
+        // (correct path is `engram-ai-rust`) — the nonexistent path would walk
+        // up to `/Users/potato/clawd/.gid/` and operate on the wrong graph.
+        if !project_path.exists() {
+            anyhow::bail!(
+                "project path does not exist: {} (no walk-up fallback for explicit paths — fix the path or omit `project`)",
+                project_dir
+            );
+        }
         // If the caller explicitly points at a directory that already contains a `.gid/`
         // subdirectory, honor that literally — do NOT walk up to a parent project root.
         //
@@ -6337,24 +6359,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_resolve_external_nonexistent_path_does_not_panic() {
-        // Canonicalize of a nonexistent path returns Err; the fallback path
-        // should still produce a usable (empty) result, not panic.
+    async fn test_resolve_external_nonexistent_path_errors() {
+        // ISS-011: an explicit `project` path that does NOT exist must error,
+        // not silently walk up to an ancestor `.gid/`. Previously this would
+        // create an empty graph or load the wrong one; now it bails with a
+        // clear message so the caller can fix the typo.
         let tmp = tempfile::tempdir().unwrap();
         let ghost = tmp.path().join("does-not-exist");
 
         let ws_graph_path = tmp.path().join("ws.gid/graph.yml");
         let mgr = GraphManager::new(ws_graph_path.to_str().unwrap());
 
-        // The current implementation calls `create_dir_all` on the target's
-        // `.gid/`, so a nonexistent path effectively becomes "create new empty
-        // graph there". We just assert no panic — behavior under this branch
-        // is treated as undefined-but-graceful.
+        let result = mgr.resolve_external(ghost.to_str().unwrap()).await;
+        assert!(result.is_err(), "nonexistent project path should error");
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("does not exist"),
+            "error message should mention path does not exist, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_external_nonexistent_does_not_walk_up_to_ancestor() {
+        // ISS-011 regression: the original bug was that a nonexistent path
+        // like `/proj/engramai/` (typo for `engram-ai-rust`) would walk up to
+        // `/proj/.gid/` and silently operate on the wrong graph. Verify that
+        // even when an ancestor has a `.gid/`, we still error on the missing
+        // explicit path rather than falling back to the ancestor.
+        let tmp = tempfile::tempdir().unwrap();
+        // Set up an ancestor `.gid/` that walk-up would otherwise find.
+        let ancestor_gid = tmp.path().join(".gid");
+        std::fs::create_dir_all(&ancestor_gid).unwrap();
+        std::fs::write(ancestor_gid.join("marker"), "ancestor").unwrap();
+
+        // Ghost child path that does NOT exist.
+        let ghost = tmp.path().join("typo-project-name");
+
+        let ws_graph_path = tmp.path().join("ws.gid/graph.yml");
+        let mgr = GraphManager::new(ws_graph_path.to_str().unwrap());
+
         let result = mgr.resolve_external(ghost.to_str().unwrap()).await;
         assert!(
-            result.is_ok(),
-            "resolve should succeed by creating empty graph, got: {:?}",
-            result.err()
+            result.is_err(),
+            "nonexistent path with ancestor .gid/ should error, not silently walk up"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_gid_dir_nonexistent_project_errors() {
+        // ISS-011: same guarantee for `resolve_gid_dir` (used by extract/schema).
+        let tmp = tempfile::tempdir().unwrap();
+        let ghost = tmp.path().join("does-not-exist");
+
+        let ws_graph_path = tmp.path().join("ws.gid/graph.yml");
+        let mgr = GraphManager::new(ws_graph_path.to_str().unwrap());
+
+        let input = serde_json::json!({ "project": ghost.to_str().unwrap() });
+        let result = mgr.resolve_gid_dir(&input).await;
+        assert!(result.is_err(), "nonexistent project path should error");
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("does not exist"),
+            "error should mention path does not exist, got: {}",
+            err
         );
     }
 }
