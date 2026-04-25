@@ -3179,17 +3179,34 @@ impl GraphManager {
     }
 
     /// Resolve a (graph, path) pair from tool input.
-    /// If input contains `"project"`: load/cache that project's graph.
-    /// Otherwise: return the workspace graph.
+    ///
+    /// Precedence:
+    /// 1. `"graph_path"` → load that exact file (no `.gid/` walk).
+    /// 2. `"project"` → load/cache that project's graph via `.gid/` inference.
+    /// 3. neither → workspace graph.
     async fn resolve(&self, input: &Value) -> anyhow::Result<(SharedGraph, SharedPath)> {
+        if let Some(gp) = input.get("graph_path").and_then(|v| v.as_str()) {
+            return self.resolve_by_graph_path(gp).await;
+        }
         match input.get("project").and_then(|v| v.as_str()) {
             None => Ok((self.workspace_graph.clone(), self.workspace_path.clone())),
             Some(project_dir) => self.resolve_external(project_dir).await,
         }
     }
 
-    /// Resolve the .gid/ directory path from tool input.
+    /// Resolve the gid_dir (containing directory of the active graph file).
+    ///
+    /// Same precedence as `resolve`. For `graph_path`, returns the file's parent
+    /// directory verbatim (no `.gid/` synthesis). For `project`, returns
+    /// `<project_root>/.gid/`. Otherwise the workspace `.gid/`.
     async fn resolve_gid_dir(&self, input: &Value) -> anyhow::Result<PathBuf> {
+        if let Some(gp) = input.get("graph_path").and_then(|v| v.as_str()) {
+            let path = std::path::Path::new(gp);
+            return Ok(path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from(".")));
+        }
         match input.get("project").and_then(|v| v.as_str()) {
             None => Ok(self.workspace_gid_dir.clone()),
             Some(project_dir) => {
@@ -3201,11 +3218,80 @@ impl GraphManager {
         }
     }
 
+    /// Load (or return cached) a graph from an explicit file path.
+    ///
+    /// Treats the file's parent directory as the gid_dir for backend detection.
+    /// Errors if the file does not exist (no silent fallback to workspace graph).
+    async fn resolve_by_graph_path(&self, graph_path: &str) -> anyhow::Result<(SharedGraph, SharedPath)> {
+        let path = std::path::Path::new(graph_path);
+        if !path.exists() {
+            anyhow::bail!(
+                "graph_path does not exist: {} (no fallback — fix the path or omit graph_path)",
+                graph_path
+            );
+        }
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+
+        // Cache key: canonical file path.
+        {
+            let cache = self.cache.read().await;
+            if let Some(entry) = cache.get(&canonical) {
+                return Ok(entry.clone());
+            }
+        }
+
+        let parent = path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+        // Detect backend from file extension; fall back to directory scan.
+        let backend = match path.extension().and_then(|e| e.to_str()) {
+            Some("db") => StorageBackend::Sqlite,
+            Some("yml") | Some("yaml") => StorageBackend::Yaml,
+            _ => detect_backend(&parent),
+        };
+
+        let graph = match backend {
+            StorageBackend::Sqlite => load_graph_auto(&parent, Some(StorageBackend::Sqlite))
+                .unwrap_or_default(),
+            _ => gid_load_graph(path).unwrap_or_default(),
+        };
+
+        let shared_graph = Arc::new(tokio::sync::RwLock::new(graph));
+        let shared_path = Arc::new(graph_path.to_string());
+        let entry = (shared_graph.clone(), shared_path.clone());
+        {
+            let mut cache = self.cache.write().await;
+            cache.insert(canonical, entry.clone());
+        }
+        Ok(entry)
+    }
+
     /// Load (or return cached) an external project's graph.
     async fn resolve_external(&self, project_dir: &str) -> anyhow::Result<(SharedGraph, SharedPath)> {
         let project_path = std::path::Path::new(project_dir);
-        let root = find_project_root(project_path)
-            .unwrap_or_else(|| project_path.to_path_buf());
+        // If the caller explicitly points at a directory that already contains a `.gid/`
+        // subdirectory, honor that literally — do NOT walk up to a parent project root.
+        //
+        // Rationale: `find_project_root` walks upward until it hits a strong marker
+        // (`.git`) or stops at a weak marker (`.gid`, `Cargo.toml`, etc). That is the
+        // right behavior when the path is *inferred* (e.g. the CWD of a CLI invocation
+        // inside a nested directory), but it's wrong when the caller *explicitly*
+        // passes a `project` parameter. A sibling directory like
+        // `projects/engram/.gid-v03-context/` has its own `.gid/graph.db` but lives
+        // under the engram `.git` root, so naive upward walk would silently load the
+        // parent project's graph instead of the one the caller asked for.
+        //
+        // Rule: explicit path + local `.gid/` → use it verbatim. Otherwise fall back
+        // to the usual upward walk (needed for when callers pass e.g. `src/foo.rs`
+        // and expect us to find the enclosing project).
+        let root = if project_path.join(".gid").is_dir() {
+            project_path.to_path_buf()
+        } else {
+            find_project_root(project_path)
+                .unwrap_or_else(|| project_path.to_path_buf())
+        };
         let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
 
         // Check cache first.
@@ -3267,7 +3353,19 @@ fn save_gid_graph(graph: &Graph, path: &str) -> anyhow::Result<()> {
 fn gid_project_property() -> (String, Value) {
     ("project".to_string(), serde_json::json!({
         "type": "string",
-        "description": "Path to an external project directory. If provided, operates on that project's graph instead of the workspace graph."
+        "description": "Path to an external project directory. If provided, operates on that project's graph (using `.gid/` inference) instead of the workspace graph. Overridden by `graph_path` if both are set."
+    }))
+}
+
+/// Common JSON Schema property for arbitrary graph file paths.
+/// Pair with `gid_project_property()` at every GID tool's `input_schema` so callers
+/// can explicitly target a `.db`/`.yml` graph file outside any `.gid/` layout.
+///
+/// Precedence: `graph_path` > `project` > workspace default.
+fn gid_graph_path_property() -> (String, Value) {
+    ("graph_path".to_string(), serde_json::json!({
+        "type": "string",
+        "description": "Explicit path to a graph file (.db or .yml). Overrides `project` and the workspace default. Use this for non-standard graph file locations (e.g. parallel working DBs not in `.gid/`, like `.gid-v03-context/graph.db`). The file's parent directory is treated as the gid_dir for backend detection. Errors if the file does not exist."
     }))
 }
 
@@ -3301,6 +3399,7 @@ impl Tool for GidTasksTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -3314,6 +3413,7 @@ impl Tool for GidTasksTool {
                     "description": "Filter by node type. Default shows project nodes only (task/feature/component/legacy). Use 'code' for code nodes, 'all' for everything."
                 },
                 proj_key: proj_val,
+                gp_key: gp_val,
             }
         })
     }
@@ -3393,6 +3493,7 @@ impl Tool for GidAddTaskTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -3409,6 +3510,7 @@ impl Tool for GidAddTaskTool {
                 "file_path": { "type": "string", "description": "Associated file path for code nodes (optional)" },
                 "metadata": { "type": "object", "description": "Additional metadata key-value pairs (optional)" },
                 proj_key: proj_val,
+                gp_key: gp_val,
             },
             "required": ["id", "title"]
         })
@@ -3481,6 +3583,7 @@ impl Tool for GidUpdateTaskTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -3494,6 +3597,7 @@ impl Tool for GidUpdateTaskTool {
                 "node_type": { "type": "string", "description": "Node type (optional)" },
                 "node_kind": { "type": "string", "description": "Node kind (optional)" },
                 proj_key: proj_val,
+                gp_key: gp_val,
             },
             "required": ["id"]
         })
@@ -3579,6 +3683,7 @@ impl Tool for GidAddEdgeTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -3586,6 +3691,7 @@ impl Tool for GidAddEdgeTool {
                 "to": { "type": "string", "description": "Target task ID" },
                 "relation": { "type": "string", "description": "Relationship type (default: depends_on). Common values: depends_on, blocks, subtask_of, relates_to, implements, contains, tests_for, calls, imports, defined_in, belongs_to, maps_to, overrides, inherits" },
                 proj_key: proj_val,
+                gp_key: gp_val,
             },
             "required": ["from", "to"]
         })
@@ -3664,6 +3770,7 @@ impl Tool for GidReadTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -3673,6 +3780,7 @@ impl Tool for GidReadTool {
                     "description": "Filter by layer: project (tasks/features), code (extracted code nodes), all (default: all)"
                 },
                 proj_key: proj_val,
+                gp_key: gp_val,
             }
         })
     }
@@ -3705,11 +3813,13 @@ impl Tool for GidCompleteTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "properties": {
                 "id": { "type": "string", "description": "Task ID to mark as done" },
                 proj_key: proj_val,
+                gp_key: gp_val,
             },
             "required": ["id"]
         })
@@ -3769,12 +3879,14 @@ impl Tool for GidQueryImpactTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "properties": {
                 "id": { "type": "string", "description": "Task ID to analyze" },
                 "relations": { "type": "array", "items": { "type": "string" }, "description": "Filter traversal by edge relations (e.g. depends_on, blocks, tests_for, implements, calls, imports). Default: all relations." },
                 proj_key: proj_val,
+                gp_key: gp_val,
             },
             "required": ["id"]
         })
@@ -3830,6 +3942,7 @@ impl Tool for GidQueryDepsTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -3837,6 +3950,7 @@ impl Tool for GidQueryDepsTool {
                 "transitive": { "type": "boolean", "description": "Include transitive dependencies (default: true)" },
                 "relations": { "type": "array", "items": { "type": "string" }, "description": "Filter traversal by edge relations (e.g. depends_on, blocks, tests_for, implements, calls, imports). Default: all relations." },
                 proj_key: proj_val,
+                gp_key: gp_val,
             },
             "required": ["id"]
         })
@@ -3898,10 +4012,12 @@ impl Tool for GidValidateTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "properties": {
                 proj_key: proj_val,
+                gp_key: gp_val,
             }
         })
     }
@@ -3937,10 +4053,12 @@ impl Tool for GidAdviseTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "properties": {
                 proj_key: proj_val,
+                gp_key: gp_val,
             }
         })
     }
@@ -3984,6 +4102,7 @@ impl Tool for GidVisualTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -3998,6 +4117,7 @@ impl Tool for GidVisualTool {
                     "description": "Filter by layer: project (default — tasks/features only), code (extracted code nodes), all (everything)"
                 },
                 proj_key: proj_val,
+                gp_key: gp_val,
             }
         })
     }
@@ -4037,6 +4157,7 @@ impl Tool for GidHistoryTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -4050,6 +4171,7 @@ impl Tool for GidHistoryTool {
                     "description": "Commit message when saving (optional)"
                 },
                 proj_key: proj_val,
+                gp_key: gp_val,
             }
         })
     }
@@ -4119,6 +4241,7 @@ impl Tool for GidRefactorTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -4133,6 +4256,7 @@ impl Tool for GidRefactorTool {
                 "merge_into": { "type": "string", "description": "Target node to merge into (for merge)" },
                 "preview": { "type": "boolean", "description": "Preview only, don't apply (default: false)" },
                 proj_key: proj_val,
+                gp_key: gp_val,
             },
             "required": ["operation", "id"]
         })
@@ -4260,6 +4384,7 @@ impl Tool for GidExtractTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -4268,6 +4393,7 @@ impl Tool for GidExtractTool {
                     "description": "Directory to analyze (default: workspace src/)"
                 },
                 proj_key: proj_val,
+                gp_key: gp_val,
             }
         })
     }
@@ -4509,6 +4635,7 @@ impl Tool for GidSchemaTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -4517,6 +4644,7 @@ impl Tool for GidSchemaTool {
                     "description": "Directory to analyze (required)"
                 },
                 proj_key: proj_val,
+                gp_key: gp_val,
             },
             "required": ["dir"]
         })
@@ -4599,6 +4727,7 @@ impl Tool for GidDesignTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -4615,6 +4744,7 @@ impl Tool for GidDesignTool {
                     "description": "Additional context for design prompt generation"
                 },
                 proj_key: proj_val,
+                gp_key: gp_val,
             }
         })
     }
@@ -4721,11 +4851,13 @@ impl Tool for GidPlanTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "properties": {
                 "detail": { "type": "boolean", "description": "If true, include critical path analysis and estimated turns (default: false)" },
                 proj_key: proj_val,
+                gp_key: gp_val,
             }
         })
     }
@@ -4786,10 +4918,12 @@ impl Tool for GidStatsTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "properties": {
                 proj_key: proj_val,
+                gp_key: gp_val,
             }
         })
     }
@@ -4844,10 +4978,12 @@ impl Tool for GidSemantifyTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "properties": {
                 proj_key: proj_val,
+                gp_key: gp_val,
             }
         })
     }
@@ -5110,6 +5246,7 @@ impl Tool for GidIgnoreTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -5122,6 +5259,7 @@ impl Tool for GidIgnoreTool {
                     "description": "Whether the path is a directory (default: false)"
                 },
                 proj_key: proj_val,
+                gp_key: gp_val,
             }
         })
     }
@@ -5329,6 +5467,7 @@ impl Tool for GidInferTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -5371,6 +5510,7 @@ impl Tool for GidInferTool {
                     "description": "Batch ID to rollback (removes all infer nodes from that batch)"
                 },
                 proj_key: proj_val,
+                gp_key: gp_val,
             }
         })
     }
@@ -5783,6 +5923,7 @@ impl Tool for GidContextTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "required": ["targets"],
@@ -5816,6 +5957,7 @@ impl Tool for GidContextTool {
                     "description": "Output format (default: markdown). Markdown is optimized for LLM consumption."
                 },
                 proj_key: proj_val,
+                gp_key: gp_val,
             }
         })
     }
@@ -5922,6 +6064,7 @@ impl Tool for GidTaskContextTool {
 
     fn input_schema(&self) -> Value {
         let (proj_key, proj_val) = gid_project_property();
+        let (gp_key, gp_val) = gid_graph_path_property();
         serde_json::json!({
             "type": "object",
             "required": ["task_id"],
@@ -5931,6 +6074,7 @@ impl Tool for GidTaskContextTool {
                     "description": "Task node ID in the graph"
                 },
                 proj_key: proj_val,
+                gp_key: gp_val,
             }
         })
     }
@@ -6104,5 +6248,113 @@ mod tests {
         assert!(result.output.contains("fuzzy match"), "Should indicate fuzzy was used");
         let content = std::fs::read_to_string(&file).unwrap();
         assert!(content.contains("goodbye"), "File should be edited");
+    }
+
+    // ── GraphManager::resolve_external path resolution ──────────────────────
+    //
+    // Regression tests for the "explicit project path must not be overridden by
+    // upward-walking project-root detection" fix.
+    //
+    // Scenario: a caller passes `project: /abs/path/to/sub-context-dir` where
+    // `sub-context-dir/.gid/graph.db` is a standalone graph, and that directory
+    // happens to live inside a parent repo with its own `.git` + `.gid/`. Before
+    // the fix, `find_project_root` walked upward to the parent `.git` and loaded
+    // the wrong graph. After the fix, an explicit path containing `.gid/` is
+    // honored verbatim.
+
+    #[tokio::test]
+    async fn test_resolve_external_honors_explicit_path_with_gid() {
+        // Build: /tmp/xxx/parent/.git + parent/.gid/ + parent/nested/.gid/
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("parent");
+        let nested = parent.join("nested");
+        std::fs::create_dir_all(parent.join(".git")).unwrap();
+        std::fs::create_dir_all(parent.join(".gid")).unwrap();
+        std::fs::create_dir_all(nested.join(".gid")).unwrap();
+        // Put distinguishing marker files inside each .gid/ so we can tell which
+        // one was resolved.
+        std::fs::write(parent.join(".gid/marker"), "parent").unwrap();
+        std::fs::write(nested.join(".gid/marker"), "nested").unwrap();
+
+        // Workspace path is intentionally unrelated — we only exercise
+        // resolve_external here.
+        let ws_graph_path = tmp.path().join("ws.gid/graph.yml");
+        let mgr = GraphManager::new(ws_graph_path.to_str().unwrap());
+
+        // Resolving the nested path explicitly MUST pick the nested `.gid/`,
+        // not walk up to parent's `.git`-rooted one.
+        let (_graph, path) = mgr
+            .resolve_external(nested.to_str().unwrap())
+            .await
+            .expect("resolve should succeed");
+
+        // Path returned is the resolved graph file; its parent directory must
+        // be the nested `.gid/`, confirming we didn't walk upward.
+        let graph_path = std::path::Path::new(path.as_str());
+        let gid_dir = graph_path.parent().expect("graph path has parent");
+        assert_eq!(
+            gid_dir.file_name().and_then(|n| n.to_str()),
+            Some(".gid"),
+            "should resolve to a `.gid/` directory"
+        );
+        let marker = std::fs::read_to_string(gid_dir.join("marker"))
+            .expect("marker file should exist in resolved .gid/");
+        assert_eq!(
+            marker, "nested",
+            "explicit nested path must resolve to nested .gid/, not parent (walked upward)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_external_falls_back_to_upward_walk_without_gid() {
+        // When the explicit path has NO `.gid/` subdir, we still want upward
+        // detection — callers can legitimately pass e.g. a `src/` subdirectory
+        // and expect us to find the enclosing project root.
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("parent");
+        let subdir = parent.join("src").join("deep");
+        std::fs::create_dir_all(parent.join(".git")).unwrap();
+        std::fs::create_dir_all(parent.join(".gid")).unwrap();
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(parent.join(".gid/marker"), "parent").unwrap();
+
+        let ws_graph_path = tmp.path().join("ws.gid/graph.yml");
+        let mgr = GraphManager::new(ws_graph_path.to_str().unwrap());
+
+        let (_graph, path) = mgr
+            .resolve_external(subdir.to_str().unwrap())
+            .await
+            .expect("resolve should succeed");
+
+        let graph_path = std::path::Path::new(path.as_str());
+        let gid_dir = graph_path.parent().expect("graph path has parent");
+        let marker = std::fs::read_to_string(gid_dir.join("marker"))
+            .expect("marker file should exist");
+        assert_eq!(
+            marker, "parent",
+            "path without local .gid/ should fall back to upward walk"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_external_nonexistent_path_does_not_panic() {
+        // Canonicalize of a nonexistent path returns Err; the fallback path
+        // should still produce a usable (empty) result, not panic.
+        let tmp = tempfile::tempdir().unwrap();
+        let ghost = tmp.path().join("does-not-exist");
+
+        let ws_graph_path = tmp.path().join("ws.gid/graph.yml");
+        let mgr = GraphManager::new(ws_graph_path.to_str().unwrap());
+
+        // The current implementation calls `create_dir_all` on the target's
+        // `.gid/`, so a nonexistent path effectively becomes "create new empty
+        // graph there". We just assert no panic — behavior under this branch
+        // is treated as undefined-but-graceful.
+        let result = mgr.resolve_external(ghost.to_str().unwrap()).await;
+        assert!(
+            result.is_ok(),
+            "resolve should succeed by creating empty graph, got: {:?}",
+            result.err()
+        );
     }
 }
