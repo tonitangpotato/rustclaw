@@ -226,7 +226,9 @@ GID has first-class tools (`gid_*`) and a CLI (`gid ...`). Use them. These rules
 - If the user says "build a separate/isolated graph" → use `gid extract -g /path/to/new/graph.db --backend sqlite`, NOT `--backend yaml`. Isolation is via file path, not format.
 - If you find an existing `.gid-*/graph.yml` anywhere in a project, **flag it to potato as deprecated legacy**, don't use it as a data source.
 
-**Rule 2: For ANY question about code structure or impact, use GID tools first — not grep/find/sqlite.**
+**Rule 2: For ANY question about graph structure, code structure, or impact — use GID tools first. Not grep/find/sqlite, even for read queries.**
+
+Decision table (extended; keep growing this as new patterns appear):
 
 | Question | Wrong reflex | Right tool |
 |---|---|---|
@@ -236,10 +238,19 @@ GID has first-class tools (`gid_*`) and a CLI (`gid ...`). Use them. These rules
 | "How big is this change?" | visual scan | `gid_working_memory` with changed files |
 | "Is X already implemented?" | `grep "fn X"` | `gid_schema` or `gid code-search` |
 | "What tasks are pending?" | read `.gid/*.md` | `gid_tasks` |
+| **"How many nodes are under feature X?"** | **`sqlite3 ... WHERE to_node='feature:X'`** | **`gid_query_impact id="feature:X"` (transitive!)** |
+| **"Is feature X's graph build complete?"** | **count rows in nodes/edges table** | **`gid_validate` + `gid_query_impact` + `gid_visual --layer project`** |
+| **"What's the structure under feature X?"** | **eyeball SQL output** | **`gid_visual --layer project` (mermaid/ascii)** |
+| **"Show me everything in the graph"** | **`sqlite3 ... SELECT *`** | **`gid_read` (YAML view of all nodes/edges)** |
+| **"What's the topology / build order?"** | **manual reasoning** | **`gid_plan` (topo + critical path)** |
+
+**Critical: graphs are HIERARCHICAL.** A feature like `feature:v03-retrieval` may have sub-features below it (`feature:retrieval-classification`, etc.), and code/task/requirement nodes hang off those sub-features. **A single-JOIN SQL on the edges table is 1-hop and silently undercounts.** All `gid_query_*` tools do transitive closure by default. If you must use SQL, use `WITH RECURSIVE`.
 
 Raw tools (grep, sqlite, find) are only correct when:
 - You need to read a specific line of source code (grep is fine for "show me file:line")
-- GID doesn't have the query (then tell potato the capability gap, don't silently fall back)
+- The query is genuinely outside the graph (e.g., reading a markdown file's contents)
+- GID doesn't have the capability (then tell potato the capability gap, don't silently fall back)
+- You wrote `WITH RECURSIVE` and explicitly stated why a gid tool didn't fit
 
 **Rule 3: Before `gid_extract`, check if the graph already has code nodes.**
 - Run `gid_schema` or try one `gid_query_impact` first. If nodes exist, do NOT re-extract — just query.
@@ -262,10 +273,13 @@ If a query returns "no such node", run `gid_schema` on the target file to discov
 - For engram, gid-rs, xinfluencer etc, always pass `project: /path/to/that/project`.
 - Canonical project roots are listed in MEMORY.md — look them up, don't search/guess.
 
-**Rule 6: Never directly edit `.gid/graph.db` with sqlite3.**
-- Use `gid_update_task`, `gid_refactor`, `gid add-node`, `gid remove-node`, `gid remove-edge`.
+**Rule 6: Never directly access `.gid/graph.db` with sqlite3 — for reads OR writes.**
+- **Writes**: use `gid_update_task`, `gid_refactor`, `gid add-node`, `gid remove-node`, `gid remove-edge`.
+- **Reads**: use `gid_query_impact` / `gid_query_deps` / `gid_read` / `gid_validate` / `gid_visual` / `gid_tasks`.
+- Why even reads matter: graphs are hierarchical (feature → sub-feature → code/task), and 1-hop JOINs on the edges table will silently miss everything beyond the first level. This caused a real false alarm on 2026-04-25 (claimed v03-retrieval graph was incomplete; it wasn't, the SQL was wrong).
 - Exception: clearing orphan edges after bulk node deletion (gid has no clean-orphans command yet — this is a gid capability gap, flag it).
-- If you find yourself writing raw SQL to "fix" the graph, stop and check if a gid subcommand exists.
+- Exception: if a query is **genuinely outside any gid tool's scope** AND you write `WITH RECURSIVE` for traversal AND you state explicitly why no gid tool fits.
+- If you find yourself writing raw SQL on `.gid/graph.db`, stop. Re-read Rule 2's decision table. The right tool is almost always there.
 
 ### 🔧 Development Workflow — Ritual Pipeline (v2)
 

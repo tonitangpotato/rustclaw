@@ -390,6 +390,59 @@ impl ToolRegistry {
 
 // ─── Exec Tool ───────────────────────────────────────────────
 
+/// Detect GID anti-patterns in shell commands and return a warning string
+/// that should be prepended to the command output. Returns None if the
+/// command is fine.
+///
+/// This is the Layer C piece of the GID-tool-usage root fix: even if the
+/// system prompt and tool descriptions all point at gid_* tools, an agent
+/// might still reach for `sqlite3 .gid/graph.db` out of habit. The warning
+/// makes that habit visible immediately in tool output.
+fn detect_gid_antipattern(command: &str) -> Option<String> {
+    // Strip line continuations + collapse whitespace for easier matching.
+    let lower = command.to_lowercase();
+
+    // Pattern 1: sqlite3 / sqlite touching a .gid/ database.
+    // Examples we want to catch:
+    //   sqlite3 .gid/graph.db "SELECT ..."
+    //   sqlite3 -header /path/.gid/graph.db
+    //   sqlite3 "$proj/.gid/graph.db"
+    let sqlite_on_gid = (lower.contains("sqlite3 ") || lower.contains("sqlite "))
+        && (lower.contains(".gid/") || lower.contains(".gid-"))
+        && lower.contains(".db");
+
+    // Pattern 2: directly reading .gid/graph.yml (the deprecated format).
+    let cat_yml = (lower.contains("cat ") || lower.contains("less ") || lower.contains("head "))
+        && lower.contains(".gid/")
+        && lower.contains("graph.yml");
+
+    if sqlite_on_gid {
+        return Some(
+            "⚠️ GID ANTI-PATTERN DETECTED: raw sqlite3 query on .gid graph.\n\
+             Graphs are HIERARCHICAL — 1-hop SQL JOINs silently undercount sub-feature \
+             nodes. This caused a real false alarm before. Prefer:\n  \
+             • gid_query_impact / gid_query_deps (transitive closure)\n  \
+             • gid_read (whole graph as YAML)\n  \
+             • gid_validate (cycles, orphans)\n  \
+             • gid_visual (mermaid/ascii)\n\
+             Only proceed with raw SQL if (a) you wrote `WITH RECURSIVE` and \
+             (b) you can state why no gid_* tool covers your query."
+                .to_string(),
+        );
+    }
+
+    if cat_yml {
+        return Some(
+            "⚠️ GID NOTE: .gid/graph.yml is DEPRECATED (canonical format is .gid/graph.db SQLite). \
+             If this is a current project, prefer gid_read for the YAML view of the live graph. \
+             Only read graph.yml if you're inspecting legacy/archived data."
+                .to_string(),
+        );
+    }
+
+    None
+}
+
 /// Execute shell commands.
 pub struct ExecTool;
 
@@ -432,6 +485,14 @@ impl Tool for ExecTool {
         let workdir = input["workdir"].as_str();
         let timeout_secs = input["timeout_secs"].as_u64().unwrap_or(30);
 
+        // ─── GID anti-pattern detection ───────────────────────
+        // If the command tries to read/write `.gid/*.db` or `.gid/*.yml` directly
+        // via sqlite3 / sqlite / cat / grep, prepend a warning. We don't block —
+        // there are legitimate edge cases — but we make sure the LLM sees a
+        // pointer to the right tool. Tracked as Layer C of the GID-tool-usage
+        // root fix (see AGENTS.md "MANDATORY REFLEXES").
+        let gid_warning = detect_gid_antipattern(command);
+
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c").arg(command);
 
@@ -451,6 +512,10 @@ impl Tool for ExecTool {
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         let mut result = String::new();
+        if let Some(warn) = gid_warning {
+            result.push_str(&warn);
+            result.push_str("\n\n");
+        }
         if !stdout.is_empty() {
             result.push_str(&stdout);
         }
@@ -3416,7 +3481,7 @@ impl Tool for GidTasksTool {
     }
 
     fn description(&self) -> &str {
-        "List tasks in the project graph. Optionally filter by status. Shows summary stats and ready tasks."
+        "List tasks/nodes in the project graph with summary stats and ready (unblocked) tasks. Use this — NOT reading raw markdown — to see project state. Filter by status (todo/in_progress/done) or node_type. Default shows project nodes (task/feature); use node_type='code' for code nodes or 'all' for everything."
     }
 
     fn input_schema(&self) -> Value {
@@ -3510,7 +3575,7 @@ impl Tool for GidAddTaskTool {
     }
 
     fn description(&self) -> &str {
-        "Add a node to the project graph (task, feature, component, or planned code node)."
+        "Add a node (task, feature, component, or planned code node) to the project graph. Use this — NOT raw SQL or markdown — to track new work. Pair with gid_add_edge to wire dependencies. For external projects pass `project:`."
     }
 
     fn input_schema(&self) -> Value {
@@ -3600,7 +3665,7 @@ impl Tool for GidUpdateTaskTool {
     }
 
     fn description(&self) -> &str {
-        "Update a task's status, title, description, or other fields."
+        "Update a node's status/title/description/priority/tags/metadata. Use this — NOT direct sqlite UPDATE — for any node change. Status is a state machine: todo → in_progress → done|blocked|cancelled. Pair with gid_complete when finishing work."
     }
 
     fn input_schema(&self) -> Value {
@@ -3700,7 +3765,7 @@ impl Tool for GidAddEdgeTool {
     }
 
     fn description(&self) -> &str {
-        "Add a dependency edge between two tasks (e.g. task A depends_on task B)."
+        "Add a directed edge between two nodes (e.g. A depends_on B, A blocks B, A subtask_of B). Use this — NOT raw SQL — to wire relationships. Common relations: depends_on, blocks, subtask_of, satisfies, defined_in, calls, imports, tests_for. After adding edges, validate with gid_validate to catch cycles."
     }
 
     fn input_schema(&self) -> Value {
@@ -3787,7 +3852,7 @@ impl Tool for GidReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read the full project graph as YAML (nodes, edges, dependencies)."
+        "Read the entire graph as YAML (all nodes + edges). Use this — NOT `sqlite3 SELECT *` — when you need to see/audit the whole graph at once. For targeted traversal use gid_query_impact / gid_query_deps instead (cheaper, focused). Filter by layer: 'project' (tasks/features), 'code' (extracted code nodes), 'all' (default)."
     }
 
     fn input_schema(&self) -> Value {
@@ -3830,7 +3895,7 @@ impl Tool for GidCompleteTool {
     }
 
     fn description(&self) -> &str {
-        "Mark a task as done and show which tasks are now unblocked."
+        "Mark a task done and report which downstream tasks are now unblocked. Use this — NOT gid_update_task with status=done — when finishing work, because it shows ripple effects. Run after each completed task to discover next ready work."
     }
 
     fn input_schema(&self) -> Value {
@@ -3896,7 +3961,7 @@ impl Tool for GidQueryImpactTool {
     }
 
     fn description(&self) -> &str {
-        "Analyze impact: what tasks would be affected if this task changes?"
+        "Forward transitive closure: which nodes are affected if this node changes (multi-hop, follows ALL outgoing edges by default). Use this — NOT 1-hop SQL JOINs — to count children of a feature, audit graph completeness, or find blast radius before editing. Inverse of gid_query_deps. Filter with `relations` to follow specific edge types only (e.g. ['depends_on', 'subtask_of']). Critical: graphs are hierarchical; SQL 1-hop will silently undercount."
     }
 
     fn input_schema(&self) -> Value {
@@ -3959,7 +4024,7 @@ impl Tool for GidQueryDepsTool {
     }
 
     fn description(&self) -> &str {
-        "Query dependencies: what does this task depend on (direct or transitive)?"
+        "Reverse transitive closure: which nodes does this node depend on (multi-hop, follows incoming edges by default). Use this — NOT grep/SQL — to understand prerequisites before implementing a task, or to find the full dependency tree. Inverse of gid_query_impact. Set transitive=false for direct deps only. Filter with `relations` to scope traversal."
     }
 
     fn input_schema(&self) -> Value {
@@ -4029,7 +4094,7 @@ impl Tool for GidValidateTool {
     }
 
     fn description(&self) -> &str {
-        "Validate graph integrity: detect cycles, orphan nodes, missing references."
+        "Validate graph integrity: detect cycles, orphan nodes, broken edge references. Use this — NOT manual SQL inspection — to answer 'is the graph healthy / fully built?'. Always run after bulk edits (gid_extract, refactor, design parse). Pair with gid_advise for improvement suggestions."
     }
 
     fn input_schema(&self) -> Value {
@@ -4070,7 +4135,7 @@ impl Tool for GidAdviseTool {
     }
 
     fn description(&self) -> &str {
-        "Analyze graph and suggest improvements: detect issues, recommend task order."
+        "Analyze graph and suggest improvements: detect issues, recommend task ordering, surface bottlenecks. Use this — NOT manual reasoning — when planning what to do next, or after running gid_validate to get actionable suggestions. Complements gid_plan (which gives strict topological order)."
     }
 
     fn input_schema(&self) -> Value {
@@ -4119,7 +4184,7 @@ impl Tool for GidVisualTool {
     }
 
     fn description(&self) -> &str {
-        "Render the graph visually (ASCII tree, DOT, or Mermaid diagram)."
+        "Render the graph as ASCII tree, DOT (graphviz), or Mermaid diagram. Use this — NOT eyeballing SQL rows — to understand structure. Mermaid renders inline in Telegram/Markdown chats; ascii is best for terminal. Filter by layer: 'project' (tasks/features, default — clean overview), 'code' (file-level), 'all' (everything)."
     }
 
     fn input_schema(&self) -> Value {
@@ -4174,7 +4239,7 @@ impl Tool for GidHistoryTool {
     }
 
     fn description(&self) -> &str {
-        "List graph history snapshots or save a new snapshot."
+        "List graph history snapshots, or save a new snapshot with a commit message. Use this for graph-level versioning before risky operations (mass refactor, design re-parse). Saved snapshots can be restored manually. Action: 'list' (default) or 'save'."
     }
 
     fn input_schema(&self) -> Value {
@@ -4258,7 +4323,7 @@ impl Tool for GidRefactorTool {
     }
 
     fn description(&self) -> &str {
-        "Refactor graph structure: rename nodes, merge tasks, split tasks, update titles."
+        "Refactor graph structure safely: rename node IDs, merge two nodes (re-points edges), update titles, delete nodes. Use this — NOT direct sqlite UPDATE/DELETE — to preserve edge integrity. Set preview=true to see the change without applying. Operations: rename, merge, update_title, delete."
     }
 
     fn input_schema(&self) -> Value {
@@ -4401,7 +4466,7 @@ impl Tool for GidExtractTool {
     }
 
     fn description(&self) -> &str {
-        "Extract code structure from a directory and merge into the task graph. Analyzes source files to create nodes for files, classes, and functions."
+        "Extract code structure (files, classes, functions, methods, imports) from a source directory and merge into the graph as code nodes. Use this ONCE when joining an existing codebase, or after major code changes. Check first with gid_schema or gid_tasks (node_type='code') — if code nodes already exist, do NOT re-extract; query instead. This is destructive-ish (rebuilds code layer)."
     }
 
     fn input_schema(&self) -> Value {
@@ -4652,7 +4717,7 @@ impl Tool for GidSchemaTool {
     }
 
     fn description(&self) -> &str {
-        "Extract and return the code schema (classes, functions, signatures) from a directory."
+        "Quick code overview (classes, functions, signatures) from a directory WITHOUT mutating the graph. Use this — NOT ls+grep — to peek at codebase structure, or to discover correct node IDs (`func:file.rs:name`, `class:file.rs:Name`) before running gid_query_*. Read-only and fast."
     }
 
     fn input_schema(&self) -> Value {
@@ -4744,7 +4809,7 @@ impl Tool for GidDesignTool {
     }
 
     fn description(&self) -> &str {
-        "Generate a graph design prompt from the current graph, or parse YAML output into graph nodes/edges. Use --parse to merge generated YAML into the graph."
+        "Two-step design loop: (1) call without parse to get a design prompt for the LLM to fill in; (2) call with parse=true and yaml_content to merge LLM-generated YAML into the graph. Use this for translating DESIGN.md into graph nodes. For full pipeline (idea → design → graph → tasks → implement), prefer the Ritual workflow."
     }
 
     fn input_schema(&self) -> Value {
@@ -4868,7 +4933,7 @@ impl Tool for GidPlanTool {
     }
 
     fn description(&self) -> &str {
-        "Create an execution plan from the current graph. Shows layers, task ordering, and parallelism. Use detail=true for critical path and turn estimates."
+        "Topological execution plan: groups tasks into layers (parallelizable cohorts), shows ordering. Use this — NOT manual reasoning — to answer 'what should I do first / what can run in parallel?'. detail=true adds critical path and turn estimates. Complements gid_advise (suggestions) and gid_tasks (state)."
     }
 
     fn input_schema(&self) -> Value {
@@ -4935,7 +5000,7 @@ impl Tool for GidStatsTool {
     }
 
     fn description(&self) -> &str {
-        "Show execution statistics from the most recent harness run (tasks completed/failed, tokens, duration)."
+        "Show stats from the most recent harness execution: tasks completed/failed, tokens consumed, wall-clock duration. Use this for retrospective on harness runs only — not for live progress (use gid_tasks for that)."
     }
 
     fn input_schema(&self) -> Value {
@@ -4995,7 +5060,7 @@ impl Tool for GidSemantifyTool {
     }
 
     fn description(&self) -> &str {
-        "Upgrade a file-level graph to a semantic graph by assigning architectural layers (interface, application, domain, infrastructure) to nodes based on file paths. Uses heuristics — no LLM call required."
+        "Heuristically tag code nodes with architectural layers (interface/application/domain/infrastructure) based on file paths. Use this after gid_extract to enrich a flat code graph with layered semantics. No LLM call (fast, cheap). For richer auto-discovered architecture, use gid_infer instead."
     }
 
     fn input_schema(&self) -> Value {
@@ -5056,7 +5121,7 @@ impl Tool for GidComplexityTool {
     }
 
     fn description(&self) -> &str {
-        "Analyze code complexity and risk from the code graph. Examines relevant nodes, inheritance depth, import edges, and test coverage to classify as simple/medium/complex."
+        "Classify code complexity/risk (simple/medium/complex) by examining inheritance depth, import edges, and test coverage. Use this — NOT gut feel — to estimate effort or identify refactor targets. Pass keywords or a problem statement to focus on relevant nodes."
     }
 
     fn input_schema(&self) -> Value {
@@ -5154,7 +5219,7 @@ impl Tool for GidWorkingMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Analyze impact of changed files on the codebase. Shows affected source nodes, related tests, risk level, and blast radius."
+        "Compute blast radius of a changed file set: affected source nodes (transitively), related tests, risk level. Use this — NOT manual grep — when planning a refactor or reviewing a diff. Different from gid_query_impact: takes file paths (not node IDs) and includes test coverage analysis."
     }
 
     fn input_schema(&self) -> Value {
@@ -5263,7 +5328,7 @@ impl Tool for GidIgnoreTool {
     }
 
     fn description(&self) -> &str {
-        "Check if a path is ignored by .gidignore rules. Shows loaded patterns and whether a specific path would be ignored."
+        "Check whether a file/dir path is filtered by .gidignore rules before extraction. Use this to debug 'why isn't file X in my graph?'. Without a path arg, dumps all loaded ignore patterns."
     }
 
     fn input_schema(&self) -> Value {
@@ -5361,7 +5426,7 @@ impl Tool for GidScopeTool {
     }
 
     fn description(&self) -> &str {
-        "Show the ToolScope for a ritual phase. Displays allowed tools, writable paths, and bash policy for the given phase."
+        "Show the ToolScope for a ritual phase: which tools are allowed, which paths are writable, what bash commands are gated. Use this when ritual gating blocks an action and you want to know why, or to preview what a phase will allow before entering it."
     }
 
     fn input_schema(&self) -> Value {
@@ -5484,7 +5549,7 @@ impl Tool for GidInferTool {
     }
 
     fn description(&self) -> &str {
-        "Run the infer pipeline on a code graph: Infomap clustering → optional LLM labeling → component/feature nodes. Enriches the graph with architectural layers automatically discovered from code structure."
+        "Run Infomap clustering on a code graph + optional LLM labeling → produces component/feature nodes. Use this — NOT gid_semantify — when you want auto-discovered architecture (clusters of cohesive code) rather than path-based heuristic layers. level='component' (clustering only, fast/cheap), 'feature' (clustering + LLM naming). Always preview with dry_run=true first."
     }
 
     fn input_schema(&self) -> Value {
@@ -5940,7 +6005,7 @@ impl Tool for GidContextTool {
     }
 
     fn description(&self) -> &str {
-        "Assemble token-budget-aware context for target nodes. Traverses the graph to collect dependencies, callers, and tests with relevance scoring. Returns structured context that fits within the token budget."
+        "Assemble graph-traversed context for target nodes within a token budget: deps, callers, tests, relevance-scored. Use this — NOT manual file reads — to build LLM context for any nodes. For task implementation specifically, prefer gid_task_context (resolves design_ref + GOALs automatically). Format defaults to markdown (LLM-optimized)."
     }
 
     fn input_schema(&self) -> Value {
@@ -6081,7 +6146,7 @@ impl Tool for GidTaskContextTool {
     }
 
     fn description(&self) -> &str {
-        "Assemble implementation context for a task node. Resolves design_ref to extract the relevant design section, maps satisfies GOALs to requirement text, collects guards and dependency interfaces. Returns everything a developer needs to implement the task."
+        "Assemble FULL implementation context for a task node: resolves design_ref → extracts the matching design section, maps `satisfies` GOAL edges → requirement text, collects GUARDs, pulls dependency interfaces. Use this — NOT manual hunting through .gid/features/ — before implementing any task. Strictly more focused than gid_context for task work."
     }
 
     fn input_schema(&self) -> Value {
@@ -6424,5 +6489,62 @@ mod tests {
             "error should mention path does not exist, got: {}",
             err
         );
+    }
+
+    // ─── GID anti-pattern detection tests ───────────────────────
+
+    #[test]
+    fn test_detect_sqlite_on_gid_db() {
+        // Direct query
+        let cmd = "sqlite3 .gid/graph.db \"SELECT * FROM nodes\"";
+        let warn = detect_gid_antipattern(cmd);
+        assert!(warn.is_some(), "should detect sqlite3 on .gid/graph.db");
+        assert!(warn.as_ref().unwrap().contains("GID ANTI-PATTERN"));
+        assert!(warn.as_ref().unwrap().contains("gid_query_impact"));
+    }
+
+    #[test]
+    fn test_detect_sqlite_on_gid_db_with_path() {
+        // Absolute path with .gid/
+        let cmd = "sqlite3 -header /Users/potato/clawd/projects/engram/.gid/graph.db \"SELECT 1\"";
+        let warn = detect_gid_antipattern(cmd);
+        assert!(warn.is_some(), "should detect sqlite3 on absolute .gid path");
+    }
+
+    #[test]
+    fn test_detect_sqlite_on_alt_gid_dir() {
+        // Alternate .gid-* dir (e.g. .gid-v03-context/)
+        let cmd = "sqlite3 .gid-v03-context/graph.db \"SELECT count(*) FROM nodes\"";
+        let warn = detect_gid_antipattern(cmd);
+        assert!(warn.is_some(), "should detect alternate .gid- directories");
+    }
+
+    #[test]
+    fn test_detect_cat_deprecated_yml() {
+        let cmd = "cat .gid/graph.yml";
+        let warn = detect_gid_antipattern(cmd);
+        assert!(warn.is_some(), "should warn on cat of graph.yml");
+        assert!(warn.as_ref().unwrap().contains("DEPRECATED"));
+    }
+
+    #[test]
+    fn test_no_warn_on_unrelated_sqlite() {
+        // Unrelated database
+        let cmd = "sqlite3 engram-memory.db \"SELECT count(*) FROM memories\"";
+        assert!(detect_gid_antipattern(cmd).is_none());
+    }
+
+    #[test]
+    fn test_no_warn_on_gid_command() {
+        // Using the gid CLI is fine
+        let cmd = "gid tasks --project /Users/potato/clawd/projects/engram";
+        assert!(detect_gid_antipattern(cmd).is_none());
+    }
+
+    #[test]
+    fn test_no_warn_on_normal_commands() {
+        assert!(detect_gid_antipattern("ls -la").is_none());
+        assert!(detect_gid_antipattern("cargo build").is_none());
+        assert!(detect_gid_antipattern("grep foo src/").is_none());
     }
 }

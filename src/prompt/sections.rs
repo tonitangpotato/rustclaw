@@ -206,17 +206,49 @@ impl PromptSection for GidSection {
     }
 
     fn render(&self, _ctx: &PromptContext) -> String {
-        "## GID (Graph Indexed Development)\n\
-         GID tracks project architecture, code structure, and tasks as a dependency graph (.gid/graph.yml).\n\
+        "## GID (Graph Indexed Development) — When & How\n\
+         GID tracks project architecture, code structure, and tasks as a dependency graph.\n\
+         Graph file: `.gid/graph.db` (SQLite, canonical). YAML backend is DEPRECATED.\n\
          \n\
-         ### Default workflow: NEW feature/skill → Ritual pipeline (see GID Rituals section)\n\
-         ### Only use raw GID commands for: exploration, queries, quick single-file fixes\n\
+         ### Decision Table — Use the right gid_* tool, NOT raw grep/sqlite\n\
          \n\
-         - New project/feature: `gid ritual init` → follow the pipeline\n\
-         - Existing codebase: `gid_extract` → `gid_read` or `gid_schema`\n\
-         - During dev: `gid_tasks` (check), `gid_update_task` (progress), `gid_complete` (done), `gid_query_impact` (before changes)\n\
-         - Quality: `gid_validate`, `gid_advise`, `gid_visual`\n\
-         - Always use GID for task tracking, never raw markdown lists."
+         | When you want to... | Use this | NOT this |\n\
+         |---|---|---|\n\
+         | List/filter tasks | `gid_tasks` | reading .md files |\n\
+         | Update task status | `gid_update_task`, `gid_complete` | manual edits |\n\
+         | Add/remove nodes or edges | `gid_add_task`, `gid_add_edge`, `gid_refactor` | sqlite INSERT |\n\
+         | **Find what X impacts (forward, transitive)** | **`gid_query_impact`** | 1-hop SQL JOIN |\n\
+         | **Find what X depends on (reverse, transitive)** | **`gid_query_deps`** | 1-hop SQL JOIN |\n\
+         | **Count/audit nodes under feature X** | **`gid_query_impact` then count** | `SELECT COUNT(*) WHERE to_node='X'` (1-hop, undercounts) |\n\
+         | Validate graph health | `gid_validate` (cycles/orphans) + `gid_advise` | manual inspection |\n\
+         | Visualize structure | `gid_visual --format mermaid` | eyeballing rows |\n\
+         | Read whole graph | `gid_read` (YAML output) | sqlite SELECT * |\n\
+         | Plan execution order | `gid_plan` (topo + critical path) | manual reasoning |\n\
+         | Get implementation context for task T | `gid_task_context` | reading design.md by hand |\n\
+         | Get general context for nodes | `gid_context` (token-budget aware) | manual file reads |\n\
+         | Analyze risk/complexity | `gid_complexity` | gut feel |\n\
+         | Blast radius of changed files | `gid_working_memory` | grep |\n\
+         | Extract code structure to graph | `gid_extract` | n/a (one-shot) |\n\
+         | Quick code overview without graph mutation | `gid_schema` | ls + grep |\n\
+         \n\
+         ### CRITICAL: Graphs are HIERARCHICAL\n\
+         A feature like `feature:v03-retrieval` may have sub-features (`feature:retrieval-classification`...) \
+         and code/task/requirement nodes hang off those. A 1-hop SQL JOIN on the edges table \
+         will silently undercount everything beyond depth 1. **All `gid_query_*` tools do transitive closure by default — use them.** \
+         If you must write raw SQL, use `WITH RECURSIVE` and state why no gid tool fits.\n\
+         \n\
+         ### Anti-patterns (NEVER do these)\n\
+         - ❌ `sqlite3 .gid/graph.db \"SELECT ...\"` for any traversal question — use gid_query_*\n\
+         - ❌ `gid_extract` when graph already has code nodes — check first via `gid_schema`\n\
+         - ❌ Writing markdown task lists when gid_tasks exists\n\
+         - ❌ `--backend yaml` when creating new graphs (DEPRECATED, use sqlite default)\n\
+         \n\
+         ### For external projects\n\
+         Always pass `project: /path/to/project` (e.g. `/Users/potato/clawd/projects/engram`). \
+         Without it, gid tools default to RustClaw's own workspace.\n\
+         \n\
+         ### When to start a new project / feature\n\
+         Use the Ritual pipeline (see GID Rituals section), not raw gid commands."
             .to_string()
     }
 
