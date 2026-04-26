@@ -5933,6 +5933,8 @@ impl Tool for StartRitualTool {
                 }
 
                 let phase_name = state.phase.display_name();
+                let ritual_id = &state.id;
+                let target_root = state.target_root.as_deref().unwrap_or("(unknown)");
                 let output = match state.phase {
                     gid_core::ritual::state_machine::RitualPhase::Done => {
                         format!("✅ Ritual completed successfully! Final phase: {}", phase_name)
@@ -5966,22 +5968,36 @@ impl Tool for StartRitualTool {
                             questions
                         )
                     }
+                    // Healthy mid-ritual states: ritual was kicked off, EP actions
+                    // are running in background tasks (tokio::spawn), and the call
+                    // returned the intermediate state immediately. NOT a failure.
+                    // ISS-026 + ISS-048 — previous catch-all `_` arm conflated this
+                    // with terminal failure and set is_error=true.
                     _ => {
-                        let mut msg = format!("Ritual ended in {} phase.", phase_name);
-                        if let Some(ref err) = state.error_context {
-                            msg.push_str(&format!("\nError: {}", err));
-                        }
-                        if let Some(ref root) = state.target_root {
-                            msg.push_str(&format!("\nTarget root: {}", root));
-                        }
-                        msg.push_str("\nThis usually means project detection failed or the workspace path is wrong.");
-                        msg
+                        format!(
+                            "🔧 Ritual started (id={}); running in background.\n\
+                             Current phase: {}\n\
+                             Target root: {}\n\
+                             Use /ritual status to check progress, or read \
+                             `.gid/rituals/{}.json` directly. The ritual will continue \
+                             advancing through phases on its own.",
+                            ritual_id, phase_name, target_root, ritual_id
+                        )
                     }
                 };
 
+                // Only true terminal failures are errors. Done = success;
+                // pause states (WaitingApproval/WaitingClarification) and healthy
+                // mid-ritual states are NOT errors — the ritual is working as designed.
+                let is_error = matches!(
+                    state.phase,
+                    gid_core::ritual::state_machine::RitualPhase::Escalated
+                        | gid_core::ritual::state_machine::RitualPhase::Cancelled
+                );
+
                 Ok(ToolResult {
                     output,
-                    is_error: !matches!(state.phase, gid_core::ritual::state_machine::RitualPhase::Done),
+                    is_error,
                 })
             }
             Err(e) => Ok(ToolResult {
