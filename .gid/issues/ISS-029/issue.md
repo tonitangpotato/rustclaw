@@ -1,3 +1,12 @@
+---
+id: "ISS-029"
+title: "Ritual state liveness signal — detect stuck/dead rituals"
+status: open
+priority: P2
+created: 2026-04-26
+component: "src/ritual.rs"
+related: ["ISS-025"]
+---
 # ISS-029: Agent reads ritual state file mid-write, mistakes ongoing ritual for stuck
 
 **Status:** open

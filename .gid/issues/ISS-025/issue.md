@@ -1,3 +1,12 @@
+---
+id: "ISS-025"
+title: "Ritual implement phase burns tokens with no output"
+status: open
+priority: P1
+created: 2026-04-24
+component: "src/ritual.rs (implement phase)"
+related: ["ISS-027", "ISS-029"]
+---
 # ISS-025: Ritual `Implementing` Phase Burns Tokens But Produces No File Changes
 
 **Created**: 2026-04-25

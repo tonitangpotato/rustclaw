@@ -1,3 +1,13 @@
+---
+id: "ISS-007"
+title: "Engram Recall Quality Fixes"
+status: blocked
+priority: P2
+created: 2026-04-19
+component: "src/memory.rs"
+depends_on: ["engram:ISS-032"]
+note: "2 of 3 bugs fixed in rustclaw; bug 3 migrated to engram ISS-032."
+---
 # ISS-007: Engram Memory Recall Quality — Three Bugs
 
 **Status:** 🟡 Blocked on engram ISS-032 — Bug 1 ✅ fixed (rustclaw), Bug 2 ✅ fixed (rustclaw), Bug 3 → migrated to engram ISS-032

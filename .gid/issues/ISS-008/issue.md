@@ -1,3 +1,11 @@
+---
+id: "ISS-008"
+title: "Telegram Disconnect / Reconnect Loop"
+status: open
+priority: P2
+created: 2026-04-19
+component: "src/channels/telegram.rs"
+---
 # ISS-008: Telegram Long-Poll Silent Disconnect
 
 **Status**: ✅ Fixed  

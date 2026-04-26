@@ -1,3 +1,12 @@
+---
+id: "ISS-019"
+title: "/ritual cancel does not persist cancellation to state file"
+status: closed
+priority: P2
+created: 2026-04-22
+closed: 2026-04-25
+component: "src/ritual.rs, .gid/runtime/rituals/"
+---
 # ISS-019: `/ritual cancel` Does Not Persist Cancellation to State File
 
 **Created**: 2026-04-22

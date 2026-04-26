@@ -1,3 +1,11 @@
+---
+id: "ISS-049"
+title: "Skills directory has no hot-reload"
+status: open
+priority: P3
+created: 2026-04-26
+component: "src/skills.rs"
+---
 # ISS-049: Skills directory has no hot-reload — new/edited SKILL.md files require RustClaw restart
 
 **Status**: open

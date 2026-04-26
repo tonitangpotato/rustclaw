@@ -1,3 +1,12 @@
+---
+id: "ISS-011"
+title: "Streaming Telegram Output Edge Cases"
+status: closed
+priority: P1
+created: 2026-04-15
+closed: 2026-04-17
+component: "src/channels/telegram.rs"
+---
 # ISS-011: Skill Sub-Agent Adaptation Layer
 
 ## Status: Done ✅

@@ -1,3 +1,12 @@
+---
+id: "ISS-030"
+title: "Multi-daemon shared workspace ritual race condition"
+status: open
+priority: P3
+created: 2026-04-26
+component: "src/ritual.rs, src/workspace.rs"
+related: ["ISS-028"]
+---
 # ISS-030: Multi-daemon shared workspace causes ritual state race + broadcast confusion
 
 **Status:** open

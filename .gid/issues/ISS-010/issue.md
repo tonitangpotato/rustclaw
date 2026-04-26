@@ -1,3 +1,12 @@
+---
+id: "ISS-010"
+title: "Sub-agent Delegation Hard Rules"
+status: closed
+priority: P1
+created: 2026-04-15
+closed: 2026-04-17
+component: "AGENTS.md, src/orchestrator.rs"
+---
 # ISS-010: Sub-Agent Delegation Decision Framework
 
 ## Status: Done ✅

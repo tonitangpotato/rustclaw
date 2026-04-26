@@ -1,3 +1,12 @@
+---
+id: "ISS-012"
+title: "Confidence Weighting in Code Graph Extraction"
+status: closed
+priority: P2
+created: 2026-04-15
+closed: 2026-04-17
+component: "gid-core/code_graph"
+---
 # ISS-012: Sub-Agent Iteration Budget Monitor
 
 ## Status: Done ✅

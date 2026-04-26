@@ -1,3 +1,12 @@
+---
+id: "ISS-014"
+title: "Heartbeat Scope & Daily Log Routing"
+status: closed
+priority: P1
+created: 2026-04-20
+closed: 2026-04-21
+component: "src/heartbeat.rs"
+---
 # ISS-014: Session Continuity — Recent Memories Not Reaching LLM After Restart
 
 **Created**: 2026-04-20

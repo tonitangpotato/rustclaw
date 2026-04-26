@@ -1,3 +1,11 @@
+---
+id: "ISS-020"
+title: "Project path discovery friction in cross-project tools"
+status: open
+priority: P2
+created: 2026-04-23
+component: "src/tools.rs (gid_* tools)"
+---
 # ISS-020: Project Path Discovery Friction
 
 **Status**: closed (2026-04-23 — resolved by feature-project-registry)

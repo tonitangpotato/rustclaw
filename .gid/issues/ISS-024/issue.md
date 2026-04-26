@@ -1,3 +1,12 @@
+---
+id: "ISS-024"
+title: "gid_* tools need graph_path override parameter"
+status: closed
+priority: P2
+created: 2026-04-23
+closed: 2026-04-25
+component: "src/tools.rs (all gid_* tools)"
+---
 # ISS-024: gid_* built-in tools cannot target arbitrary graph.db paths
 
 **Status:** ✅ Resolved (2026-04-25)

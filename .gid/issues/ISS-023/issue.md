@@ -1,3 +1,11 @@
+---
+id: "ISS-023"
+title: "clawd/projects path debt — hardcoded paths across configs"
+status: open
+priority: P3
+created: 2026-04-23
+component: "rustclaw.yaml, MEMORY.md, multiple configs"
+---
 # ISS-023: `/Users/potato/clawd/projects/` Path Debt — Migrate to `/Users/potato/projects/`
 
 **发现日期**: 2026-04-23

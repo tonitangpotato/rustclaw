@@ -1,3 +1,13 @@
+---
+id: "ISS-022"
+title: "Migrate start_ritual tool to WorkUnit-based identification"
+status: closed
+priority: P2
+created: 2026-04-23
+closed: 2026-04-25
+component: "src/tools.rs (start_ritual)"
+related: ["gid-rs:ISS-029"]
+---
 # ISS-022: Migrate `start_ritual` tool to `WorkUnit` API (adopter-side of gid-rs ISS-029)
 
 **Status:** closed (2026-04-23 — implementation complete, 284/284 tests passing)

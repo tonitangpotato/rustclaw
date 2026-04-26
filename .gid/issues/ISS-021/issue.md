@@ -1,3 +1,12 @@
+---
+id: "ISS-021"
+title: "Message context side-channel — Envelope refactor"
+status: in_progress
+priority: P1
+created: 2026-04-22
+component: "src/context.rs, src/memory.rs, engramai"
+note: "Phase 1 done (P_before=0.767 baseline). Phases 2-5 ahead."
+---
 # ISS-021: Message Envelope — Side Channel, Not In-Band String
 
 - **Status**: 🟢 Phase 5b complete — counterfactual measurement returned `delta = 0.000`; Phase 5c (wet migration) rejected on evidence. Architecturally ISS-021 is fully landed at Phase 4; Phase 5c stays `blocked` permanently barring an embedding-model change.

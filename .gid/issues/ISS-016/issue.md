@@ -1,3 +1,12 @@
+---
+id: "ISS-016"
+title: "Engram Auto-Recall Hook Integration"
+status: closed
+priority: P1
+created: 2026-04-20
+closed: 2026-04-21
+component: "src/memory.rs, src/hooks.rs"
+---
 # ISS-016: Main Agent Is Blind to Active Rituals
 
 **Created**: 2026-04-20

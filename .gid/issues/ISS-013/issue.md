@@ -1,3 +1,13 @@
+---
+id: "ISS-013"
+title: "gid_extract tool missing incremental extract + LSP refinement"
+status: closed
+priority: P1
+created: 2026-04-17
+closed: 2026-04-18
+component: "src/tools.rs (GidExtractTool)"
+related: ["ISS-012"]
+---
 # ISS-013: gid_extract tool missing incremental extract + LSP refinement
 
 ## Summary

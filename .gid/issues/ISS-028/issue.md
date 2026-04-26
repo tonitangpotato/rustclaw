@@ -1,3 +1,12 @@
+---
+id: "ISS-028"
+title: "Duplicate rituals can launch for same work unit"
+status: open
+priority: P2
+created: 2026-04-26
+component: "src/ritual.rs, .gid/runtime/rituals/"
+related: ["ISS-030"]
+---
 # ISS-028: Duplicate rituals on the same work_unit run in parallel, burn redundant tokens, risk divergent edits
 
 **Status:** open

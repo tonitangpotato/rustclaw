@@ -1,3 +1,14 @@
+---
+id: "ISS-026"
+title: "start_ritual tool misreports progress (duplicate of ISS-048)"
+status: closed
+priority: P2
+created: 2026-04-24
+closed: 2026-04-26
+component: "src/tools.rs (start_ritual)"
+superseded_by: "ISS-048"
+note: "Merged into ISS-048 — same root cause, ISS-048 has the canonical fix."
+---
 # ISS-026: `start_ritual` tool misreports in-progress rituals as failed + lacks identity context
 
 **Status:** ✅ Resolved (2026-04-26)

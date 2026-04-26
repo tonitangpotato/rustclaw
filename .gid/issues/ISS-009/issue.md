@@ -1,3 +1,12 @@
+---
+id: "ISS-009"
+title: "Persona System — Multi-Instance Identity + Engram Namespace"
+status: open
+priority: P2
+created: 2026-04-14
+severity: medium
+component: "src/config.rs, src/workspace.rs, src/memory.rs"
+---
 # ISS-009: Persona System — Multi-Instance Identity + Engram Namespace
 
 **Status**: Open  

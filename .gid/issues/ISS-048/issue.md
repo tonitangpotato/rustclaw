@@ -1,3 +1,12 @@
+---
+id: "ISS-048"
+title: "start_ritual tool misreports 'initializing' state as failure"
+status: open
+priority: P2
+created: 2026-04-26
+component: "src/tools.rs (start_ritual)"
+supersedes: ["ISS-026"]
+---
 # ISS-048: `start_ritual` tool reports "Ritual ended in Initializing" while ritual is still running
 
 **Status**: ✅ Resolved (2026-04-26)

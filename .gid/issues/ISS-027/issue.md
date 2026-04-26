@@ -1,3 +1,12 @@
+---
+id: "ISS-027"
+title: "Ritual observer needs context injection"
+status: open
+priority: P2
+created: 2026-04-26
+component: "src/ritual.rs"
+related: ["ISS-025"]
+---
 # ISS-027: Ritual Observer + LLM Context Injection — make ritual state changes visible to the agent without asking
 
 **Status:** open
