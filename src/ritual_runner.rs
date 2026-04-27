@@ -476,6 +476,7 @@ impl RitualRunner {
                             (RitualEvent::SkillFailed {
                                 phase: state.phase.display_name().to_string(),
                                 error: format!("Executor error: {}", e),
+                            reason: None,
                             }, 0)
                         }
                     }
@@ -603,7 +604,7 @@ impl RitualRunner {
                     // Notifications are sent BEFORE event-producing actions in run_loop.
                     // Skip here to avoid duplicate notifications.
                 }
-                RitualAction::SaveState => {
+                RitualAction::SaveState { .. } => {
                     if let Err(e) = self.save_state(state) {
                         tracing::error!("Failed to save ritual state: {}", e);
                     }
@@ -1093,6 +1094,7 @@ impl RitualRunner {
                         return Ok((RitualEvent::SkillFailed {
                             phase: name.to_string(),
                             error: "Cancelled".to_string(),
+                            reason: None,
                         }, 0));
                     }
                     r = runner.run_subagent(agent_type, context, options.clone()) => r,
@@ -1117,6 +1119,7 @@ impl RitualRunner {
                         return Ok((RitualEvent::SkillFailed {
                             phase: name.to_string(),
                             error: "Cancelled by user".to_string(),
+                            reason: None,
                         }, attempt_result.tokens));
                     }
 
@@ -1126,6 +1129,7 @@ impl RitualRunner {
                         return Ok((RitualEvent::SkillFailed {
                             phase: name.to_string(),
                             error: format!("Authentication failed: {}", msg),
+                        reason: None,
                         }, attempt_result.tokens));
                     }
 
@@ -1358,6 +1362,7 @@ impl RitualRunner {
                 Ok((RitualEvent::SkillFailed {
                     phase: name.to_string(),
                     error: format!("{}", e),
+                reason: None,
                 }, 0))
             }
         }
@@ -1742,6 +1747,7 @@ impl RitualRunner {
             Ok((RitualEvent::SkillFailed {
                 phase: "implement".into(),
                 error: error_msg,
+                reason: None,
             }, total_tokens))
         }
     }

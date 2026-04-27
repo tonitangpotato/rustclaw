@@ -39,6 +39,7 @@ mod message_queue;
 mod text_utils;
 mod ritual_adapter;
 mod memory_migrate;
+mod ritual_hooks;
 mod ritual_registry;
 mod ritual_runner;
 mod tools;
