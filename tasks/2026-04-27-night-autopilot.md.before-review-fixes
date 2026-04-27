@@ -1,0 +1,348 @@
+# Night Autopilot — engram v0.3 (2026-04-27)
+
+> **Goal**: Continue v0.3 implementation while potato sleeps.
+> **Strategy**: Pointer-style. This doc tells you WHERE to look, not WHAT'S there.
+> Source-of-truth is the design/requirements/build-plan docs — DO NOT re-derive from this file.
+
+---
+
+## 0. Canonical paths (memorize / always use full path)
+
+| What | Full path |
+|---|---|
+| engram repo root | `/Users/potato/clawd/projects/engram/` |
+| engramai crate (library code) | `/Users/potato/clawd/projects/engram/crates/engramai/` |
+| engram-bench crate | `/Users/potato/clawd/projects/engram/crates/engram-bench/` |
+| **v0.3 graph DB** (NOT `.gid/graph.db`) | `/Users/potato/clawd/projects/engram/.gid-v03-context/graph.db` |
+| v0.3 context dir (designs/build plans) | `/Users/potato/clawd/projects/engram/.gid-v03-context/` |
+| v0.3 PATHS lock-in doc | `/Users/potato/clawd/projects/engram/.gid-v03-context/PATHS.md` |
+| Feature docs root | `/Users/potato/clawd/projects/engram/.gid/features/<feature>/` |
+| this agent's workspace | `/Users/potato/rustclaw/` |
+
+**Rules:**
+- All `gid_*` tool calls MUST pass `graph_path="/Users/potato/clawd/projects/engram/.gid-v03-context/graph.db"` (else they'll hit the wrong DB).
+- All file edits happen inside the engram monorepo, never in `engram-ai-rust/` (deprecated).
+- After each task: `cd /Users/potato/clawd/projects/engram && cargo test -p engramai --lib` must pass.
+- Conventional Commits, reference the task ID.
+
+---
+
+## 1. Where to find what (the index)
+
+For ANY task `task:<feature-prefix>-impl-<thing>`:
+
+| You need… | Look at… |
+|---|---|
+| Full task description + DoD pointer | run `gid_tasks(graph_path=<v03 db>, status="todo")` and `gid_query_deps(id=<task_id>, graph_path=<v03 db>)` |
+| Design section it implements | `.gid/features/<feature>/design.md` — search for the §-number cited in the task description |
+| Requirements (GOAL-X.Y / GUARD-N) it satisfies | `.gid/features/<feature>/requirements.md` |
+| Module/code-node mapping (which file you're writing) | task description's "code node" + the feature's build plan |
+| Build plan (T1→T2→T3→T4 history, conventions) | `.gid-v03-context/v03-<feature>-build-plan.md` |
+| Existing code style/conventions for that module | `crates/engramai/src/<module>/` siblings, or `crates/engram-bench/src/` for bench |
+| Cross-feature interface contracts | each design's §10 "Dependencies" section |
+
+**Feature → prefix map:**
+- `task:res-*` → v03-resolution
+- `task:retr-*` → v03-retrieval
+- `task:mig-*` → v03-migration
+- `task:bench-*` → v03-benchmarks
+
+---
+
+## 2. Per-task workflow (do this every time, no shortcuts)
+
+1. `gid_update_task(graph_path=<v03 db>, id=<task_id>, status="in_progress")`
+2. Read the task node — get description + cited §-numbers + cited GOAL/GUARD ids
+3. Open `.gid/features/<feature>/design.md`, read the cited §s
+4. Open `.gid/features/<feature>/requirements.md`, read the cited GOAL/GUARDs
+5. Read 1-2 sibling files in the same module for style
+6. Implement
+7. `cargo test -p engramai --lib` (or `-p engram-bench` for bench tasks) — must be green
+8. Commit (Conventional Commits, ref task ID)
+9. `gid_complete(graph_path=<v03 db>, id=<task_id>)` — note the unblocked downstream tasks
+10. Move to next ready task
+
+**Never mark a task done if (a) tests fail OR (b) the target file doesn't exist on disk.**
+
+---
+
+## 3. Execution layers (dependency order)
+
+```
+Layer 0  ✅ DONE    v03-graph-layer (14/14)
+Layer 1  →          §A  Resolution remaining (2 tasks)              ← do first
+Layer 2  →          §B  Retrieval (17 tasks)   ┐ parallel-safe
+                    §C  Migration (18 tasks)   ┘ after §A
+Layer 3  →          §D  Benchmarks (16 tasks)  ← needs A+B+C
+```
+
+**Order of attack tonight:**
+1. Finish §A (unblocks the rest)
+2. Pick whichever of §B / §C has more "ready" tasks via `gid_tasks --status=todo` filtered to ready ones — work the ready frontier
+3. Don't start §D unless §A + §B + §C are fully green (benchmarks consume their public APIs)
+
+---
+
+## 4. Sections (filled below)
+
+- §A — Resolution (2 tasks) — written next
+- §B — Retrieval (17 tasks)
+- §C — Migration (18 tasks)
+- §D — Benchmarks (16 tasks)
+- §E — Stop conditions & status reporting
+
+(Each section is just: task IDs + per-task pointer table. The actual work-content lives in the design/requirements docs referenced.)
+
+---
+
+## 5. Stop conditions (read before starting)
+
+STOP and write `tasks/2026-04-27-night-autopilot-STATUS.md` if any of:
+
+- A test that was previously green goes red and you can't fix it in 2 attempts
+- A task description references a file/section that doesn't exist
+- You'd need to make a non-trivial design decision (anything not pinned in design.md)
+- Cross-feature contract conflict (e.g., resolution emits something retrieval doesn't accept)
+- The v0.3 graph DB looks wrong (snapshot files appearing, edge counts changing unexpectedly)
+- Cargo build breaks at the workspace level (not just the crate you're working in)
+
+In the STATUS file, write: which task, what failed, what you tried, what you think is needed. potato will pick up in the morning.
+
+DO NOT skip a task and continue. Layers gate each other; broken upstream silently corrupts downstream.
+
+---
+
+# §A — Resolution remaining (2 tasks)
+
+> **Build plan**: `/Users/potato/clawd/projects/engram/.gid-v03-context/v03-resolution-build-plan.md`
+> **Design**: `/Users/potato/clawd/projects/engram/.gid/features/v03-resolution/design.md`
+> **Requirements**: `/Users/potato/clawd/projects/engram/.gid/features/v03-resolution/requirements.md`
+
+These two unblock everything downstream. Do them first, in this order.
+
+## A.1 — `task:res-impl-memory-api`
+
+| Field | Value |
+|---|---|
+| Target file | `/Users/potato/clawd/projects/engram/crates/engramai/src/memory.rs` (additions, NOT rewrite) |
+| Design §s | search design.md for: `Memory::reextract`, `Memory::reextract_failed`, `Memory::compile_knowledge`, `Memory::list_knowledge_topics`, `Memory::ingest_with_stats`, `Memory::resolve_for_backfill`, `§6.5` |
+| Requirements | GOAL-2.1 (idempotence), 2.2/2.3 (failure surfacing), 2.11 (stats surface), 2.14 (rolling-avg surface) |
+| Depends on | v03-graph-layer (DONE), `task:res-impl-knowledge-compile` for `compile_knowledge` body — **stub it if knowledge-compile isn't done yet** and fill in after A.2 |
+| Test command | `cd /Users/potato/clawd/projects/engram && cargo test -p engramai --lib memory::` |
+| DoD | All 6 methods present with correct signatures, doc comments cite design §s + GOAL ids, unit tests for each (idempotence on reextract is mandatory — GOAL-2.1) |
+| Notes | `ResolutionStats` is a public benchmarks contract — once shipped, breaking it requires version bump. Mirror the pattern from `task:graph-impl-memory-api` already-done in memory.rs (see how those 5 graph methods do `&mut self` borrowing). |
+
+## A.2 — `task:res-impl-knowledge-compile`
+
+| Field | Value |
+|---|---|
+| Target file | `/Users/potato/clawd/projects/engram/crates/engramai/src/knowledge_compile/mod.rs` (new module — also add `pub mod knowledge_compile;` to `lib.rs`) |
+| Design §s | `§5bis Knowledge Compiler` (entire section — K1, K2, K3 stages) |
+| Requirements | GOAL-3.6, GOAL-3.7 (cross-feature, produce-side — these are consumed by retrieval) |
+| Depends on | A.1 stub of `Memory::compile_knowledge` and `Memory::list_knowledge_topics` |
+| Test command | `cd /Users/potato/clawd/projects/engram && cargo test -p engramai --lib knowledge_compile::` |
+| DoD | K1 candidate selection + K2 clustering trait with default HDBSCAN impl + K3 LLM summary + atomic per-cluster persist with topic supersession. Cost metrics use `knowledge_compile_*` namespace (cost isolation per design). |
+| After done | Go back to A.1, replace the stubs in `Memory::compile_knowledge` / `Memory::list_knowledge_topics` with real calls into this module, re-run tests. |
+
+
+---
+
+# §B — Retrieval (17 tasks)
+
+> **Build plan**: `/Users/potato/clawd/projects/engram/.gid-v03-context/v03-retrieval-build-plan.md`
+> **Design**: `/Users/potato/clawd/projects/engram/.gid/features/v03-retrieval/design.md` (r3 approved, 668 lines)
+> **Requirements**: `/Users/potato/clawd/projects/engram/.gid/features/v03-retrieval/requirements.md`
+
+**Common conventions for ALL §B tasks** (read once, apply to every task):
+- Code lives under `/Users/potato/clawd/projects/engram/crates/engramai/src/retrieval/`
+- Each task description in the graph already names: (a) which §-numbers in design.md, (b) which GOAL/GUARDs satisfied, (c) which `implements:` code-node it maps to. **Read the task description first** via `gid_tasks` — don't infer.
+- Test command for every retrieval task: `cd /Users/potato/clawd/projects/engram && cargo test -p engramai --lib retrieval::`
+- Property tests are mandatory where the task name says "contract" / "determinism" / "purity"
+- All 17 tasks should produce zero clippy warnings: `cargo clippy -p engramai -- -D warnings`
+
+**Per-task pointer table** (T-number = order in build plan; do in T-order unless ready frontier says otherwise):
+
+| T | Task ID | Design §s to read | Notes |
+|---|---|---|---|
+| T1 | `task:retr-impl-classifier-heuristic` | classifier-core, classifier-heuristic, §3, §4.7 | 5 signal scorers + thresholds. Foundation — others wire into it. |
+| T2 | `task:retr-impl-classifier-llm` | classifier-llm-fallback | Stage-2 LLM fallback; budget-capped; mismatch detection. |
+| T3 | `task:retr-impl-factual-bitemporal` | plan-factual, plan-bitemporal-projection, §3.3, §3.5, GUARD-3 | as-of-T projection helper is shared with T4. |
+| T4 | `task:retr-impl-episodic` | plan-episodic | Reuses T3's bitemporal helper. Downgrade-on-no-time behavior is critical. |
+| T5 | `task:retr-impl-associative` | plan-associative, §3.1 default fallback | seed → entity-extract → edge-hop → spread-act. |
+| T6 | `task:retr-impl-abstract-l5` | plan-abstract-l5, GOAL-3.6/3.7 | **Requires §A.2 done** (consumes KnowledgeTopic store + cluster_weights). |
+| T7 | `task:retr-impl-affective` | plan-affective, GUARD-6, §4.5 step 5 | GUARD-6 enforced via `w_affect < 1.0` in fusion. Telemetry inline. |
+| T8 | `task:retr-impl-hybrid` | plan-hybrid | RRF fusion + truncation telemetry. |
+| T9 | `task:retr-impl-fusion` | fusion-signals, fusion-combiner, §3.13 | 5 signal scorers + per-plan weights + missing-signal renorm + `FusionConfig::locked()`. |
+| T10 | `task:retr-impl-reranker-contract` | reranker-trait | Trait + null impl + property tests for purity/bound/preservation. |
+| T11 | `task:retr-impl-graph-query-api` | graph-query-api, §3.9 | `Memory::graph_query` / `graph_query_locked` + Tier API. |
+| T12 | `task:retr-impl-typed-outcomes` | retrieval-outcomes, §3.10, §3.12 | `RetrievalOutcome` enum + `RetrievalError` + novel-predicate surface. |
+| T13 | `task:retr-impl-budget-cutoff` | budget-controller | Per-stage Duration budgets + cost caps + cutoff-returns-partial. |
+| T14 | `task:retr-impl-explain-trace` | explain-trace, §3.11 | Opt-in cost guarantee — zero overhead when disabled. |
+| T15 | `task:retr-impl-metrics` | §8.1 (11 surfaces) | Prometheus metrics, always-on (distinct from explain-trace). |
+| T16 | `task:retr-test-determinism-routing-accuracy` | §5.4 + §3.1 + GUARD-3 + GUARD-6 | **Acceptance gate** — runs against full retrieval. Property tests + ≥90% routing accuracy + Kendall-tau affect-divergence. |
+
+(That's 16 in the plan; T-number gaps are intentional from the build-plan doc.)
+
+**Hot path / ordering tips:**
+- T9 (fusion) blocks T6/T7/T8 effectively (they all weight via fusion). Do T9 before T6-T8 if dependency order allows.
+- T15 (metrics) touches every plan — do it AFTER T1-T8 are stable, easier to wire metrics once shapes are settled.
+- T16 is the gate — only attempt after T1-T15 all green.
+
+
+---
+
+# §C — Migration (18 tasks)
+
+> **Build plan**: `/Users/potato/clawd/projects/engram/.gid-v03-context/v03-migration-build-plan.md`
+> **Design**: `/Users/potato/clawd/projects/engram/.gid/features/v03-migration/design.md`
+> **Requirements**: `/Users/potato/clawd/projects/engram/.gid/features/v03-migration/requirements.md`
+
+**Common conventions for ALL §C tasks:**
+- Code lives under `/Users/potato/clawd/projects/engram/crates/engramai/src/migration/` (new module — add `pub mod migration;` to `lib.rs` if not present)
+- CLI binary: `crates/engramai/src/bin/engramai_migrate.rs` (or whatever the build plan / design specifies — check first)
+- Test command: `cd /Users/potato/clawd/projects/engram && cargo test -p engramai --lib migration::`
+- Backward compat tests (T13, T18): also run `cargo test -p engramai --test v02_compat` (creating fixtures as needed)
+- Migration touches schema. Run **`cargo test -p engramai`** (full, not just `--lib`) before each `gid_complete`.
+- Schema changes are **non-destructive adds only** — never drop columns/tables in v0.3.
+
+**Per-task pointer table** (T = order from build plan):
+
+| T | Task ID | Design §s | Notes |
+|---|---|---|---|
+| T1 | `task:migration-impl-error` | §10 | `MigrationError` enum + exit codes. Foundation — many tasks consume this. |
+| T2 | `task:mig-impl-progress` | §5.5, §9.2 | `MigrationProgress` struct + emitter. Snapshot semantics + invariants. |
+| T3 | `task:mig-impl-checkpoint` | §5.4 | Checkpoint store + `migration_state` table. Resume-safe; monotonic `last_processed`. |
+| T4 | `task:mig-impl-lock` | §3.5 | Migration lock — exclusive, fail-fast on contention, stale-lock detection. |
+| T5 | `task:mig-impl-preflight` | §3 gates, §4.3 | Phase 0 pre-flight: version + disk + integrity + schema_version handshake. |
+| T6 | `task:mig-impl-backup` | §8.1 | Pre-migration backup, atomic write protocol, `--no-backup` grace period, `EXIT_BACKUP_FAILED`. |
+| T7 | `task:mig-impl-schema` | §4.2, §4.3, §4.4 | DDL non-destructive adds + `schema_version` bump + idempotency proof. |
+| T8 | `task:mig-impl-backfill-orchestrator` | §5.1 | `BackfillOrchestrator` core: streaming cursor, per-record commit, batch boundaries for progress only. |
+| T9 | `task:mig-impl-backfill-perrecord` | §5.2 | Per-record pipeline: `resolve_for_backfill`, `apply_graph_delta`, atomicity. **Depends on §A.1** (`Memory::resolve_for_backfill`). |
+| T10 | `task:mig-impl-backfill-failure` | §5.3 | Failure surfacing & retry: `graph_extraction_failures` rows, `--retry-failed`, `FailurePolicy::{Continue,Stop}`. |
+| T11 | `task:mig-impl-topics` | §6 | Topic carry-forward: `legacy=true`, provenance, GUARD-2 failure rows, idempotent `INSERT OR IGNORE`. |
+| T12 | `task:mig-impl-phase-machine` | §3 | 6-phase state machine: gate evaluation, pause/resume, `--gate` flag, phase persistence. |
+| T13 | `task:mig-impl-compat` | §7 | v0.2 backward compat shim: preserve `store/recall/recall_recent/recall_with_associations` signatures + behavior. |
+| T14 | `task:mig-impl-cli` | §9.1 | `engramai migrate` CLI: flags, `--status`, `--dry-run` depths, `--format=json`, `indicatif` progress bar. |
+| T15 | `task:mig-impl-rollback-procedure` | §8.3, §8.4, §8.6 | Rollback procedure & drill: restore-from-backup script, full checklist, mid-migration partial-state recovery. |
+| T16 | `task:mig-test-idempotency` | §11.2 | Re-run on migrated DB no-op, partial+resume == fresh-run. |
+| T17 | `task:mig-test-resume` | §11.3, §11.6 | SIGINT mid-Phase-4, resume preserves counters, disk-full mid-resume. |
+| T18 | `task:mig-test-compat-rollback` | §11.4, §11.5, §11.7 | v0.2 fixture migration; manual rollback CI; post-migration concurrent reads. |
+
+**Hot path / ordering:**
+- T1-T7 are foundation — must all be green before T8 (orchestrator).
+- T9 needs §A.1 done (`Memory::resolve_for_backfill`).
+- T13 (compat shim) is independent — can be done in parallel with T8-T12.
+- T16-T18 are the test trio — run last.
+
+**Critical safety:**
+- This module touches user data on v0.2 → v0.3 migration. **Every test in §C must include a corruption-detection assertion** (post-migration row count == pre-migration row count for unchanged tables).
+- If ANY migration test fails: STOP, write STATUS, do NOT proceed. Migration bugs are catastrophic.
+
+
+---
+
+# §D — Benchmarks (16 tasks)
+
+> **Build plan**: `/Users/potato/clawd/projects/engram/.gid-v03-context/v03-benchmarks-build-plan.md`
+> **Design**: `/Users/potato/clawd/projects/engram/.gid/features/v03-benchmarks/design.md`
+> **Requirements**: `/Users/potato/clawd/projects/engram/.gid/features/v03-benchmarks/requirements.md`
+
+**⚠️ Do NOT start §D unless §A + §B + §C are fully green.** Benchmarks consume the public APIs you just built; broken upstream = wasted work here.
+
+**Common conventions for ALL §D tasks:**
+- Code lives in a NEW crate: `/Users/potato/clawd/projects/engram/crates/engram-bench/`
+- **GUARD-9 boundary** (CRITICAL): benchmark-only deps live in `engram-bench/Cargo.toml`, NEVER in `engramai/Cargo.toml`. Validation: `cargo build -p engramai` must succeed without ANY benchmark dep present.
+- Test command: `cd /Users/potato/clawd/projects/engram && cargo test -p engram-bench`
+- After ALL §D tasks done: `cd /Users/potato/clawd/projects/engram && cargo build -p engramai && cargo build -p engram-bench` — both must pass independently.
+- Fixtures live under `crates/engram-bench/fixtures/` and `crates/engram-bench/benchmarks/` per design §6.
+
+**Per-task pointer table** (do in this order — it's the build-plan order):
+
+| # | Task ID | Design §s | Notes |
+|---|---|---|---|
+| 1 | `task:bench-impl-cargo-toml` | §9.4 | Cargo.toml — workspace member, GUARD-9 boundary. **Do this first** — establishes crate structure. |
+| 2 | `task:bench-impl-lib` | (crate root) | `lib.rs` — public re-exports of `Driver`, `RunReport`, `ReleaseDecision`, `ReproRecord`, gate types. Module declarations. |
+| 3 | `task:bench-impl-baselines` | §5.1, §5.2, §5.3 | TOML readers for v02 baseline + test count freeze + external numbers. Immutability + missing-baseline ERROR per §4.4 Level 1. |
+| 4 | `task:bench-impl-harness` | §4.3, GUARD-2 | `harness/mod.rs` — `Driver` trait, fixture loading + SHA verification, fresh-DB helper, parallel stage-1 runner, error/fail/pass distinction, upstream-failure propagation. |
+| 5 | `task:bench-impl-repro` | §6.2 | `harness/repro.rs` — `ReproRecord` struct + TOML serialize + on-disk layout + replay machinery for `--from-record`. Invariant: every field except `[override]` always present. |
+| 6 | `task:bench-impl-gates` | §4.2a | `harness/gates.rs` — gate evaluation engine, P0/P1/P2 enforcement, no-short-circuit, override logic, meta-gate (GOAL-5.8) runs last. Level 3 GUARD-2: no runtime softening. |
+| 7 | `task:bench-impl-anonymizer` | §9.3, §9.3.1 | `anonymizer/mod.rs` — deterministic regex + allow-list pipeline (NOT LLM). NER pinned `en_core_web_lg==3.7.1`. Zero-leak tolerance. Idempotence test target. |
+| 8 | `task:bench-impl-scorer-locomo` | §11 | `scorers/locomo.rs` — vendored Rust port of upstream Python scorer. Bit-for-bit parity unit-tested against ~50 fixture triples. |
+| 9 | `task:bench-impl-scorer-longmemeval` | §11 | `scorers/longmemeval.rs` — vendored, same parity-test discipline as LOCOMO. |
+| 10 | `task:bench-impl-driver-locomo` | §3.1 | `drivers/locomo.rs` — pinned-SHA dataset loader, per-conversation Memory, replay via `ingest()`, query via `Memory::graph_query()`, score via T8 scorer. Determinism: `FusionConfig::locked()`, T=0. |
+| 11 | `task:bench-impl-driver-longmemeval` | §3.2 | `drivers/longmemeval.rs` — reads v0.2 baseline, computes `delta_pp`. v0.2 baseline NOT rerun in v0.3 — frozen pre-development per §5.1. |
+| 12 | `task:bench-impl-driver-cost` | §3.3 | `drivers/cost.rs` — N=500 (250 LOCOMO + 250 anonymized rustclaw). Uses `Memory::ingest_with_stats()` → `ResolutionStats`. **GUARD-12 ship-gate consumer** — depends on §A.1. |
+| 13 | `task:bench-impl-driver-test-preservation` | §3.4 | `drivers/test_preservation.rs` — extracts v0.2.2 source/fixtures, applies migration, runs v0.2 tests against v0.3 source via `tests/v02_preservation.rs`. Asserts total == `frozen_count`. **Depends on §C done.** |
+| 14 | `task:bench-impl-driver-cognitive` | §3.5 | `drivers/cognitive_regression.rs` — 3 features × S1/S2 state seeding, Jaccard ≥0.2 (interoceptive/affect) or filter-count diff (metacognition). |
+| 15 | `task:bench-impl-driver-migration` | §3.6, v03-migration §9.4 r3 ack | `drivers/migration_integrity.rs` — pre-migration checksum + queries via v0.2 API, run migration tool, post-migration via v0.3 API. Zero-loss + query-equivalence (rule a verbatim, rule b type-substitution). |
+| 16 | `task:bench-impl-main` | §4.4 | `main.rs` — CLI dispatch: `locomo`, `longmemeval`, `cost`, `cognitive-regression`, `migration-integrity`, `release-gate`, `explain`, `clean-fixtures`, `--from-record`, `--override-gate`/`--rationale`. Exit codes per GUARD-2. |
+| 17 | `task:bench-impl-reporting` | §10.1, §10.2, §10.3 | `reporting.rs` — stdout summary (P0/P1, decision line, TTY colorization), `explain GOAL-X.Y --run`, alert-payload assembly (CI-config-agnostic). |
+
+**Hot path / ordering:**
+- 1-6 are infrastructure — do strictly in order.
+- 7-9 are independent of each other once 1-6 done — can interleave.
+- 10-15 are drivers — each consumes scorers (8-9) + harness (4-6).
+- 16-17 are last (CLI + reporting consume everything).
+
+
+---
+
+# §E — Stop conditions, status reporting, escalation
+
+## When to stop and write STATUS
+
+Write `tasks/2026-04-27-night-autopilot-STATUS.md` and STOP if any of:
+
+1. A previously-green test goes red and 2 fix attempts fail
+2. A task description references a file or section that doesn't exist (e.g., design §X.Y not found)
+3. You'd need to make a non-trivial design decision not pinned in design.md
+4. Cross-feature contract conflict (e.g., `ResolutionStats` field doesn't match what bench expects)
+5. v0.3 graph DB integrity looks off (unexpected snapshot files, edge-count drift, gid_validate failures)
+6. `cargo build` breaks at the workspace level (not just the crate you're editing)
+7. You hit a §C migration test failure — STOP IMMEDIATELY, migration bugs corrupt user data
+
+## Status file format
+
+```markdown
+# Autopilot Status — 2026-04-27 night
+
+## Completed
+- task:res-impl-memory-api  ✅ commit abc123
+- task:res-impl-knowledge-compile  ✅ commit def456
+- ...
+
+## Stopped at
+- task:retr-impl-fusion (T9)
+
+## Why
+{one paragraph — what failed, what you tried, what you think is needed}
+
+## Tests state
+- engramai: {N pass, M fail}  ← list failing tests
+- engram-bench: {N pass, M fail}
+
+## Suggested next step for potato
+{your best guess at what's needed to unblock}
+```
+
+## Reminders / mental model
+
+- The `gid_tasks(graph_path=<v03 db>, status="todo")` call is your **ground truth** for what's left, not this doc.
+- This doc tells you WHERE to read; the design/requirements docs tell you WHAT to build.
+- After EVERY task: `gid_complete` (don't batch — losing track of which is done is the #1 failure mode).
+- Commits should be small and atomic — one task per commit, conventional commit format with task ID.
+- If unsure between two interpretations: pick the one that makes existing tests still pass + matches design.md verbatim. If design.md is ambiguous: that's a STOP condition (#3).
+
+## Done condition for the night
+
+The night's work is "successful" if:
+- §A complete (2 tasks, resolution feature 13/13)
+- Either §B fully complete OR §C fully complete (one full feature is better than two half-features)
+- All `cargo test -p engramai` passes
+- `gid_validate(graph_path=<v03 db>)` clean
+
+Anything beyond that is bonus. Don't sacrifice correctness for coverage.
+
+---
+
+*End of autopilot doc. Total: 4 sections, 53 tasks pointed at, ~286 lines.*
