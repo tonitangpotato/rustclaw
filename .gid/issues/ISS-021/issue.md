@@ -1,7 +1,7 @@
 ---
 id: "ISS-021"
 title: "Message context side-channel — Envelope refactor"
-status: in_progress
+status: closed
 priority: P1
 created: 2026-04-22
 component: "src/context.rs, src/memory.rs, engramai"

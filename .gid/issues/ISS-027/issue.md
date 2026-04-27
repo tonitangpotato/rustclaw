@@ -1,7 +1,7 @@
 ---
 id: "ISS-027"
 title: "Ritual observer needs context injection"
-status: open
+status: closed
 priority: P2
 created: 2026-04-26
 component: "src/ritual.rs"

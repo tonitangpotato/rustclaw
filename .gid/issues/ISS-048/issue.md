@@ -1,7 +1,7 @@
 ---
 id: "ISS-048"
 title: "start_ritual tool misreports 'initializing' state as failure"
-status: open
+status: closed
 priority: P2
 created: 2026-04-26
 component: "src/tools.rs (start_ritual)"

@@ -1,7 +1,7 @@
 ---
 id: "ISS-025"
 title: "Ritual implement phase burns tokens with no output"
-status: open
+status: closed
 priority: P1
 created: 2026-04-24
 component: "src/ritual.rs (implement phase)"

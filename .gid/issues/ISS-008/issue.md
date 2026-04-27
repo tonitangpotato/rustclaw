@@ -1,7 +1,7 @@
 ---
 id: "ISS-008"
 title: "Telegram Disconnect / Reconnect Loop"
-status: open
+status: closed
 priority: P2
 created: 2026-04-19
 component: "src/channels/telegram.rs"
