@@ -1,6 +1,7 @@
 ---
 name: review-design
 description: Systematically review design documents for bugs, inconsistencies, and missing cases
+file_policy: forbidden
 version: "1.1.0"
 author: potato
 triggers:

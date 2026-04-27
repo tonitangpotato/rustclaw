@@ -1,6 +1,7 @@
 ---
 name: review-requirements
 description: Systematically review requirements documents for completeness, testability, and consistency
+file_policy: forbidden
 version: "1.1.0"
 author: potato
 triggers:

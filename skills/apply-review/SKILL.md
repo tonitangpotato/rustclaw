@@ -1,6 +1,7 @@
 ---
 name: apply-review
 description: Apply approved review findings to a document — reads the review file and makes targeted edits
+file_policy: required
 version: "1.0.0"
 author: potato
 triggers:

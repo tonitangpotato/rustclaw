@@ -1,6 +1,7 @@
 ---
 name: review-tasks
 description: Systematically review task breakdowns for completeness, dependency correctness, and implementability
+file_policy: forbidden
 version: "1.1.0"
 author: potato
 triggers:
