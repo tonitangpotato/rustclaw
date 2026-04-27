@@ -12,8 +12,11 @@ Each project has ONE canonical root. Do NOT search for graphs/issues — look th
 - **engram** (monorepo, active, consolidated 2026-04-22 ISS-023) → `/Users/potato/clawd/projects/engram/`
   - GitHub: tonitangpotato/engram-ai (monorepo)
   - Last commit: `3132194 feat: consolidate engram-ai-rust into monorepo (ISS-023)`
-  - Graph: `.gid/graph.db` (SQLite, yaml deprecated). `*.db` gitignored — derived state, local only.
-  - **2026-04-23 ISS-028 Option A done**: manually backfilled 15 issue feature nodes (ISS-001-fts through ISS-029) into graph.db with depends_on/relates_to edges. Active issues now visible via `gid_tasks --project /Users/potato/clawd/projects/engram`. Top priority: iss-021 (subdim-extraction-coverage). iss-024 in_progress (design r3 review). iss-020 blocked on iss-021.
+  - **⚠️ TWO graphs in this repo — DO NOT confuse them:**
+    - `.gid/graph.db` — **issue tracker graph** (19 nodes, ISS-NNN backfill from 2026-04-23). Use for ISS-NNN status queries.
+    - `.gid-v03-context/graph.db` — **v0.3 build graph** (71 nodes: features v03-graph-layer/v03-resolution/v03-retrieval/v03-migration/v03-benchmarks + tasks). Use for ALL v0.3 implementation work. See `.gid-v03-context/PATHS.md`.
+    - **Rule: any v0.3 work (resolution pipeline, graph layer, retrieval, migration, benchmarks) → ALWAYS pass `graph_path: .gid-v03-context/graph.db` to gid_* tools.** I have made this mistake 2× now (2026-04-25, 2026-04-26).
+  - **2026-04-23 ISS-028 Option A done**: manually backfilled 15 issue feature nodes (ISS-001-fts through ISS-029) into `.gid/graph.db` with depends_on/relates_to edges. Top priority: iss-021 (subdim-extraction-coverage). iss-024 in_progress (design r3 review). iss-020 blocked on iss-021.
   - **ISS-029 filed**: deferred historical backfill of pre-2026-04-19 nodes (Options B yml→db migration, C rebuild-from-issues). Hybrid approach recommended if/when needed.
 - **engram-ai-rust** (old repo, preserved but not active) → `/Users/potato/clawd/projects/engram-ai-rust/`
   - potato: "repo不要不要闪，还要都要留着的，只是merge到那个monorepo里面"

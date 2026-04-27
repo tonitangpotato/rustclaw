@@ -119,12 +119,29 @@ If a sub-agent fails a task → DO NOT retry with the same delegation approach. 
 - c) Reduce scope (e.g., write skeleton only, then fill sections)
 A single session should NEVER see the same task fail twice with the same approach.
 
-**Rule 3: Incremental Write Pattern (for large outputs)**
-Any output expected to exceed 200 lines — whether main agent or sub-agent:
-1. **Write skeleton first** — headings, structure, empty sections (~30 lines)
-2. **Fill sections one by one** — each `write_file`/`edit_file` call adds 50–150 lines
-3. **Never write 500+ lines in a single tool call** — if you need to, split into multiple calls
-This is not optional. Large single-write calls are the #1 cause of truncation and context exhaustion.
+**Rule 3: Incremental Write Pattern (for large outputs) — MANDATORY**
+
+**Always use this pattern when writing ANY of:**
+- Design documents (`design.md`, `DESIGN.md`)
+- Requirements documents (`requirements*.md`)
+- Specifications, RFCs, ADRs
+- Postmortem / forensic / review docs
+- Any markdown file with multiple `##` sections expected to be more than ~200 lines
+- Any output you *predict* will exceed 200 lines, regardless of file type
+
+**Default assumption:** if you can't confidently say "this will be under 200 lines," treat it as a long doc and use the incremental pattern. Don't wait until you've half-written 800 lines and the context is straining.
+
+**The pattern (whether main agent or sub-agent):**
+1. **Write skeleton first** — `write_file` once with: title, overview/header, all `##` section headings, each section body just `(TBD)` or a one-line stub. ~30–60 lines total.
+2. **Fill sections one or two at a time** — each `edit_file` call replaces a `(TBD)` stub with 50–200 lines of real content. Two adjacent sections per call is fine; three or more is too many.
+3. **Never write 500+ lines in a single tool call.** If you find yourself composing a giant `write_file` payload, stop, write the skeleton, and switch to per-section `edit_file`.
+4. **Tell the user you're going incremental** if it's a long doc — one line ("I'll write the skeleton then fill sections") is enough so they know what to expect.
+
+**Why this is mandatory, not optional:**
+- Large single-write calls are the #1 cause of output truncation.
+- If context exhausts mid-write, the skeleton-first pattern lets you (or a recovery sub-agent) resume from the same file. Single-shot writes leave a half-baked file with no structure.
+- It forces you to think about structure before prose. Better docs.
+- It surfaces structure problems early ("wait, §7 doesn't make sense before §5") when fixing it costs a 30-second skeleton edit, not a 600-line rewrite.
 
 **Rule 3b: Skeleton-First Append Pattern (for structured list documents)**
 For documents that are a **structured list of items** (review findings, task lists, migration checklists, catalogs — anything with N repeated sub-sections):
