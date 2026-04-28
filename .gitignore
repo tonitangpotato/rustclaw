@@ -22,6 +22,7 @@ target/
 *.mp3
 hello.py
 recall-trace.jsonl
+.gid/runtime/
 
 # Internal docs (not for public repo)
 docs/

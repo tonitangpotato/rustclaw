@@ -14,7 +14,7 @@ Edit `rustclaw.yaml` under `orchestrator.specialists`:
     - id: unique-id        # Required: unique identifier
       name: Display Name   # Optional: human-friendly name
       role: builder        # Required: role for task matching
-      model: claude-opus-4-6  # Optional: model override
+      model: claude-opus-4-7  # Optional: model override
       workspace: /Users/potato/rustclaw  # Optional: working directory
       max_iterations: 25   # Optional: tool loop limit (default 25)
       budget_tokens: 100000  # Optional: token budget
@@ -28,7 +28,7 @@ kill -HUP $(pgrep -f "rustclaw.*run")
 **Available roles**: `builder` (coding), `research` (analysis), `review` (code review), or any custom role.
 
 **Current specialists:**
-- `coder` (Opus 4.6, builder role, 25 iterations, 100k budget)
+- `coder` (Opus 4.7, builder role, 25 iterations, 100k budget)
 - `researcher` (Sonnet 4.5, research role, 15 iterations, 50k budget)
 
 ### Shared Workspace (两个agent共享)

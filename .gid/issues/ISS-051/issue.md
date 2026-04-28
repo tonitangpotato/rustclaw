@@ -124,3 +124,17 @@ Whichever option above is chosen, the self-review loop also needs hardening:
 - **ISS-038** (gid-rs): added file_snapshot post-condition. Same situation — fix in gid-core, not propagated.
 - **ISS-050** (rustclaw): silent ritual wedge on save_state IO error. Independent bug; both happen to manifest in r-950ebf but have no shared cause.
 - **ISS-029** (rustclaw): liveness signal for in-flight rituals. Would help users notice ISS-051 happening (long phase with no progress) but doesn't fix the root cause.
+
+## Implementation tracking — paired with gid-rs ISS-052
+
+The root fix (Option A) is being executed under **gid-rs ISS-052** (`.gid/issues/ISS-052/design.md` in the gid-rs repo). The structural tasks live in the gid-rs graph (`/Users/potato/clawd/projects/gid-rs/.gid/graph.db`) as `iss-052-t01` … `iss-052-t17`. Rustclaw-side checkpoints:
+
+- **T11 (done 2026-04-27, commit `52cba44`)** — `rustclaw/src/ritual_hooks.rs` introduced — `RustclawHooks: RitualHooks` impl wrapping notify / persist / workspace resolve / cancel / stamp_metadata. 429 LOC, 5 unit tests.
+- **T12 + T13a (done 2026-04-27, commit `d940e8b`)** — entry-point migration + dispatcher stubbing landed together (intended to be separate commits but git ops bundled them; behaviorally atomic and tests green at 348 either way).
+  - **T12** — migrated 2 production entry points (`tools.rs::start_ritual`, `channels/telegram.rs::handle_ritual_command`) to `gid_core::ritual::run_ritual(initial, config, Arc::new(RustclawHooks::new(…)))`.
+  - **T13a** — stubbed dispatcher bodies (`run_skill`, `run_shell`, `run_triage`, `run_planning`, `run_harness`, `save_state`) with `Err(anyhow!("ISS-052: ... is a stub after T13a — caller must migrate to run_ritual"))` + `tracing::error!` tripwire. **Deviation from gid-rs design §7.1.1**: design specified `unreachable!()`; we used `Err` because 21 telegram call sites still reach those paths via `/ritual retry|skip|clarify|reply|cancel|resume-from-phase` until T13b — `unreachable!()` would panic the daemon during the T13a→T13b window. `Err` is equally informative as a tripwire and daemon-safe. Approved by potato 2026-04-27 chat. Public API surface (`advance` / `send_event` / `resume_from_phase` / `make_ritual_runner`) preserved.
+  - `src/ritual_runner.rs` shrank 2960 → 2443 lines (517 lines deleted). 348 tests green. Bisect point.
+- **T13b (next, ready)** — delete the public `RitualRunner` API and migrate the 21 telegram call sites to `run_ritual + RustclawHooks` flows or thin event-recording shims. AC1 (≥1500 LOC reduction) and AC3 (zero `match action` against `RitualAction`) enforced here.
+- **T14 / T16 / T17** — dead-code sweep, integration tests (incl. `zero_file_implement_fails_in_prod` regression for r-950ebf), version bumps + manual acceptance.
+
+The T13 → T13a/T13b split was added during T12 implementation when the 17 secondary call sites became visible. See gid-rs `ISS-052/design.md` §7.1.1 and §7.6.

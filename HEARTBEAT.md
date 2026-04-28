@@ -1,8 +1,12 @@
 # HEARTBEAT.md
 
 ## Task Tracking
-Current task plan: `tasks/2026-04-07.md`
-If autopilot is not running and there are uncompleted tasks, remind potato or start `/autopilot tasks/2026-04-07.md`.
+Current task plan: `tasks/2026-04-27-night-autopilot.md` (engram v0.3 night autopilot, 52 tasks)
+- On each heartbeat: count `^- \[x\]` (done) vs `^- \[ \]` (open) in the task file → report progress delta since last heartbeat
+- If autopilot process is NOT running AND uncompleted tasks remain: notify potato via Telegram (do NOT auto-start; he wants to manually `/autopilot` it)
+- If autopilot IS running: just report progress, no notification noise
+- Detect autopilot via: `pgrep -f "autopilot.*2026-04-27-night-autopilot"` (or check `.rustclaw/autopilot.state` if it exists)
+- Watch for stuck autopilot: if no new completed tasks in 3 consecutive heartbeats AND process running → flag as possibly stuck
 
 ---
 

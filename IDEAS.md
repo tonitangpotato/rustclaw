@@ -3,6 +3,119 @@
 > All ideas captured by RustClaw's Idea Intake pipeline.
 > Format: newest first. Each idea has a unique ID for cross-referencing.
 
+## IDEA-20260427-01: GTM Forensics — 成功产品GTM动作时间轴库 + 因果归因层
+- **Date**: 2026-04-27
+- **Source**: potato 在社媒看到 GrowthHunt.ai 推广帖（早期产品，目标年底拆100家）
+- **Category**: product / data / growth-tooling
+- **Tags**: gtm, growth, marketing_intelligence, time_series, causal_inference, indie_hackers, product_marketing, xinfluencer_adjacent
+- **Effort**: Medium（MVP 2-3周，标注schema是真难点）
+- **Self-use value**: HIGH — potato自己在做xinfluencer/RustClaw/engramai的GTM，需要这些数据
+
+### Summary
+把过去1-2年最成功的AI产品（Cursor, Lovable, Genspark, Manus, Cognition等）从冷启动那天开始的**所有公开GTM痕迹**做时间轴对齐：推文、demo视频、Product Hunt、官网迭代、KOL接力、定价变化、付费节点。每条动作标注：渠道、动作类型、传播量级、当时主打的narrative。从公开痕迹反推私域转化曲线。
+
+GrowthHunt.ai在做的是**描述性时间轴**。我们差异化叠加**因果归因层**：不只回答"他们做了什么"，而是回答"哪个动作真的驱动了爆点，哪些是 coincidence"——用 causal-agent 的do-calculus框架。
+
+### Why This Matters
+
+**自用价值**：
+- potato自己在GTM RustClaw/engramai/GID/xinfluencer，急需这种数据
+- 当前所有"GTM建议"都是事后总结+幸存者偏差，没有结构化数据
+- 自己用 → 迭代闭环最短 → 产品自然变好
+
+**受众规模**：
+- Indie hackers、早期SaaS团队、AI产品创始人——都卡在"产品做完没人知道"
+- 他们目前的解决方案：读Twitter线程、看Lenny's Newsletter、瞎抄
+- 付费意愿强（这群人愿意为growth tooling掏钱）
+
+### The Three-Layer Architecture
+
+**Layer 1 — Forensic Data Collection（痕迹考古）**
+- 数据源：Twitter/X archive、Product Hunt history、Wayback Machine（官网迭代）、YouTube demo、HN posts、Reddit
+- 时间精度：到天/到小时（爆点前后24h动作密集采样）
+- 每个产品建一个时间轴文件：`products/{name}/timeline.yaml`
+- Schema：`timestamp | channel | action_type | content_ref | reach_estimate | narrative_tag`
+
+**Layer 2 — Action Taxonomy（动作分类）**
+- 这是最难的部分——本体工程
+- 候选维度：
+  - 渠道类型（owned/earned/paid）
+  - 动作类型（demo_drop, kol_endorse, price_change, feature_launch, controversy, comparison_post...）
+  - Narrative tag（"you describe we build"、"vibe coding"、"agentic"...）
+  - 受众类型（dev_twitter, product_twitter, vc_twitter, mainstream...）
+- **冷启动策略**：先手工标5个产品，提取出现频率高的动作类型，再让meta-agent批量标剩下的
+
+**Layer 3 — Causal Attribution（因果归因层）** ← 我们的差异化
+- GrowthHunt只能描述时间轴。我们叠加：
+- 用 causal-agent 做反事实推理：
+  - "如果Cursor没有Andrej Karpathy那条推，增长曲线会是什么样？"
+  - "Lovable的demo视频策略，去掉Anton的followers基数后胜率多少？"
+- 输出**反事实置信区间**，不是单点估计
+- 这是 GrowthHunt 做不了的，因为他们没有因果框架
+
+**Layer 4 — Personalized Playbook Recommender**
+- 用户输入：产品类型、当前阶段、资源约束（followers数、预算、团队大小）
+- 系统从库里检索**类似情境**下成功的动作组合
+- 输出：3个最可能work的下一步动作 + 置信度 + 反事实警告（"这套对Anton有效，因为他有20k followers，你只有200，胜率降到X%"）
+
+### Integration with Existing Stack
+
+这个项目**不是另起炉灶**，是把 potato 已有的拼图组装：
+
+- **xinfluencer** → 提供社媒数据采集pipeline + DB schema → Layer 1的引擎
+- **causal-agent** → 提供do-calculus + 反事实推理 → Layer 3的引擎
+- **engramai** → 存储产品时间轴的episodic memory → 时间推理能力
+- **GID** → 用图建模"动作→后果"的依赖关系 → 跨产品pattern挖掘
+- **The Unusual / UserGrow** → GEO/visibility tooling → Layer 4的reach estimation
+
+→ 这个项目是 potato 整个工具链的**对外应用层**——证明这些底层工具组合起来能打。
+
+### Risks / Open Questions
+
+1. **幸存者偏差**：只拆成功产品，会过度归因到"成功动作"。需要也拆**做了同样动作但失败的产品**作为反事实样本——这个数据更难找。
+2. **数据可得性**：早期推文可能被删/账号被设为私密。Wayback Machine覆盖度也有限。
+3. **标注一致性**：手工标注20+产品，schema会不断变——需要版本化标注协议。
+4. **GrowthHunt竞争**：他先发，但产品还很早期。我们的factor差异化（因果层）需要时间build——如果他们先做大，我们就成了"另一个GrowthHunt"。
+5. **法律灰色地带**：爬Twitter历史数据、抓PH archive，TOS边缘——需要明确合规边界。
+
+### MVP Scope（2-3周可达）
+
+**Week 1**：
+- 选3个产品做手工时间轴（Cursor, Lovable, 一个自己熟悉的小产品做baseline）
+- 定义v1标注schema（5-10个动作类型，3-5个narrative tag）
+- 建数据采集pipeline骨架（复用xinfluencer的Twitter scraper）
+
+**Week 2**：
+- 扩展到10个产品（一半手工，一半meta-agent辅助）
+- 简单的可视化时间轴（Gantt-like view）
+- causal-agent接入做1-2个反事实case study作为demo
+
+**Week 3**：
+- 写一篇深度博客："Cursor的GTM真的能复制吗？反事实分析" → 发HN/dev twitter
+- 这本身就是产品的GTM动作（meta!）
+- 收集waitlist + 明确v0.2方向
+
+### Self-Use First Strategy
+
+每拆一个产品，立刻问：**"这套动作里哪些我能抄给RustClaw/engramai？"** 把答案写成自己的GTM action plan。
+
+→ 产品的第一个用户是自己 → 反馈循环最短 → 自然知道哪些功能真正有用。
+
+### Action Items
+
+- [ ] 侦察：仔细看GrowthHunt.ai当前做到哪一步（他们的Twitter、官网、demo）
+- [ ] 决定：作为xinfluencer的子模块，还是独立项目？
+- [ ] 如果独立 → 起名 + 建repo
+- [ ] 起草requirements.md（master + features split if needed）
+- [ ] 第一个手工时间轴：选谁？建议Cursor（数据最丰富）+ 一个失败案例（反事实baseline）
+
+### Related
+- IDEA-2026? xinfluencer brand audit pipeline
+- causal-agent Pearl framework
+- The Unusual visibility tool
+
+---
+
 ## IDEA-20260422-02: AI Tool Benchmark Arena — agent-native 评测中枢 + benchmark-writing agent
 - **Date**: 2026-04-22
 - **Source**: potato 原创（触发自"engram 要不要建网页"讨论 + 正在做 cogmembench 的经验）

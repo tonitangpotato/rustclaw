@@ -123,12 +123,38 @@ Tracked: `.gid/issues/ISS-020-project-path-discovery-friction.md`
 - Storage audit built into baseline test: asserts 0 Quarantined, all items land as `Stored(_)` — ensures store_raw migration is a behavioral no-op
 - **Phase 1 scope expanded (justified)**: store_raw migration + fixture re-design + for_testing refactor all pulled into Phase 1 as root-fix prerequisites (details in `.gid/issues/ISS-021.../issue.md` "Phase 1 Execution Record")
 
+### engram v0.3 Migration — T9 complete (2026-04-27)
+- Crate topology: `engramai-migrate` is a separate crate from `engramai`. T8 kept them decoupled via `RecordProcessor` trait. **T9 = first cross-crate dep edge**: added `engramai = { path = "../engramai" }` so `PipelineRecordProcessor` can call `resolve_for_backfill` + `apply_graph_delta`.
+- `processor.rs` (470 lines, 10 unit tests): wires migration cursor → resolution pipeline → graph layer.
+- **Tech debt — must not forget**: design §5.2 says "single SQLite transaction wraps apply + checkpoint advance", but `apply_graph_delta` opens its own tx internally. T9 uses two-step commit + idempotent replay (`graph_applied_deltas` keyed on `(memory_id, delta_hash)`). Equivalent end-to-end semantics (at-least-once apply, exactly-once durable effect, monotone checkpoint), but literal single-tx wording weakened.
+  - Logged in 3 places: `processor.rs` module docstring §"Atomicity model"; `.gid/features/v03-migration/design.md` §5.2 implementation note (2026-04-27); GID task `task:mig-followup-graph-delta-borrowed-tx` in `.gid-v03-context/graph.db` (P2, not blocking v0.3).
+  - Lift when: v03-graph-layer touches `apply_graph_delta` signature for other reasons, OR before any concurrent-writer migration mode lands.
+
+### engram v0.3 — Honest Progress Numbers (2026-04-27 correction)
+
+**Previous claim "v0.3 ~95% complete" was wrong** — based on task-status counts, not on whether the system actually works end-to-end. Corrected to dual-track reporting per GUARD-2 (never silent degrade applies to internal sitreps too):
+
+- **Component / surface area: ~90%** — APIs, plans (5 variants), fusion, classifier, traces, scorers, drivers, gate evaluator, reproducibility records all written. T16 retrieval acceptance test passes (validates pure-function components in isolation).
+- **End-to-end functionality: ~60%** — `Memory::graph_query` and `Memory::graph_query_locked` are STUBS returning `RetrievalError::Internal("not yet implemented")`. The classifier→plan-dispatch→fusion→trace orchestrator that glues all the components together does not exist. Therefore: no real query can be answered, no real benchmark gate can run, no migration query-parity check can execute.
+- **Release-ready: NO** — would ship a system that errors on every retrieval call.
+
+**Root cause of the misreport**: 16/16 retrieval tasks were marked `done` (incl. `task:retr-impl-graph-query-api` whose description says "implement Memory::graph_query"), but the body was a `unimplemented!()`-style stub. Component tests covered the parts; nobody had an e2e test asserting the orchestrator stub message disappears. **State-deception bug.**
+
+**Fix landed 2026-04-27** (this session):
+- `task:retr-impl-graph-query-api` reverted from `done` → `in_progress` with corrected description. **Marking it done was the bug — undone.**
+- 5 follow-up tasks filed under it (linear depends_on chain): `retr-impl-orchestrator-{classifier-dispatch, plan-execution, fusion-assembly, locked-mode}` + `retr-test-orchestrator-e2e`. The last one's definition-of-done explicitly requires deleting the `*_stub_returns_internal_error` tests in `api.rs` so the false-done can't recur.
+- Two skip-aware bench drivers landed: `cognitive_regression` (GOAL-5.6) + `migration_integrity` (GOAL-5.7). Both probe the orchestrator stub and emit `MetricSnapshot::set_missing(...)` → `GateStatus::Error` per GUARD-2. Tests: 5/5 each, 10/10 new tests, **2042/2042 workspace tests pass** (only 6 ignored — all documented as orchestrator-blocked).
+- `feature:v03-benchmarks` annotated with `blocked_by: task:retr-impl-orchestrator-classifier-dispatch` and `gates_blocked_advisory: ["GOAL-5.6", "GOAL-5.7"]`.
+
+**Pattern lesson**: any task that says "implement X" must have an e2e test that *fails when X is a stub*. Component tests passing is necessary but not sufficient. The skip-aware probe-pattern (`probe_*_status() -> Option<String>` with explicit stub-message detection) is the canonical mechanism — used by `test_preservation` (migration tool), now `cognitive_regression` (orchestrator), `migration_integrity` (both).
+
 ## Core Rules
 
 - **NEVER simplify the architecture** — follow the design (potato's explicit rule)
 - Use GID for code structure analysis, dependency tracking, impact queries, and task management
 - **NEVER fabricate numbers** — always compute from data
 - Double-write rule: MEMORY.md + daily log + engram for key learnings
+- **CLI and MCP are thin wrappers over rust crates** (potato 2026-04-27). All non-trivial logic lives in the library; binary/MCP server only parses input and delegates. Applies project-wide (engram, gid-rs, rustclaw). Smell: a "phase driver" or any non-trivial logic in `main.rs` → push it into the library. Concrete: engram migration `migrate` subcommand goes into `crates/engram-cli/src/main.rs` with logic in `engramai-migrate` lib — no new binary, no logic in main.rs.
 
 ### Architecture Notes
 - **context.rs** is the new "structured metadata" layer between channels and the agent

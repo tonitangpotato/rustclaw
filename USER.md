@@ -7,7 +7,7 @@
 
 ## Model Preferences
 
-**Coding work**: Use **Opus 4.6** (`claude-opus-4-6`)
+**Coding work**: Use **Opus 4.7** (`claude-opus-4-7`)
 - Implementing features, debugging, architecture, code reviews
 
 **General conversation**: Use **Sonnet 4.5** (`claude-sonnet-4-5-20250929`)
