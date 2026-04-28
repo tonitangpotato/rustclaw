@@ -42,6 +42,8 @@ mod memory_migrate;
 mod ritual_hooks;
 mod ritual_registry;
 mod ritual_runner;
+#[cfg(test)]
+mod ritual_integration_tests;
 mod tools;
 pub mod tool_stats;
 mod tts;
