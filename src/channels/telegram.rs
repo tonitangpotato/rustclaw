@@ -1278,17 +1278,6 @@ Choose a model:", current),
         true
     }
 
-    /// Create a notify callback that sends Telegram messages to the given chat.
-    fn make_ritual_runner(&self, chat_id: i64) -> crate::ritual_runner::RitualRunner {
-        crate::ritual_runner::RitualRunner::with_registries(
-            self.runner.workspace_root().to_path_buf(),
-            self.runner.llm_client(),
-            self.make_notify_fn(chat_id),
-            self.ritual_cancel_registry.clone(),
-            self.ritual_event_registry.clone(),
-        ).with_agent_runner(self.runner.clone())
-    }
-
     /// Discover known projects that have `.gid/` directories (indicating GID-managed projects).
     /// Returns (display_name, absolute_path) pairs.
     fn discover_projects(&self) -> Vec<(String, String)> {
@@ -2539,49 +2528,28 @@ pub async fn start(config: TelegramConfig, runner: Arc<AgentRunner>) -> anyhow::
     // *runner's* `.gid/rituals/` (not the ritual's `target_root`), so a
     // single pass against the rustclaw workspace covers every ritual
     // this daemon has ever spawned.
+    // Sweep orphan ritual state files at startup. ISS-052 T13b: this used
+    // to construct a throwaway `RitualRunner` just to call `sweep_orphans()`,
+    // which was wasteful (allocating an LLM client we never call). Now we
+    // call the free function directly against the rituals dir.
     {
-        // Build a throwaway runner just for the sweep. The sweep itself is
-        // pure FSM + filesystem (no LLM calls), but RitualRunner::new()
-        // requires an LLM client and notify fn — we satisfy them with the
-        // configured client and a no-op notify, then drop the runner.
-        let workspace = bot.runner.workspace_root().to_path_buf();
-        match crate::llm::create_client(&bot.runner.config().llm) {
-            Ok(client) => {
-                let sweep_llm = Arc::new(tokio::sync::RwLock::new(client));
-                let no_notify: crate::ritual_runner::NotifyFn = Arc::new(|_| {
-                    Box::pin(async {})
-                });
-                let sweep_runner = crate::ritual_runner::RitualRunner::new(
-                    workspace,
-                    sweep_llm,
-                    no_notify,
+        let rituals_dir = bot.runner.workspace_root().join(".gid/rituals");
+        match crate::ritual_runner::sweep_orphans(&rituals_dir) {
+            Ok(swept) if !swept.is_empty() => {
+                tracing::warn!(
+                    count = swept.len(),
+                    "swept {} zombie ritual(s) at startup",
+                    swept.len()
                 );
-                match sweep_runner.sweep_orphans() {
-                    Ok(swept) if !swept.is_empty() => {
-                        tracing::warn!(
-                            count = swept.len(),
-                            "swept {} zombie ritual(s) at startup",
-                            swept.len()
-                        );
-                        for (id, reason) in &swept {
-                            tracing::warn!(ritual_id = %id, %reason, "  → cancelled");
-                        }
-                    }
-                    Ok(_) => {
-                        tracing::debug!("orphan sweep: no zombies found");
-                    }
-                    Err(e) => {
-                        tracing::error!("orphan sweep failed: {}", e);
-                    }
+                for (id, reason) in &swept {
+                    tracing::warn!(ritual_id = %id, %reason, "  → cancelled");
                 }
             }
+            Ok(_) => {
+                tracing::debug!("orphan sweep: no zombies found");
+            }
             Err(e) => {
-                // LLM creation failed — daemon will likely fail later anyway,
-                // but the sweep is best-effort so we don't abort startup.
-                tracing::error!(
-                    "orphan sweep skipped: could not build LLM client: {}",
-                    e
-                );
+                tracing::error!("orphan sweep failed: {}", e);
             }
         }
     }
