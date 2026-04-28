@@ -134,11 +134,11 @@
 
 ### DoD
 
-- [ ] 三个 phase 循环都有 heartbeat tick（找一个 tick 点即可，没有就在 phase 入口/出口打两次，README 标 wedged 阈值放宽到 5min）。
-- [ ] tool 输出 health。
-- [ ] README.md 写好。
-- [ ] commit + push: `feat: ISS-029b heartbeat + status reporting`
-- [ ] close ISS-029 ritual。
+- [x] 三个 phase 循环都有 heartbeat tick（采用 drive_event_loop 的事件循环作为统一 tick 点 —— Implementing/Reviewing/Verifying 都通过它，比每 phase 单独打更 robust）。
+- [x] tool 输出 health（rustclaw `gid_ritual_status` 渲染 `- **Health**: <classification>` 行）。
+- [x] README.md 写好（`RITUAL_RUNTIME.md` 在 repo root，因 `.gid/runtime/` + `docs/` 都被 gitignore）。
+- [x] commit + push: `feat: ISS-029b heartbeat + status reporting` (gid-rs 7ec0079, rustclaw bfd2ac0)
+- [ ] close ISS-029 ritual（potato 醒来后手动确认）
 
 ### 实施提示
 
