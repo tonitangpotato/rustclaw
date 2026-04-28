@@ -1579,6 +1579,91 @@ fn sweep_orphans_in(rituals_dir: &Path) -> Result<Vec<(String, String)>> {
     Ok(swept)
 }
 
+// ── ritual state IO (free functions) ─────────────────────────────────────
+//
+// ISS-052 T13b commit 1: extract state-file readers from RitualRunner so
+// `/ritual` subcommand handlers can load state without constructing a full
+// runner. RitualRunner itself will be deleted in commit 6.
+//
+// Writes go through `RustclawHooks::persist_state` (driven by gid-core's
+// `run_ritual` / `resume_ritual`) — there is intentionally no public writer
+// here. State files are owned by the state machine, not by call sites.
+
+/// Path of a ritual's state file inside `rituals_dir`.
+pub fn state_path_for(rituals_dir: &Path, ritual_id: &str) -> PathBuf {
+    rituals_dir.join(format!("{}.json", ritual_id))
+}
+
+/// Load state for a specific ritual by ID. Errors if missing or unparsable.
+pub fn load_state_by_id(rituals_dir: &Path, ritual_id: &str) -> Result<RitualState> {
+    let path = state_path_for(rituals_dir, ritual_id);
+    if !path.exists() {
+        return Err(anyhow::anyhow!("Ritual {} not found", ritual_id));
+    }
+    let data = std::fs::read_to_string(&path)?;
+    let state: RitualState = serde_json::from_str(&data)?;
+    Ok(state)
+}
+
+/// List all ritual states in `rituals_dir`, sorted by `updated_at` desc.
+/// Falls back to `legacy_state_path` if `rituals_dir` is empty.
+/// Defensive: corrupt or unparsable files are skipped with a warning.
+pub fn list_rituals(rituals_dir: &Path, legacy_state_path: Option<&Path>) -> Result<Vec<RitualState>> {
+    let mut rituals = Vec::new();
+
+    if rituals_dir.exists() {
+        for entry in std::fs::read_dir(rituals_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().map_or(false, |e| e == "json") {
+                if let Ok(data) = std::fs::read_to_string(&path) {
+                    if let Ok(state) = serde_json::from_str::<RitualState>(&data) {
+                        rituals.push(state);
+                    }
+                }
+            }
+        }
+    }
+
+    if rituals.is_empty() {
+        if let Some(legacy) = legacy_state_path {
+            if legacy.exists() {
+                if let Ok(data) = std::fs::read_to_string(legacy) {
+                    if let Ok(state) = serde_json::from_str::<RitualState>(&data) {
+                        rituals.push(state);
+                    }
+                }
+            }
+        }
+    }
+
+    rituals.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(rituals)
+}
+
+/// Find the most relevant active ritual.
+/// Priority: paused (waiting for user input) > non-terminal active > none.
+pub fn find_latest_active(rituals_dir: &Path, legacy_state_path: Option<&Path>) -> Result<Option<RitualState>> {
+    let rituals = list_rituals(rituals_dir, legacy_state_path)?;
+    if let Some(r) = rituals.iter().find(|r| r.phase.is_paused()) {
+        return Ok(Some(r.clone()));
+    }
+    Ok(rituals.into_iter().find(|r| {
+        !r.phase.is_terminal() && r.phase != RitualPhase::Idle
+    }))
+}
+
+/// Find the ritual currently waiting for approval, if any.
+pub fn find_waiting_approval(rituals_dir: &Path, legacy_state_path: Option<&Path>) -> Result<Option<RitualState>> {
+    let rituals = list_rituals(rituals_dir, legacy_state_path)?;
+    Ok(rituals.into_iter().find(|r| r.phase == RitualPhase::WaitingApproval))
+}
+
+/// Sweep zombie ritual state files. See `sweep_orphans_in` for full semantics.
+pub fn sweep_orphans(rituals_dir: &Path) -> Result<Vec<(String, String)>> {
+    sweep_orphans_in(rituals_dir)
+}
+
 fn parse_strategy(output: &str) -> ImplementStrategy {
     // Try to find JSON in the output
     if let Some(start) = output.find('{') {
