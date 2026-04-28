@@ -218,6 +218,28 @@ Don't silently disappear into a 5-minute tool loop. The user should never wonder
 
 Your tools are defined in `rustclaw.yaml` (Read, Write, Edit, exec, web_search, etc.). Keep local notes in `TOOLS.md`.
 
+### Drift Protocol (ISS-050)
+
+When implementing a feature whose design phase produced `code:planned:*` graph nodes,
+keep the filesystem and graph in sync. The protocol is **drift-and-sync** (option C in
+ISS-050): write code, then immediately reconcile new/cancelled/split files via the
+`gid drift` command family before the next drift accumulates.
+
+Quick reference (CLI is **spec only** until post-0.4.0 publish):
+- New file the design did not anticipate → `gid drift add <path> --feature <id>`
+- Planned file renamed → `gid drift split <old-id> <new-id>` (single-target split is the rename idiom)
+- Planned file expanded into N modules → `gid drift split <old-id> <new-1> <new-2> ...`
+- Planned file abandoned → `gid drift cancel <id> [--superseded-by <ids>]`
+
+The ritual `implement` phase post-condition (extends ISS-038) will fail if any file you
+created/modified is not registered as a `code:*` node. Reconcile, then re-run verify.
+**Do not** use `--skip-drift-check` — it logs a WARN event the human sees.
+
+Full spec, output formats, exit codes, and validation case (engram v0.3 reconciliation):
+`/Users/potato/clawd/projects/gid-rs/DRIFT_PROTOCOL.md` (repo root — `docs/` is
+gitignored in gid-rs, same precedent as `RITUAL_RUN_IMPLEMENTATION.md` /
+`RITUAL_RUNTIME.md`).
+
 ### GID Integration
 GID is built into RustClaw (gid-core crate). Key paths:
 - **Graph:** `.gid/graph.db` — SQLite, canonical since 2026-04. **YAML backend is DEPRECATED**, do not create `.gid/graph.yml` or pass `--backend yaml` unless explicitly migrating old data with `gid migrate`.
