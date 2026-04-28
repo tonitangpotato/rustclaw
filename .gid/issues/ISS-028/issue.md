@@ -1,16 +1,27 @@
 ---
 id: "ISS-028"
 title: "Duplicate rituals can launch for same work unit"
-status: open
+status: closed
 priority: P2
 created: 2026-04-26
+closed: 2026-04-28
 component: "src/ritual.rs, .gid/runtime/rituals/"
 related: ["ISS-030"]
 ---
 # ISS-028: Duplicate rituals on the same work_unit run in parallel, burn redundant tokens, risk divergent edits
 
-**Status:** open
+**Status:** closed
+**Closed:** 2026-04-28
 **Severity:** high — wastes ~18k tokens per duplicate and enables silent edit races on the target repo
+
+## Resolution (2026-04-28)
+
+Both prevention and detection landed in autopilot session:
+
+- **Task 1a** (commit `ec3a892` — `feat: ISS-028a duplicate ritual prevention`): added `RitualConflict::AlreadyActive { ritual_id, phase, started_at }` variant + `find_active_for_work_unit()` pre-flight check in `RitualRunner::start_with_work_unit`. `StartRitualTool` formats the conflict into agent-readable error per GOAL-3. 3 unit tests cover (a) no-active happy path, (b) duplicate work_unit → AlreadyActive, (c) terminal-then-restart → ok.
+- **Task 1b** (commit `3e65271` — `feat: ISS-028b orphan ritual reconciler`): `reconcile_terminal_duplicates()` + `reconcile_orphans()` scan `runtime/rituals/` once at daemon startup (wired into `telegram.rs::start()`), emit WARN logs grouping terminal duplicates by `work_unit.label()`. **Read-only — never deletes ritual files** (GOAL-5). 4 unit tests; all 44 ritual tests green.
+
+Backing ritual `r-5f2c21` (Done, 2026-04-27) covered the original implementation pass; 1a/1b were follow-on direct commits per autopilot plan.
 **Filed:** 2026-04-26
 **Reporter:** RustClaw (forensic audit of `.gid/rituals/` after ISS-043 work)
 **Related:**
