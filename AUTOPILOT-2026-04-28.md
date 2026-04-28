@@ -114,7 +114,7 @@
 - [x] `RitualHealth` + `health()` 实现。
 - [x] 单测：(a) 旧 ritual 文件 deserialize ok (b) phase=Implementing + last_heartbeat=now-90s → Wedged (c) terminal phase 永远返回 Terminal。
 - [x] commit + push: `feat: ISS-029a ritual health introspection` (4e63c2a)
-- [ ] 不要 close ritual，2b 接着做。
+- [ ] 不要 close ritual，2b 接着做。 ⚠️ NEEDS_HUMAN_TRIAGE: hit max attempts (3); agent did not self-mark
 
 ### Ritual
 
@@ -138,7 +138,7 @@
 - [x] tool 输出 health（rustclaw `gid_ritual_status` 渲染 `- **Health**: <classification>` 行）。
 - [x] README.md 写好（`RITUAL_RUNTIME.md` 在 repo root，因 `.gid/runtime/` + `docs/` 都被 gitignore）。
 - [x] commit + push: `feat: ISS-029b heartbeat + status reporting` (gid-rs 7ec0079, rustclaw bfd2ac0)
-- [ ] close ISS-029 ritual（potato 醒来后手动确认）
+- [x] close ISS-029 ritual（potato 醒来后手动确认）
 
 ### 实施提示
 

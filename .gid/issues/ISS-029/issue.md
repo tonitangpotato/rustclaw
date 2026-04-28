@@ -1,15 +1,36 @@
 ---
 id: "ISS-029"
 title: "Ritual state liveness signal — detect stuck/dead rituals"
-status: open
+status: closed
 priority: P2
 created: 2026-04-26
+closed: 2026-04-28
 component: "src/ritual.rs"
 related: ["ISS-025"]
 ---
 # ISS-029: Agent reads ritual state file mid-write, mistakes ongoing ritual for stuck
 
-**Status:** open
+**Status:** closed
+**Closed:** 2026-04-28
+
+## Resolution
+
+Shipped via two-task split (autopilot 2026-04-28):
+
+- **ISS-029a** — gid-rs `a919d10` (add `phase_entered_at` + `last_heartbeat` to `V2State` with `#[serde(default)]` for back-compat) + `4e63c2a` (`RitualHealth { Healthy | LongRunning | Wedged | Terminal }` enum + `health(now)` method).
+- **ISS-029b** — gid-rs `7ec0079` (heartbeat tick wired into `drive_event_loop` — single tick point covers Implementing/Reviewing/Verifying instead of per-phase tokio tasks; simpler than the original sidecar-file design and avoids state-file churn) + rustclaw `bfd2ac0` (health deserialization + `gid_ritual_status` rendering `- **Health**: <classification>` line, with serde defaults for forward/back compat).
+
+Documentation: `RITUAL_RUNTIME.md` at rustclaw repo root (the `.gid/runtime/` and `docs/` paths were both gitignored).
+
+Deviation from "Notes for the implementer":
+- Original suggestion was tokio task per phase + `r-XXXX.heartbeat` sidecar file. Implementation instead uses the existing `drive_event_loop` event-loop iteration as the unified tick point. Reasoning: drive_event_loop already runs for every phase, so a single tick site is more robust than three coordinated per-phase tasks; and writing `last_heartbeat` directly to the state file (instead of a sidecar) is fine because event-loop iterations are coarse-grained — no churn observed.
+- Wedged threshold: `now - last_heartbeat > 60s` (2× tick interval), per design.
+
+Tests: gid-rs 71/71 v2_executor green; rustclaw `cargo test ritual_registry` green.
+
+---
+
+**Original status was:** open
 **Severity:** low — diagnostic confusion only (no data loss), but caused agent to misreport ritual health to user and almost trigger an unnecessary cancel
 **Filed:** 2026-04-26
 **Reporter:** RustClaw (caught self misdiagnosing live ritual r-430839 as "stuck for 5 minutes" when it was actually progressing normally)
