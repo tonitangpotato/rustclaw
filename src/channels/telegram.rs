@@ -1001,8 +1001,14 @@ Choose a model:", current),
                 }
             }
             "retry" => {
-                let runner = self.make_ritual_runner(chat_id);
-                let state = runner.load_state()?;
+                let rituals_dir = self.runner.workspace_root().join(".gid/rituals");
+                let state = match crate::ritual_runner::find_latest_active(&rituals_dir, None)? {
+                    Some(s) => s,
+                    None => {
+                        self.send_message(chat_id, "No active ritual to retry.", None).await?;
+                        return Ok(());
+                    }
+                };
                 if state.phase != gid_core::ritual::V2Phase::Escalated
                     && state.phase != gid_core::ritual::V2Phase::WaitingClarification
                 {
@@ -1013,23 +1019,18 @@ Choose a model:", current),
                     ).await?;
                 } else {
                     self.send_message(chat_id, "🔄 Retrying ritual...", None).await?;
-                    let bot = self.clone();
-                    tokio::spawn(async move {
-                        match runner.send_event(RitualEvent::UserRetry).await {
-                            Ok(state) => {
-                                let msg = format!("Ritual retry finished in {} phase.", state.phase.display_name());
-                                let _ = bot.send_message(chat_id, &msg, None).await;
-                            }
-                            Err(e) => {
-                                let _ = bot.send_message(chat_id, &format!("❌ Retry failed: {}", e), None).await;
-                            }
-                        }
-                    });
+                    self.spawn_resume(chat_id, state.id, gid_core::ritual::UserEvent::Retry);
                 }
             }
             "skip" => {
-                let runner = self.make_ritual_runner(chat_id);
-                let state = runner.load_state()?;
+                let rituals_dir = self.runner.workspace_root().join(".gid/rituals");
+                let state = match crate::ritual_runner::find_latest_active(&rituals_dir, None)? {
+                    Some(s) => s,
+                    None => {
+                        self.send_message(chat_id, "No active ritual to skip phase.", None).await?;
+                        return Ok(());
+                    }
+                };
                 if state.phase.is_terminal() || state.phase == gid_core::ritual::V2Phase::Idle {
                     self.send_message(chat_id, "No active ritual to skip phase.", None).await?;
                 } else {
@@ -1038,18 +1039,7 @@ Choose a model:", current),
                         &format!("⏭️ Skipping {} phase...", state.phase.display_name()),
                         None,
                     ).await?;
-                    let bot = self.clone();
-                    tokio::spawn(async move {
-                        match runner.send_event(RitualEvent::UserSkipPhase).await {
-                            Ok(state) => {
-                                let msg = format!("Skipped to {} phase.", state.phase.display_name());
-                                let _ = bot.send_message(chat_id, &msg, None).await;
-                            }
-                            Err(e) => {
-                                let _ = bot.send_message(chat_id, &format!("❌ Skip failed: {}", e), None).await;
-                            }
-                        }
-                    });
+                    self.spawn_resume(chat_id, state.id, gid_core::ritual::UserEvent::SkipPhase);
                 }
             }
             "done" => {
@@ -1194,8 +1184,14 @@ Choose a model:", current),
                 if clarification.is_empty() {
                     self.send_message(chat_id, "⚠️ Usage: `/ritual clarify <your response>`", None).await?;
                 } else {
-                    let runner = self.make_ritual_runner(chat_id);
-                    let state = runner.load_state()?;
+                    let rituals_dir = self.runner.workspace_root().join(".gid/rituals");
+                    let state = match crate::ritual_runner::find_latest_active(&rituals_dir, None)? {
+                        Some(s) => s,
+                        None => {
+                            self.send_message(chat_id, "No active ritual.", None).await?;
+                            return Ok(());
+                        }
+                    };
                     if state.phase != gid_core::ritual::V2Phase::WaitingClarification {
                         self.send_message(
                             chat_id,
@@ -1204,20 +1200,11 @@ Choose a model:", current),
                         ).await?;
                     } else {
                         self.send_message(chat_id, "💬 Received clarification, re-triaging...", None).await?;
-                        let bot = self.clone();
-                        tokio::spawn(async move {
-                            match runner.send_event(RitualEvent::UserClarification { response: clarification }).await {
-                                Ok(state) => {
-                                    if let Err(e) = runner.save_state(&state) {
-                                        tracing::error!("Failed to save ritual state: {}", e);
-                                    }
-                                    tracing::info!("Clarification processed, now in {} phase", state.phase.display_name());
-                                }
-                                Err(e) => {
-                                    let _ = bot.send_message(chat_id, &format!("❌ Clarification failed: {}", e), None).await;
-                                }
-                            }
-                        });
+                        self.spawn_resume(
+                            chat_id,
+                            state.id,
+                            gid_core::ritual::UserEvent::Clarification { response: clarification },
+                        );
                     }
                 }
             }
@@ -1229,9 +1216,9 @@ Choose a model:", current),
                     .unwrap_or("all")
                     .trim()
                     .to_string();
-                let runner = self.make_ritual_runner(chat_id);
+                let rituals_dir = self.runner.workspace_root().join(".gid/rituals");
                 // Find rituals waiting for approval
-                let waiting: Vec<_> = runner.list_rituals()?
+                let waiting: Vec<_> = crate::ritual_runner::list_rituals(&rituals_dir, None)?
                     .into_iter()
                     .filter(|r| r.phase == gid_core::ritual::V2Phase::WaitingApproval)
                     .collect();
@@ -1267,23 +1254,13 @@ Choose a model:", current),
                         None,
                     ).await?;
                 } else {
-                    let ritual_id = state.id.clone();
                     let task_preview: String = state.task.chars().take(60).collect();
                     self.send_message(chat_id, &format!("✅ Applying findings to ritual '{}': {}", task_preview, approved), None).await?;
-                    let bot = self.clone();
-                    tokio::spawn(async move {
-                        match runner.send_event_to(&ritual_id, RitualEvent::UserApproval { approved }).await {
-                            Ok(state) => {
-                                if let Err(e) = runner.save_state(&state) {
-                                    tracing::error!("Failed to save ritual state: {}", e);
-                                }
-                                tracing::info!("Approval processed, now in {} phase", state.phase.display_name());
-                            }
-                            Err(e) => {
-                                let _ = bot.send_message(chat_id, &format!("❌ Approval failed: {}", e), None).await;
-                            }
-                        }
-                    });
+                    self.spawn_resume(
+                        chat_id,
+                        state.id,
+                        gid_core::ritual::UserEvent::Approval { approved },
+                    );
                 }
             }
             task => {
