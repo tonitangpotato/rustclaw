@@ -689,8 +689,9 @@ Choose a model:", current),
                     // /stop — cancel main session + all sub-agents + all running rituals
                     let main_cancelled = self.runner.cancel_session(&session_key).await;
                     let sub_count = self.runner.cancel_all_subagents().await;
-                    let ritual_runner = self.make_ritual_runner(chat_id);
-                    let ritual_count = ritual_runner.cancel_all_running();
+                    let ritual_count = crate::ritual_runner::cancel_all_running(
+                        &self.ritual_cancel_registry,
+                    );
                     // Also remove from active sessions so new messages aren't queued
                     {
                         let mut active = self.active_sessions.lock().await;
@@ -873,14 +874,10 @@ Choose a model:", current),
 
     /// Handle /ritual subcommands.
     async fn handle_ritual_command(&self, chat_id: i64, arg: &str) -> anyhow::Result<()> {
-        use gid_core::ritual::{
-            V2Event as RitualEvent,
-        };
-
         match arg {
             "status" => {
-                let runner = self.make_ritual_runner(chat_id);
-                match runner.list_rituals() {
+                let rituals_dir = self.runner.workspace_root().join(".gid/rituals");
+                match crate::ritual_runner::list_rituals(&rituals_dir, None) {
                     Ok(rituals) if rituals.is_empty() => {
                         self.send_message(chat_id, "No rituals found.", None).await?;
                     }
@@ -911,12 +908,12 @@ Choose a model:", current),
                 }
             }
             arg if arg == "cancel" || arg.starts_with("cancel ") => {
-                let runner = self.make_ritual_runner(chat_id);
+                let rituals_dir = self.runner.workspace_root().join(".gid/rituals");
+                let cancel_registry = self.ritual_cancel_registry.clone();
                 let specific_id = arg.strip_prefix("cancel ").map(|s| s.trim()).filter(|s| !s.is_empty());
 
                 let target_state = if let Some(id) = specific_id {
-                    // Cancel specific ritual by ID
-                    match runner.load_state_by_id(id) {
+                    match crate::ritual_runner::load_state_by_id(&rituals_dir, id) {
                         Ok(s) => s,
                         Err(_) => {
                             self.send_message(chat_id, &format!("❌ Ritual `{}` not found.", id), None).await?;
@@ -924,79 +921,68 @@ Choose a model:", current),
                         }
                     }
                 } else {
-                    // Cancel latest active ritual
-                    runner.load_state()?
+                    match crate::ritual_runner::find_latest_active(&rituals_dir, None)? {
+                        Some(s) => s,
+                        None => {
+                            self.send_message(chat_id, "No active ritual to cancel.", None).await?;
+                            return Ok(());
+                        }
+                    }
                 };
 
                 if target_state.phase.is_terminal() || target_state.phase == gid_core::ritual::V2Phase::Idle {
                     self.send_message(chat_id, "No active ritual to cancel.", None).await?;
                 } else {
-                    // ISS-019: Cancel is now a single authoritative path:
-                    //   1. Fire the cancellation token (interrupts any running EP action).
-                    //   2. Drive the FSM with UserCancel — this is what writes the
-                    //      terminal `Cancelled` transition and `status = cancelled`
-                    //      to disk via `save_state`.
-                    //
-                    // Previously the "running" branch trusted the spawned EP-action
-                    // task to call `advance(UserCancel)` itself when it observed the
-                    // cancel token, but that was racy: if the task had already
-                    // finished by the time the user typed `/ritual cancel`, no one
-                    // ever wrote the terminal transition and the state file became
-                    // a zombie (phase stuck at Implementing/etc., status = null).
-                    //
-                    // The "paused" branch hand-rolled `with_phase(Cancelled) +
-                    // save_state` directly, bypassing the FSM. That worked but
-                    // duplicated the transition logic — and missed the new `status`
-                    // field maintenance until it was inlined here too. Going through
-                    // `send_event_to` keeps a single source of truth.
-                    //
-                    // Idempotency: the FSM's `(_, UserCancel)` arm accepts UserCancel
-                    // from any state (including Cancelled), and `with_phase` is
-                    // safe to call repeatedly.
-                    let was_running = runner.cancel_running(&target_state.id);
+                    // ISS-052 T13b commit 4: cancel routes through the canonical
+                    // gid-core path:
+                    //   - if the ritual is registered as running, flip its
+                    //     cancel token. The next `execute()` poll observes
+                    //     `should_cancel()` and produces `Cancelled { reason }`,
+                    //     which the state machine drives to terminal Cancelled.
+                    //     Persistence is handled by RustclawHooks.
+                    //   - if the ritual is paused (not in the registry), it has
+                    //     no live execute loop to interrupt — we drive
+                    //     UserEvent::Cancel through resume_ritual instead.
+                    let was_running = crate::ritual_runner::cancel_running(
+                        &cancel_registry,
+                        &target_state.id,
+                    );
+
                     if was_running {
                         tracing::info!(
                             ritual_id = %target_state.id,
                             "Fired cancellation token for running ritual"
                         );
-                    }
-
-                    match runner.send_event_to(&target_state.id, RitualEvent::UserCancel).await {
-                        Ok(new_state) => {
-                            tracing::info!(
-                                ritual_id = %new_state.id,
-                                phase = ?new_state.phase,
-                                status = ?new_state.status,
-                                "Ritual cancellation persisted"
-                            );
-                            let suffix = if was_running { " (interrupted running phase)" } else { "" };
-                            self.send_message(
-                                chat_id,
-                                &format!(
-                                    "🛑 Ritual `{}` cancelled (was in {} phase){}.",
-                                    target_state.id,
-                                    target_state.phase.display_name(),
-                                    suffix,
-                                ),
-                                None,
-                            ).await?;
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                ritual_id = %target_state.id,
-                                "Failed to advance ritual to Cancelled: {}",
-                                e
-                            );
-                            self.send_message(
-                                chat_id,
-                                &format!(
-                                    "⚠️ Ritual `{}`: cancel signal sent but state update failed: {}.\n\
-                                     Re-run `/ritual cancel {}` to retry.",
-                                    target_state.id, e, target_state.id,
-                                ),
-                                None,
-                            ).await?;
-                        }
+                        let suffix = " (interrupted running phase)";
+                        self.send_message(
+                            chat_id,
+                            &format!(
+                                "🛑 Ritual `{}` cancellation requested (was in {} phase){}.",
+                                target_state.id,
+                                target_state.phase.display_name(),
+                                suffix,
+                            ),
+                            None,
+                        ).await?;
+                        // The running task itself will record the terminal
+                        // Cancelled transition via state_machine + hooks.
+                    } else {
+                        // Paused (or no live execute loop) — drive Cancel
+                        // through the state machine directly.
+                        self.send_message(
+                            chat_id,
+                            &format!(
+                                "🛑 Ritual `{}` cancelled (was paused in {} phase).",
+                                target_state.id,
+                                target_state.phase.display_name(),
+                            ),
+                            None,
+                        ).await?;
+                        self.spawn_resume(
+                            chat_id,
+                            target_state.id,
+                            gid_core::ritual::UserEvent::Cancel,
+                        );
                     }
                 }
             }
@@ -1277,27 +1263,15 @@ Choose a model:", current),
 
                 if looks_like_command {
                     // Check if there's a waiting ritual that should receive this
-                    let runner = self.make_ritual_runner(chat_id);
-                    if let Ok(state) = runner.load_state() {
+                    let rituals_dir = self.runner.workspace_root().join(".gid/rituals");
+                    if let Ok(Some(state)) = crate::ritual_runner::find_latest_active(&rituals_dir, None) {
                         if state.phase == gid_core::ritual::V2Phase::WaitingApproval
                             || state.phase == gid_core::ritual::V2Phase::WaitingClarification
                         {
                             // Route to the waiting ritual instead of starting a new one
-                            if let Some(event) = self.build_ritual_event_from_text(task, &state) {
+                            if let Some(user_event) = self.build_ritual_event_from_text(task, &state) {
                                 self.send_message(chat_id, "💬 Routing to waiting ritual...", None).await?;
-                                let bot = self.clone();
-                                tokio::spawn(async move {
-                                    match runner.send_event(event).await {
-                                        Ok(new_state) => {
-                                            if let Err(e) = runner.save_state(&new_state) {
-                                                tracing::error!("Failed to save ritual state: {}", e);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            let _ = bot.send_message(chat_id, &format!("❌ {}", e), None).await;
-                                        }
-                                    }
-                                });
+                                self.spawn_resume(chat_id, state.id, user_event);
                                 return Ok(());
                             }
                         }
@@ -1369,39 +1343,28 @@ Choose a model:", current),
     }
 
     /// Route a user message to a waiting ritual if one exists.
-    /// Returns true if the message was routed, false if no ritual is waiting.
+    /// Try to route a free-text message to a paused ritual (WaitingApproval /
+    /// WaitingClarification). Returns true if routed, false otherwise.
     ///
-    /// Checks disk for rituals in WaitingApproval/WaitingClarification state.
-    /// Calls advance() which is stateless — no channels, no loops, just load → transition → save.
+    /// ISS-052 T13b commit 4: implementation now goes through spawn_resume,
+    /// which calls gid_core::ritual::resume_ritual via RustclawHooks.
     async fn try_route_to_waiting_ritual(&self, chat_id: i64, text: &str) -> bool {
-        let runner = self.make_ritual_runner(chat_id);
-        let state = match runner.load_state() {
-            Ok(s) => s,
-            Err(_) => return false,
+        let rituals_dir = self.runner.workspace_root().join(".gid/rituals");
+        let state = match crate::ritual_runner::find_latest_active(&rituals_dir, None) {
+            Ok(Some(s)) => s,
+            _ => return false,
         };
 
-        // Only intercept if a ritual is actively waiting for user input
         if !state.phase.is_paused() {
             return false;
         }
 
-        let event = match self.build_ritual_event_from_text(text, &state) {
+        let user_event = match self.build_ritual_event_from_text(text, &state) {
             Some(e) => e,
-            None => return false, // Doesn't look like a ritual response → let main agent handle
+            None => return false,
         };
 
-        let ritual_id = state.id.clone();
-        let bot = self.clone();
-        tokio::spawn(async move {
-            match runner.send_event_to(&ritual_id, event).await {
-                Ok(_) => {
-                    tracing::info!(ritual_id = %ritual_id, "User message routed to waiting ritual via advance");
-                }
-                Err(e) => {
-                    let _ = bot.send_message(chat_id, &format!("❌ Failed to resume ritual: {}", e), None).await;
-                }
-            }
-        });
+        self.spawn_resume(chat_id, state.id, user_event);
         true
     }
 
@@ -1660,16 +1623,16 @@ Choose a model:", current),
         &self,
         text: &str,
         state: &gid_core::ritual::V2State,
-    ) -> Option<gid_core::ritual::V2Event> {
+    ) -> Option<gid_core::ritual::UserEvent> {
         use gid_core::ritual::V2Phase;
-        use gid_core::ritual::V2Event;
+        use gid_core::ritual::UserEvent;
 
         let normalized = text.trim().to_lowercase();
 
         if state.phase == V2Phase::WaitingApproval {
             // Only match explicit approval patterns — don't hijack unrelated messages
             if normalized == "skip" || normalized == "跳过" {
-                return Some(V2Event::UserSkipPhase);
+                return Some(UserEvent::SkipPhase);
             }
             // "apply all", "apply 1,3", "approve all", "all", "yes", "ok", "好"
             if normalized.starts_with("apply ")
@@ -1685,17 +1648,17 @@ Choose a model:", current),
                     .unwrap_or("all")
                     .trim()
                     .to_string();
-                return Some(V2Event::UserApproval { approved });
+                return Some(UserEvent::Approval { approved });
             }
             // Numbered selection like "1,3,5" or "FINDING-1,3"
             if normalized.contains("finding") || normalized.chars().all(|c| c.is_ascii_digit() || c == ',' || c == ' ') {
-                return Some(V2Event::UserApproval { approved: normalized });
+                return Some(UserEvent::Approval { approved: normalized });
             }
             // Doesn't look like an approval — let it go to main agent
             None
         } else if state.phase == V2Phase::WaitingClarification {
             // Any text is valid clarification
-            Some(V2Event::UserClarification { response: text.to_string() })
+            Some(UserEvent::Clarification { response: text.to_string() })
         } else {
             None
         }

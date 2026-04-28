@@ -39,6 +39,31 @@ pub fn new_event_registry() -> EventRegistry {
     Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+/// Flip the cancel token for a running ritual. Returns `true` if a token
+/// was found and flipped (i.e. the ritual was registered as running).
+///
+/// ISS-052 T13b commit 4: lifted out of `RitualRunner::cancel_running` so
+/// `/ritual cancel <id>` can fire the token without holding a runner.
+pub fn cancel_running(registry: &CancelRegistry, ritual_id: &str) -> bool {
+    let reg = registry.lock().unwrap();
+    if let Some(token) = reg.get(ritual_id) {
+        token.cancel();
+        true
+    } else {
+        false
+    }
+}
+
+/// Flip every token in the registry. Returns the number of tokens fired.
+pub fn cancel_all_running(registry: &CancelRegistry) -> usize {
+    let reg = registry.lock().unwrap();
+    let count = reg.len();
+    for token in reg.values() {
+        token.cancel();
+    }
+    count
+}
+
 pub struct RitualRunner {
     project_root: PathBuf,
     rituals_dir: PathBuf,
