@@ -1569,6 +1569,110 @@ Choose a model:", current),
         });
     }
 
+    /// Resume a paused ritual by injecting a user-driven event.
+    ///
+    /// ISS-052 T13b commit 2: replaces the legacy `RitualRunner::send_event`
+    /// + `advance` + `save_state` triplet at every `/ritual retry|skip|clarify
+    /// |reply|cancel|approve` call site. Construction mirrors `spawn_ritual`
+    /// but invokes `gid_core::ritual::resume_ritual` (not `run_ritual`) — no
+    /// workspace re-resolution, no `stamp_metadata`. Persistence is handled
+    /// by `RustclawHooks::persist_state`.
+    fn spawn_resume(
+        &self,
+        chat_id: i64,
+        ritual_id: String,
+        user_event: gid_core::ritual::UserEvent,
+    ) {
+        let bot = self.clone();
+        let notify_fn = self.make_notify_fn(chat_id);
+        let cancel_registry = self.ritual_cancel_registry.clone();
+        let rituals_dir = self.runner.workspace_root().join(".gid/rituals");
+
+        tokio::spawn(async move {
+            // Load the persisted state.
+            let state = match crate::ritual_runner::load_state_by_id(&rituals_dir, &ritual_id) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = bot.send_message(
+                        chat_id,
+                        &format!("❌ Failed to load ritual {}: {}", ritual_id, e),
+                        None,
+                    ).await;
+                    return;
+                }
+            };
+
+            // Resolve target_root from the persisted state. Resume must
+            // continue against the originally-resolved workspace.
+            let project_root: std::path::PathBuf = state.target_root.as_ref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| bot.runner.workspace_root().to_path_buf());
+
+            let ritual_llm = match crate::llm::create_client(&bot.runner.config().llm) {
+                Ok(c) => Arc::new(tokio::sync::RwLock::new(c)),
+                Err(e) => {
+                    let _ = bot.send_message(
+                        chat_id,
+                        &format!("❌ Failed to create ritual LLM client: {}", e),
+                        None,
+                    ).await;
+                    return;
+                }
+            };
+
+            // Cancel token: re-register under this ritual ID so an
+            // in-flight `/ritual cancel` can flip it during resume.
+            let cancel_token = tokio_util::sync::CancellationToken::new();
+            {
+                let mut reg = cancel_registry.lock().unwrap();
+                reg.insert(ritual_id.clone(), cancel_token.clone());
+            }
+
+            let hooks: Arc<dyn gid_core::ritual::RitualHooks> =
+                Arc::new(crate::ritual_hooks::RustclawHooks::new(
+                    notify_fn,
+                    rituals_dir.clone(),
+                    cancel_token,
+                ));
+
+            let config = gid_core::ritual::V2ExecutorConfig {
+                project_root,
+                llm_client: Some(crate::ritual_adapter::RitualLlmAdapter::new(ritual_llm).into_arc()),
+                notify: None,
+                hooks: None,
+                skill_model: "opus".to_string(),
+                planning_model: "sonnet".to_string(),
+            };
+
+            let outcome = gid_core::ritual::resume_ritual(state, user_event, config, hooks).await;
+
+            {
+                let mut reg = cancel_registry.lock().unwrap();
+                reg.remove(&ritual_id);
+            }
+
+            tracing::info!(
+                ritual_id = %outcome.state.id,
+                phase = %outcome.state.phase.display_name(),
+                status = ?outcome.status,
+                "Ritual resumed"
+            );
+
+            if matches!(
+                outcome.status,
+                gid_core::ritual::RitualOutcomeStatus::WorkspaceFailed
+                    | gid_core::ritual::RitualOutcomeStatus::IterationLimitExceeded
+            ) {
+                let err = outcome.state.error_context.as_deref().unwrap_or("unknown");
+                let _ = bot.send_message(
+                    chat_id,
+                    &format!("❌ Ritual failed: {}", err),
+                    None,
+                ).await;
+            }
+        });
+    }
+
     /// Build a ritual event from user free-text based on the ritual's current phase.
     /// Returns None if the text doesn't look like a ritual response — in that case
     /// the message should go to the main agent instead.
