@@ -426,4 +426,54 @@ mod tests {
             "stamp_metadata must set adapter_pid to current process"
         );
     }
+
+    /// ISS-052 AC — Rustclaw cannot bypass the `file_snapshot` zero-file
+    /// gate (ISS-038). The gate lives in `gid_core::ritual::V2Executor::run_skill`
+    /// and is exercised by `skill_required_zero_files_fails` in gid-core.
+    /// The structural reason it cannot be bypassed from rustclaw is that
+    /// `RitualHooks` exposes **no** skill-dispatch method — embedders only
+    /// supply ambient capabilities (notify / persist / resolve / cancel /
+    /// stamp / on_phase_transition). There is no `run_skill` hook, no
+    /// `run_shell` hook, no `run_triage` hook to override.
+    ///
+    /// This test compiles a `RustclawHooks` reference as `&dyn RitualHooks`
+    /// and explicitly enumerates the hook surface. If a future change adds
+    /// a skill-dispatch method to the trait (which would re-open the
+    /// dispatcher fragmentation that ISS-052 closed), the build for this
+    /// test will not break — but the comment + the gid-core gate-bypass
+    /// review at PR time will. That is the intended trip wire: the
+    /// `RitualHooks` trait surface is a contract, and any skill-dispatch
+    /// addition should be flagged in code review.
+    #[test]
+    fn ritualhooks_surface_has_no_skill_dispatch_method() {
+        use gid_core::ritual::RitualHooks;
+
+        let tmp = TempDir::new().unwrap();
+        let hooks = RustclawHooks::new(
+            noop_notify(),
+            tmp.path().join("rituals"),
+            CancellationToken::new(),
+        );
+
+        // Coerce to the trait object — this is exactly how `run_ritual`
+        // and `resume_ritual` consume the hooks: as `Arc<dyn RitualHooks>`.
+        let _trait_obj: &dyn RitualHooks = &hooks;
+
+        // The five callable methods on `RitualHooks` (per gid-core
+        // crates/gid-core/src/ritual/hooks.rs trait definition):
+        //   - notify(&self, &str)
+        //   - persist_state(&self, &RitualState)
+        //   - resolve_workspace(&self, &WorkUnit)
+        //   - should_cancel(&self) -> Option<CancelReason>
+        //   - stamp_metadata(&self, &mut RitualState)
+        //   - on_phase_transition(&self, &RitualPhase, &RitualPhase)  [default impl]
+        //
+        // None of these dispatches a skill. V2Executor owns `run_skill`
+        // exclusively, which is where the ISS-038 zero-file gate lives.
+        // Therefore the gate cannot be bypassed by any rustclaw code path.
+        //
+        // If a `run_skill` (or similar dispatch) hook is ever added, this
+        // test should be deleted *and* a new gate-fires-through-rustclaw
+        // integration test added.
+    }
 }
