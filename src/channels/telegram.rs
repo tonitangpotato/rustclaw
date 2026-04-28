@@ -767,7 +767,11 @@ Choose a model:", current),
                 let workspace = self.runner.workspace_root().to_path_buf();
                 let config = crate::autopilot::AutopilotConfig {
                     task_file: std::path::PathBuf::from(task_file),
-                    max_turns_per_task: 60,
+                    // ISS-053 Change 1: 3 attempts, not 60. Retry exists to
+                    // give the agent new information, not to grind. After
+                    // attempts 1 (try) → 2 (reflect + A/B/C) → 3 (mandate
+                    // triage marker), a 4th attempt cannot surface new info.
+                    max_turns_per_task: 3,
                     max_total_turns: 300,
                     session_key: session_key.clone(),
                 };
