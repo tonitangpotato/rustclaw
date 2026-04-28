@@ -56,6 +56,15 @@ pub struct ActiveRitual {
     pub you_are_executor: bool,
     /// PID of the ritual adapter process, if the state file recorded it.
     pub adapter_pid: Option<u32>,
+    /// ISS-029b: structured health classification computed at scan time
+    /// from `phase_entered_at` + `last_heartbeat`. Captured here as a
+    /// human-readable string (rather than the gid-core enum directly) so
+    /// rendering is decoupled from the enum's evolution. Format examples:
+    /// "Healthy (45s in phase)", "LongRunning (820s, expected ≤300s)",
+    /// "Wedged (no heartbeat for 142s)", "Terminal (Done)".
+    /// `None` for state files written before ISS-029a (no
+    /// `phase_entered_at`/`last_heartbeat` fields).
+    pub health: Option<String>,
 }
 
 impl ActiveRitual {
@@ -229,6 +238,15 @@ struct StateFile {
     /// Optional: adapter PID if the adapter has been taught to record it.
     #[serde(default)]
     adapter_pid: Option<u32>,
+    /// ISS-029a: phase entry timestamp, used by `health()` to detect
+    /// long-running phases. Optional for backwards-compat with state
+    /// files written before ISS-029a.
+    #[serde(default)]
+    phase_entered_at: Option<DateTime<Utc>>,
+    /// ISS-029a: last event-loop tick timestamp, used by `health()` to
+    /// detect wedged rituals. Optional for backwards-compat.
+    #[serde(default)]
+    last_heartbeat: Option<DateTime<Utc>>,
 }
 
 fn parse_state_file(
@@ -277,6 +295,19 @@ fn parse_state_file(
     let you_are_executor = matches!(strategy.as_deref(), Some("SingleLlm"))
         && state.adapter_pid.map(|p| p == my_pid).unwrap_or(false);
 
+    // ISS-029b: classify health when the state file is new enough to
+    // carry `phase_entered_at` + `last_heartbeat`. Both fields are
+    // required — partial information would silently misclassify wedged
+    // rituals. For older state files (pre-ISS-029a) we leave `health`
+    // as `None` and the renderer falls back to the legacy
+    // `suspected_stuck` heuristic.
+    let health = match (state.phase_entered_at, state.last_heartbeat) {
+        (Some(entered), Some(beat)) => {
+            Some(classify_health(&phase, entered, beat, now))
+        }
+        _ => None,
+    };
+
     Ok(Some(ActiveRitual {
         id,
         project_root: project_root.to_path_buf(),
@@ -289,7 +320,49 @@ fn parse_state_file(
         suspected_stuck,
         you_are_executor,
         adapter_pid: state.adapter_pid,
+        health,
     }))
+}
+
+/// ISS-029b: minimal local replica of `gid_core::ritual::RitualHealth`'s
+/// classification logic. Kept here (rather than importing
+/// `RitualState::health()`) because the registry only deserializes a
+/// narrow subset of state fields — pulling in the full `RitualState`
+/// schema just to call `health()` would couple us to every gid-core
+/// schema change.
+///
+/// Thresholds match `gid_core::ritual::state_machine`:
+/// - `WEDGED_HEARTBEAT_THRESHOLD_SECS` = 60s
+/// - terminal phases short-circuit regardless of heartbeat freshness
+/// - long-running threshold is a single fixed soft budget (300s) here;
+///   gid-core has per-phase budgets but the registry doesn't carry the
+///   phase-typed enum, so we use a conservative single value. This
+///   under-flags `LongRunning` (vs gid-core), never over-flags — which
+///   is the safe direction for a status-display heuristic.
+fn classify_health(
+    phase: &str,
+    phase_entered_at: DateTime<Utc>,
+    last_heartbeat: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> String {
+    if is_terminal_phase(phase) {
+        return format!("Terminal ({})", phase);
+    }
+    let beat_age = (now - last_heartbeat).num_seconds().max(0);
+    let phase_age = (now - phase_entered_at).num_seconds().max(0);
+    const WEDGED_THRESHOLD_SECS: i64 = 60;
+    const LONG_RUNNING_THRESHOLD_SECS: i64 = 300;
+
+    if beat_age > WEDGED_THRESHOLD_SECS {
+        return format!("Wedged (no heartbeat for {}s)", beat_age);
+    }
+    if phase_age > LONG_RUNNING_THRESHOLD_SECS {
+        return format!(
+            "LongRunning ({}s in phase, expected ≤{}s)",
+            phase_age, LONG_RUNNING_THRESHOLD_SECS
+        );
+    }
+    format!("Healthy ({}s in phase)", phase_age)
 }
 
 /// Convert the phase JSON value (which may be a bare string like `"Implementing"`
@@ -425,6 +498,13 @@ fn render_one(r: &ActiveRitual) -> String {
     }
     if r.verify_retries > 0 {
         s.push_str(&format!("- **Verify retries**: {}\n", r.verify_retries));
+    }
+    // ISS-029b: surface structured health classification when present.
+    // Older state files (pre-ISS-029a) lack `phase_entered_at` /
+    // `last_heartbeat`, in which case `health` is None and we fall back
+    // to the legacy `suspected_stuck` marker on the heading line.
+    if let Some(h) = &r.health {
+        s.push_str(&format!("- **Health**: {}\n", h));
     }
     s.push_str(&format!("- **Last update**: {}\n", r.age_display()));
     s.push_str(&format!("- **State file**: `{}`\n\n", r.state_path.display()));
