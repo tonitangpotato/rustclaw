@@ -27,6 +27,51 @@ use gid_core::ritual::{
     ImplementStrategy, transition,
 };
 
+/// Conflict surfaced when a caller tries to start a ritual that would
+/// collide with an existing one. Today only one variant — `AlreadyActive` —
+/// is defined (ISS-028 Task 1a). Future variants may cover cross-instance
+/// or cross-host collisions; keeping this an enum (not a single error
+/// struct) leaves room for them without breaking call sites.
+///
+/// Pattern follows `gid_core::ritual::WorkspaceError`: a typed error enum
+/// adjacent to the subsystem it serves, so callers can pattern-match
+/// instead of string-sniffing an `anyhow::Error`.
+///
+/// ISS-028 GOAL-1: returned by the ritual launcher when a non-terminal
+/// ritual already exists for the same `work_unit.label()`. The caller
+/// (e.g. `StartRitualTool`) is responsible for surfacing this to the
+/// agent in a clear form (GOAL-3).
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum RitualConflict {
+    /// A non-terminal ritual already exists for the requested work unit.
+    ///
+    /// `phase ∉ {Done, Cancelled, Escalated}` per ISS-028 GOAL-2 (uses the
+    /// canonical terminal-phase definition from ISS-019; do not introduce
+    /// a parallel one).
+    ///
+    /// Fields:
+    /// - `ritual_id`: the existing ritual's id (e.g. `r-429789`)
+    /// - `phase`: its current non-terminal phase (display string, so
+    ///   loggers/UIs don't need to depend on the gid-core enum).
+    /// - `work_unit_label`: canonical `WorkUnit::label()` of the
+    ///   collision key — kept for log/diagnostic use even though the
+    ///   caller already knows which unit they passed in.
+    /// - `started_at`: ISO-8601 timestamp the existing ritual was
+    ///   created. RFC3339 string to keep this enum free of chrono
+    ///   types in its public surface (callers vary in chrono feature
+    ///   flags).
+    #[error(
+        "ritual already active for {work_unit_label}: \
+         ritual_id={ritual_id}, phase={phase}, started={started_at}"
+    )]
+    AlreadyActive {
+        ritual_id: String,
+        phase: String,
+        work_unit_label: String,
+        started_at: String,
+    },
+}
+
 /// Callback for sending notifications (Telegram messages).
 pub type NotifyFn = Arc<dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
 
@@ -271,6 +316,37 @@ pub fn find_latest_active(rituals_dir: &Path) -> Result<Option<RitualState>> {
     }
     Ok(rituals.into_iter().find(|r| {
         !r.phase.is_terminal() && r.phase != RitualPhase::Idle
+    }))
+}
+
+/// Pre-flight duplicate check for `start_ritual` (ISS-028 GOAL-1/2/3).
+///
+/// Scans `rituals_dir` for a ritual whose `work_unit.label()` matches
+/// `label` AND whose phase is non-terminal — i.e. the prospective new
+/// ritual would race or duplicate an in-flight one. Returns the most
+/// recently-updated match, or `None` if the path is clear.
+///
+/// "Non-terminal" reuses `RitualPhase::is_terminal()` from ISS-019 —
+/// **do not** introduce a parallel terminal-phase definition here.
+/// `Idle` is treated as non-terminal too: a freshly-created ritual that
+/// has not yet transitioned still owns the work unit.
+///
+/// Cost is bounded: real `.gid/rituals/` directories hold ≤ ~50 files
+/// (terminal sweeps prune them), and `list_rituals` already silently
+/// skips unparsable entries.
+pub fn find_active_for_work_unit(
+    rituals_dir: &Path,
+    label: &str,
+) -> Result<Option<RitualState>> {
+    let rituals = list_rituals(rituals_dir)?;
+    Ok(rituals.into_iter().find(|r| {
+        if r.phase.is_terminal() {
+            return false;
+        }
+        match r.work_unit.as_ref() {
+            Some(w) => w.label() == label,
+            None => false,
+        }
     }))
 }
 
@@ -1120,5 +1196,110 @@ mod orphan_sweep_tests {
         let raw_after = std::fs::read_to_string(tmp.path().join("r-legacy.json")).unwrap();
         assert!(raw_after.contains("\"status\""),
             "sweep must write the status field for downstream consumers");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Tests — duplicate ritual prevention (ISS-028 Task 1a)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod duplicate_prevention_tests {
+    use super::*;
+    use gid_core::ritual::work_unit::WorkUnit;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    /// Write a state file directly to `dir/<id>.json` (mirrors the helper
+    /// used by `orphan_sweep_tests`).
+    fn write_state(dir: &Path, state: &RitualState) {
+        let path = dir.join(format!("{}.json", state.id));
+        let data = serde_json::to_string_pretty(state).unwrap();
+        std::fs::write(path, data).unwrap();
+    }
+
+    /// Build a non-terminal state stamped with the given `WorkUnit`. Phase
+    /// defaults to `Implementing` — a representative non-terminal phase
+    /// matching the real-world ritual files we collide with.
+    fn make_state_for(id: &str, work_unit: WorkUnit, phase: RitualPhase) -> RitualState {
+        let mut s = RitualState::new();
+        s.id = id.to_string();
+        s.task = format!("test ritual for {}", work_unit.label());
+        s.work_unit = Some(work_unit);
+        s = s.with_phase(phase);
+        s
+    }
+
+    fn iss_028() -> WorkUnit {
+        WorkUnit::Issue {
+            project: "rustclaw".into(),
+            id: "ISS-028".into(),
+        }
+    }
+
+    fn iss_029() -> WorkUnit {
+        WorkUnit::Issue {
+            project: "rustclaw".into(),
+            id: "ISS-029".into(),
+        }
+    }
+
+    #[test]
+    fn no_active_ritual_returns_none() {
+        // Empty directory — pre-flight should let the new ritual proceed.
+        let tmp = TempDir::new().unwrap();
+        let hit = find_active_for_work_unit(tmp.path(), &iss_028().label()).unwrap();
+        assert!(hit.is_none(), "empty dir → no collision");
+
+        // Directory with one ritual but for a *different* work unit also
+        // returns None: the lookup key is the work unit label, not "any ritual".
+        let other = make_state_for("r-other", iss_029(), RitualPhase::Implementing);
+        write_state(tmp.path(), &other);
+        let hit = find_active_for_work_unit(tmp.path(), &iss_028().label()).unwrap();
+        assert!(hit.is_none(), "different work unit → no collision");
+    }
+
+    #[test]
+    fn duplicate_active_ritual_is_detected() {
+        // An in-flight ritual on ISS-028 must block a second start on ISS-028.
+        let tmp = TempDir::new().unwrap();
+        let active = make_state_for("r-active", iss_028(), RitualPhase::Implementing);
+        write_state(tmp.path(), &active);
+
+        let hit = find_active_for_work_unit(tmp.path(), &iss_028().label())
+            .unwrap()
+            .expect("non-terminal ritual on same work unit must be detected");
+        assert_eq!(hit.id, "r-active");
+        assert_eq!(hit.phase, RitualPhase::Implementing);
+        assert_eq!(
+            hit.work_unit.as_ref().map(|w| w.label()),
+            Some(iss_028().label())
+        );
+    }
+
+    #[test]
+    fn terminal_ritual_does_not_block_new_start() {
+        // The first ritual on ISS-028 has finished (Done) — a fresh start
+        // on ISS-028 is allowed. This is the canonical "complete the
+        // work, then iterate" workflow and must not trigger AlreadyActive.
+        // Verifies we reuse `phase.is_terminal()` (ISS-019), so all of
+        // {Done, Cancelled, Escalated} count as cleared.
+        let tmp = TempDir::new().unwrap();
+
+        for (id, phase) in [
+            ("r-done", RitualPhase::Done),
+            ("r-cancelled", RitualPhase::Cancelled),
+            ("r-escalated", RitualPhase::Escalated),
+        ] {
+            let state = make_state_for(id, iss_028(), phase);
+            write_state(tmp.path(), &state);
+        }
+
+        let hit = find_active_for_work_unit(tmp.path(), &iss_028().label()).unwrap();
+        assert!(
+            hit.is_none(),
+            "all matching rituals are terminal → pre-flight must clear; got: {:?}",
+            hit.as_ref().map(|r| (&r.id, r.phase.clone()))
+        );
     }
 }

@@ -5921,6 +5921,50 @@ impl Tool for StartRitualTool {
         let cancel_token = tokio_util::sync::CancellationToken::new();
 
         let rituals_dir = self.workspace_root.join(".gid/rituals");
+
+        // ── ISS-028 Task 1a: pre-flight duplicate check ──
+        //
+        // Scan `rituals_dir` for a non-terminal ritual on the same
+        // `work_unit.label()`. "Non-terminal" reuses
+        // `RitualPhase::is_terminal()` (ISS-019) — no parallel
+        // definition here. If a collision is found, surface a
+        // `RitualConflict::AlreadyActive` to the agent in
+        // human-readable form (GOAL-3) and return WITHOUT starting a
+        // second ritual. The ritual file is left untouched.
+        if let Some(work_unit_for_check) = initial.work_unit.as_ref() {
+            let label = work_unit_for_check.label();
+            if let Ok(Some(existing)) =
+                crate::ritual_runner::find_active_for_work_unit(&rituals_dir, &label)
+            {
+                let conflict = crate::ritual_runner::RitualConflict::AlreadyActive {
+                    ritual_id: existing.id.clone(),
+                    phase: existing.phase.display_name().to_string(),
+                    work_unit_label: label,
+                    started_at: existing.started_at.to_rfc3339(),
+                };
+                tracing::warn!(
+                    existing_ritual_id = %existing.id,
+                    existing_phase = %existing.phase.display_name(),
+                    "start_ritual rejected: duplicate detected (ISS-028)"
+                );
+                return Ok(ToolResult {
+                    output: format!(
+                        "❌ Cannot start a new ritual — one is already active for this work unit.\n\
+                         \n\
+                         {}\n\
+                         \n\
+                         Options:\n\
+                         • Resume the existing ritual: `/ritual status {ritual_id}`\n\
+                         • Cancel it first: `/ritual cancel {ritual_id}`\n\
+                         • Or wait for it to finish (Done / Cancelled / Failed).",
+                        conflict,
+                        ritual_id = existing.id,
+                    ),
+                    is_error: true,
+                });
+            }
+        }
+
         let hooks: Arc<dyn gid_core::ritual::RitualHooks> =
             Arc::new(crate::ritual_hooks::RustclawHooks::new(
                 notify,
