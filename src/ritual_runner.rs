@@ -355,6 +355,153 @@ pub fn sweep_orphans(rituals_dir: &Path) -> Result<Vec<(String, String)>> {
     sweep_orphans_in(rituals_dir)
 }
 
+/// One duplicate-terminal group reported by [`reconcile_terminal_duplicates`].
+///
+/// `work_unit_label` is the canonical [`WorkUnit::label()`](
+/// gid_core::ritual::work_unit::WorkUnit::label) shared by the rituals;
+/// `ritual_ids` lists every terminal ritual file that resolved to that
+/// label (length ≥ 2 — singletons are not duplicates and never appear).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicateGroup {
+    pub work_unit_label: String,
+    pub ritual_ids: Vec<String>,
+}
+
+/// Scan `rituals_dir` for *terminal* rituals that share a `work_unit.label()`,
+/// returning one [`DuplicateGroup`] per colliding label (groups of size ≥ 2).
+///
+/// This is the read-only half of the orphan reconciler (ISS-028 Task 1b /
+/// GOAL-5): historical / completed ritual files accumulate in
+/// `.gid/rituals/`, and when two terminal rituals share a work unit it
+/// usually indicates a past leak (a ritual that should have been resumed
+/// instead spawned a duplicate, or sweep-on-startup raced with a
+/// concurrent start). We surface the collision but **never delete** —
+/// these files are forensic record for the human to triage.
+///
+/// Companion to [`find_active_for_work_unit`] (which catches *future*
+/// duplicates pre-flight) and [`sweep_orphans`] (which only touches
+/// non-terminal zombies).
+///
+/// Notes:
+/// - Rituals with `work_unit = None` are skipped (legacy state files
+///   from before the `WorkUnit` field landed have no collision key).
+/// - Unparsable / unreadable JSON files are silently skipped — same
+///   defensive policy as `sweep_orphans_in`. A lone bad file must not
+///   stop the reconciler.
+/// - Result ordering: groups are sorted by `work_unit_label` for
+///   deterministic logging; `ritual_ids` within each group are sorted
+///   for the same reason.
+pub fn reconcile_terminal_duplicates(
+    rituals_dir: &Path,
+) -> Result<Vec<DuplicateGroup>> {
+    use std::collections::BTreeMap;
+
+    let mut by_label: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    if !rituals_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    for entry in std::fs::read_dir(rituals_dir)? {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("reconcile: dirent failed: {}", e);
+                continue;
+            }
+        };
+        let path = entry.path();
+        if path.extension().map_or(true, |e| e != "json") {
+            continue;
+        }
+
+        let data = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(?path, "reconcile: read failed: {}", e);
+                continue;
+            }
+        };
+        let state: RitualState = match serde_json::from_str(&data) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(?path, "reconcile: parse failed: {}", e);
+                continue;
+            }
+        };
+
+        // Only terminal rituals participate in duplicate detection —
+        // active/idle collisions are handled pre-flight by
+        // `find_active_for_work_unit` (ISS-028 Task 1a).
+        if !state.phase.is_terminal() {
+            continue;
+        }
+        let Some(label) = state.work_unit.as_ref().map(|w| w.label())
+        else {
+            continue;
+        };
+
+        by_label.entry(label).or_default().push(state.id);
+    }
+
+    let mut groups: Vec<DuplicateGroup> = by_label
+        .into_iter()
+        .filter(|(_, ids)| ids.len() >= 2)
+        .map(|(label, mut ids)| {
+            ids.sort();
+            DuplicateGroup {
+                work_unit_label: label,
+                ritual_ids: ids,
+            }
+        })
+        .collect();
+    groups.sort_by(|a, b| a.work_unit_label.cmp(&b.work_unit_label));
+    Ok(groups)
+}
+
+/// Run the orphan reconciler at startup: scan `rituals_dir` for terminal
+/// duplicates and WARN-log each collision. Returns the same group list
+/// as [`reconcile_terminal_duplicates`] for caller-side metrics/tests.
+///
+/// ISS-028 Task 1b / GOAL-5: this is intentionally **observe-only** — no
+/// state mutation, no file deletion. The point is to make duplicate
+/// terminal rituals *visible* in daemon logs so a human notices the
+/// pattern, not to silently clean up.
+///
+/// Logging shape (one record per group):
+/// - level: `WARN`
+/// - fields: `work_unit_label`, `count`, `ritual_ids`
+///
+/// Fail-soft: if the scan itself errors (I/O), we log the error and
+/// return an empty list rather than aborting daemon startup.
+pub fn reconcile_orphans(rituals_dir: &Path) -> Vec<DuplicateGroup> {
+    let groups = match reconcile_terminal_duplicates(rituals_dir) {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::error!("orphan reconcile failed: {}", e);
+            return Vec::new();
+        }
+    };
+
+    if groups.is_empty() {
+        tracing::debug!("orphan reconcile: no terminal duplicates");
+        return groups;
+    }
+
+    for g in &groups {
+        tracing::warn!(
+            work_unit_label = %g.work_unit_label,
+            count = g.ritual_ids.len(),
+            ritual_ids = ?g.ritual_ids,
+            "duplicate terminal rituals detected for {} ({} files): {:?}",
+            g.work_unit_label,
+            g.ritual_ids.len(),
+            g.ritual_ids
+        );
+    }
+    groups
+}
+
 fn parse_strategy(output: &str) -> ImplementStrategy {
     // Try to find JSON in the output
     if let Some(start) = output.find('{') {
@@ -1301,5 +1448,112 @@ mod duplicate_prevention_tests {
             "all matching rituals are terminal → pre-flight must clear; got: {:?}",
             hit.as_ref().map(|r| (&r.id, r.phase.clone()))
         );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Tests — terminal duplicate reconciler (ISS-028 Task 1b)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::*;
+    use gid_core::ritual::work_unit::WorkUnit;
+    use tempfile::TempDir;
+
+    fn iss(id: &str) -> WorkUnit {
+        WorkUnit::Issue {
+            project: "rustclaw".into(),
+            id: id.into(),
+        }
+    }
+
+    fn write_terminal(
+        dir: &Path,
+        ritual_id: &str,
+        wu: WorkUnit,
+        phase: RitualPhase,
+    ) {
+        assert!(phase.is_terminal(), "fixture: phase must be terminal");
+        let mut s = RitualState::new();
+        s.id = ritual_id.into();
+        s.task = format!("test {}", wu.label());
+        s.work_unit = Some(wu);
+        s = s.with_phase(phase);
+        let path = dir.join(format!("{}.json", ritual_id));
+        std::fs::write(path, serde_json::to_string_pretty(&s).unwrap()).unwrap();
+    }
+
+    /// Two terminal rituals on the same work unit → one duplicate group.
+    /// This is the canonical "leak in history" the reconciler exists to
+    /// surface (ISS-028 GOAL-5).
+    #[test]
+    fn two_terminal_rituals_same_work_unit_form_one_group() {
+        let tmp = TempDir::new().unwrap();
+        write_terminal(tmp.path(), "r-001", iss("ISS-028"), RitualPhase::Done);
+        write_terminal(
+            tmp.path(),
+            "r-002",
+            iss("ISS-028"),
+            RitualPhase::Cancelled,
+        );
+
+        let groups = reconcile_terminal_duplicates(tmp.path()).unwrap();
+        assert_eq!(groups.len(), 1, "exactly one duplicate group expected");
+        let g = &groups[0];
+        assert_eq!(g.work_unit_label, iss("ISS-028").label());
+        assert_eq!(g.ritual_ids, vec!["r-001".to_string(), "r-002".to_string()]);
+    }
+
+    /// Singletons are not duplicates: distinct work units, even if both
+    /// terminal, must not be reported. This is the no-false-positive
+    /// case — a healthy `.gid/rituals/` directory full of one-per-issue
+    /// completions stays silent.
+    #[test]
+    fn distinct_work_units_yield_no_groups() {
+        let tmp = TempDir::new().unwrap();
+        write_terminal(tmp.path(), "r-001", iss("ISS-028"), RitualPhase::Done);
+        write_terminal(tmp.path(), "r-002", iss("ISS-029"), RitualPhase::Done);
+
+        let groups = reconcile_terminal_duplicates(tmp.path()).unwrap();
+        assert!(groups.is_empty(), "different work units → no group");
+    }
+
+    /// A non-terminal ritual sharing a label with a terminal one is *not*
+    /// a duplicate-history case — that's the active-collision case that
+    /// `find_active_for_work_unit` handles. The reconciler must filter
+    /// non-terminal phases out before grouping.
+    #[test]
+    fn non_terminal_ritual_excluded_from_groups() {
+        let tmp = TempDir::new().unwrap();
+        write_terminal(tmp.path(), "r-done", iss("ISS-028"), RitualPhase::Done);
+        // Hand-write a non-terminal ritual on the same work unit.
+        let mut active = RitualState::new();
+        active.id = "r-active".into();
+        active.task = "active".into();
+        active.work_unit = Some(iss("ISS-028"));
+        active = active.with_phase(RitualPhase::Implementing);
+        std::fs::write(
+            tmp.path().join("r-active.json"),
+            serde_json::to_string_pretty(&active).unwrap(),
+        )
+        .unwrap();
+
+        let groups = reconcile_terminal_duplicates(tmp.path()).unwrap();
+        assert!(
+            groups.is_empty(),
+            "non-terminal ritual must not pair with terminal one; got: {:?}",
+            groups
+        );
+    }
+
+    /// Reconciler must survive a missing rituals dir (fresh checkout)
+    /// without erroring — daemon startup runs before any ritual exists.
+    #[test]
+    fn missing_dir_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+        let groups = reconcile_terminal_duplicates(&missing).unwrap();
+        assert!(groups.is_empty());
     }
 }

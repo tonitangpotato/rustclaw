@@ -2556,6 +2556,13 @@ pub async fn start(config: TelegramConfig, runner: Arc<AgentRunner>) -> anyhow::
                 tracing::error!("orphan sweep failed: {}", e);
             }
         }
+
+        // ISS-028 Task 1b: terminal-duplicate reconciler. Observe-only —
+        // surfaces historical leaks (two completed rituals on the same
+        // work unit) as WARN logs without mutating any file. Runs once
+        // per daemon start, after `sweep_orphans` so any zombies that
+        // were just cancelled into a terminal phase are also considered.
+        let _ = crate::ritual_runner::reconcile_orphans(&rituals_dir);
     }
 
     // Spawn sub-agent event listener for proactive completion handling
