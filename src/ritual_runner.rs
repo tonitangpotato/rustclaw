@@ -7,12 +7,11 @@
 //!
 //! What lives here now:
 //! - State-file readers (`load_state_by_id`, `find_latest_active`,
-//!   `find_waiting_approval`, `list_rituals`)
+//!   `list_rituals`)
 //! - Cancel/event registries (`CancelRegistry`, `EventRegistry`,
 //!   `cancel_running`, `cancel_all_running`)
 //! - Orphan sweeper (`sweep_orphans`)
 //! - Path helpers (`has_target_project_dir`, `extract_target_project_dir`)
-//! - Phase-name parsing (`parse_phase_name`)
 //! - Context-block builders (`preload_files_with_budget`)
 //!
 //! Everything that used to be a `RitualRunner::method(&self, …)` is now
@@ -225,7 +224,7 @@ fn sweep_orphans_in(rituals_dir: &Path) -> Result<Vec<(String, String)>> {
 // here. State files are owned by the state machine, not by call sites.
 
 /// Path of a ritual's state file inside `rituals_dir`.
-pub fn state_path_for(rituals_dir: &Path, ritual_id: &str) -> PathBuf {
+fn state_path_for(rituals_dir: &Path, ritual_id: &str) -> PathBuf {
     rituals_dir.join(format!("{}.json", ritual_id))
 }
 
@@ -241,9 +240,8 @@ pub fn load_state_by_id(rituals_dir: &Path, ritual_id: &str) -> Result<RitualSta
 }
 
 /// List all ritual states in `rituals_dir`, sorted by `updated_at` desc.
-/// Falls back to `legacy_state_path` if `rituals_dir` is empty.
-/// Defensive: corrupt or unparsable files are skipped with a warning.
-pub fn list_rituals(rituals_dir: &Path, legacy_state_path: Option<&Path>) -> Result<Vec<RitualState>> {
+/// Defensive: corrupt or unparsable files are skipped silently.
+pub fn list_rituals(rituals_dir: &Path) -> Result<Vec<RitualState>> {
     let mut rituals = Vec::new();
 
     if rituals_dir.exists() {
@@ -260,38 +258,20 @@ pub fn list_rituals(rituals_dir: &Path, legacy_state_path: Option<&Path>) -> Res
         }
     }
 
-    if rituals.is_empty() {
-        if let Some(legacy) = legacy_state_path {
-            if legacy.exists() {
-                if let Ok(data) = std::fs::read_to_string(legacy) {
-                    if let Ok(state) = serde_json::from_str::<RitualState>(&data) {
-                        rituals.push(state);
-                    }
-                }
-            }
-        }
-    }
-
     rituals.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     Ok(rituals)
 }
 
 /// Find the most relevant active ritual.
 /// Priority: paused (waiting for user input) > non-terminal active > none.
-pub fn find_latest_active(rituals_dir: &Path, legacy_state_path: Option<&Path>) -> Result<Option<RitualState>> {
-    let rituals = list_rituals(rituals_dir, legacy_state_path)?;
+pub fn find_latest_active(rituals_dir: &Path) -> Result<Option<RitualState>> {
+    let rituals = list_rituals(rituals_dir)?;
     if let Some(r) = rituals.iter().find(|r| r.phase.is_paused()) {
         return Ok(Some(r.clone()));
     }
     Ok(rituals.into_iter().find(|r| {
         !r.phase.is_terminal() && r.phase != RitualPhase::Idle
     }))
-}
-
-/// Find the ritual currently waiting for approval, if any.
-pub fn find_waiting_approval(rituals_dir: &Path, legacy_state_path: Option<&Path>) -> Result<Option<RitualState>> {
-    let rituals = list_rituals(rituals_dir, legacy_state_path)?;
-    Ok(rituals.into_iter().find(|r| r.phase == RitualPhase::WaitingApproval))
 }
 
 /// Sweep zombie ritual state files. See `sweep_orphans_in` for full semantics.
@@ -829,25 +809,6 @@ async fn count_source_files_in_project(root: &Path) -> usize {
         }
     }
     total
-}
-
-/// Parse a phase name string into a RitualPhase.
-/// Accepts display names, short names, and aliases.
-pub fn parse_phase_name(name: &str) -> Option<RitualPhase> {
-    match name.to_lowercase().trim() {
-        "idle" => Some(RitualPhase::Idle),
-        "init" | "initializing" | "initialize" => Some(RitualPhase::Initializing),
-        "triage" | "triaging" => Some(RitualPhase::Triaging),
-        "requirements" | "req" | "writing-requirements" | "writingrequirements" => Some(RitualPhase::WritingRequirements),
-        "design" | "designing" => Some(RitualPhase::Designing),
-        "review" | "reviewing" => Some(RitualPhase::Reviewing),
-        "plan" | "planning" => Some(RitualPhase::Planning),
-        "graph" | "graphing" => Some(RitualPhase::Graphing),
-        "implement" | "implementing" | "impl" => Some(RitualPhase::Implementing),
-        "verify" | "verifying" | "test" | "testing" => Some(RitualPhase::Verifying),
-        "done" => Some(RitualPhase::Done),
-        _ => None,
-    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -881,7 +881,7 @@ Choose a model:", current),
         match arg {
             "status" => {
                 let rituals_dir = self.runner.workspace_root().join(".gid/rituals");
-                match crate::ritual_runner::list_rituals(&rituals_dir, None) {
+                match crate::ritual_runner::list_rituals(&rituals_dir) {
                     Ok(rituals) if rituals.is_empty() => {
                         self.send_message(chat_id, "No rituals found.", None).await?;
                     }
@@ -925,7 +925,7 @@ Choose a model:", current),
                         }
                     }
                 } else {
-                    match crate::ritual_runner::find_latest_active(&rituals_dir, None)? {
+                    match crate::ritual_runner::find_latest_active(&rituals_dir)? {
                         Some(s) => s,
                         None => {
                             self.send_message(chat_id, "No active ritual to cancel.", None).await?;
@@ -992,7 +992,7 @@ Choose a model:", current),
             }
             "retry" => {
                 let rituals_dir = self.runner.workspace_root().join(".gid/rituals");
-                let state = match crate::ritual_runner::find_latest_active(&rituals_dir, None)? {
+                let state = match crate::ritual_runner::find_latest_active(&rituals_dir)? {
                     Some(s) => s,
                     None => {
                         self.send_message(chat_id, "No active ritual to retry.", None).await?;
@@ -1014,7 +1014,7 @@ Choose a model:", current),
             }
             "skip" => {
                 let rituals_dir = self.runner.workspace_root().join(".gid/rituals");
-                let state = match crate::ritual_runner::find_latest_active(&rituals_dir, None)? {
+                let state = match crate::ritual_runner::find_latest_active(&rituals_dir)? {
                     Some(s) => s,
                     None => {
                         self.send_message(chat_id, "No active ritual to skip phase.", None).await?;
@@ -1085,7 +1085,7 @@ Choose a model:", current),
                     self.send_message(chat_id, "⚠️ Usage: `/ritual clarify <your response>`", None).await?;
                 } else {
                     let rituals_dir = self.runner.workspace_root().join(".gid/rituals");
-                    let state = match crate::ritual_runner::find_latest_active(&rituals_dir, None)? {
+                    let state = match crate::ritual_runner::find_latest_active(&rituals_dir)? {
                         Some(s) => s,
                         None => {
                             self.send_message(chat_id, "No active ritual.", None).await?;
@@ -1118,7 +1118,7 @@ Choose a model:", current),
                     .to_string();
                 let rituals_dir = self.runner.workspace_root().join(".gid/rituals");
                 // Find rituals waiting for approval
-                let waiting: Vec<_> = crate::ritual_runner::list_rituals(&rituals_dir, None)?
+                let waiting: Vec<_> = crate::ritual_runner::list_rituals(&rituals_dir)?
                     .into_iter()
                     .filter(|r| r.phase == gid_core::ritual::V2Phase::WaitingApproval)
                     .collect();
@@ -1178,7 +1178,7 @@ Choose a model:", current),
                 if looks_like_command {
                     // Check if there's a waiting ritual that should receive this
                     let rituals_dir = self.runner.workspace_root().join(".gid/rituals");
-                    if let Ok(Some(state)) = crate::ritual_runner::find_latest_active(&rituals_dir, None) {
+                    if let Ok(Some(state)) = crate::ritual_runner::find_latest_active(&rituals_dir) {
                         if state.phase == gid_core::ritual::V2Phase::WaitingApproval
                             || state.phase == gid_core::ritual::V2Phase::WaitingClarification
                         {
@@ -1264,7 +1264,7 @@ Choose a model:", current),
     /// which calls gid_core::ritual::resume_ritual via RustclawHooks.
     async fn try_route_to_waiting_ritual(&self, chat_id: i64, text: &str) -> bool {
         let rituals_dir = self.runner.workspace_root().join(".gid/rituals");
-        let state = match crate::ritual_runner::find_latest_active(&rituals_dir, None) {
+        let state = match crate::ritual_runner::find_latest_active(&rituals_dir) {
             Ok(Some(s)) => s,
             _ => return false,
         };
