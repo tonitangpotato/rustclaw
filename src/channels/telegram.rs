@@ -1029,125 +1029,37 @@ Choose a model:", current),
                 }
             }
             "done" => {
-                let runner = self.make_ritual_runner(chat_id);
-                let state = runner.load_state()?;
-                if state.phase.is_terminal() || state.phase == gid_core::ritual::V2Phase::Idle {
-                    self.send_message(chat_id, "No active ritual phase to mark as done.", None).await?;
-                } else {
-                    let phase_name = state.phase.display_name().to_string();
-                    let ritual_id = state.id.clone();
-                    self.send_message(
-                        chat_id,
-                        &format!("✅ Marking '{}' phase as manually completed...", phase_name),
-                        None,
-                    ).await?;
-                    let bot = self.clone();
-                    tokio::spawn(async move {
-                        match runner.mark_phase_done(&ritual_id).await {
-                            Ok(new_state) => {
-                                let msg = format!(
-                                    "✅ '{}' done. Now in: {} phase.",
-                                    phase_name, new_state.phase.display_name()
-                                );
-                                let _ = bot.send_message(chat_id, &msg, None).await;
-                            }
-                            Err(e) => {
-                                let _ = bot.send_message(chat_id, &format!("❌ Mark done failed: {}", e), None).await;
-                            }
-                        }
-                    });
-                }
-            }
-            arg if arg.starts_with("resume-from ") || arg.starts_with("resume ") => {
-                let rest = arg.strip_prefix("resume-from ")
-                    .or_else(|| arg.strip_prefix("resume "))
-                    .unwrap_or("")
-                    .trim();
-
-                // First word is phase name, rest (if any) is task description
-                let (phase_str, inline_task) = match rest.split_once(' ') {
-                    Some((p, t)) => (p.trim(), Some(t.trim().to_string())),
-                    None => (rest, None),
-                };
-                
-                let phase = match crate::ritual_runner::parse_phase_name(phase_str) {
-                    Some(p) => p,
-                    None => {
-                        self.send_message(
-                            chat_id,
-                            &format!(
-                                "❌ Unknown phase: '{}'\n\nValid phases: design, review, plan, graph, implement, verify, triage, requirements",
-                                phase_str
-                            ),
-                            None,
-                        ).await?;
-                        return Ok(());
-                    }
-                };
-
-                if phase.is_terminal() {
-                    self.send_message(chat_id, "❌ Cannot resume from a terminal phase (done/cancelled/escalated).", None).await?;
-                    return Ok(());
-                }
-
-                // Task source priority: inline task > existing ritual task
-                let runner = self.make_ritual_runner(chat_id);
-                let existing_task = runner.load_state().ok()
-                    .filter(|s| !s.task.is_empty())
-                    .map(|s| s.task.clone());
-
-                let task = inline_task.or(existing_task);
-                let task = match task {
-                    Some(t) => t,
-                    None => {
-                        self.send_message(
-                            chat_id,
-                            "⚠️ No task description found. Usage: `/ritual resume-from <phase> <task description>`",
-                            None,
-                        ).await?;
-                        return Ok(());
-                    }
-                };
-
-                let phase_display = phase.display_name().to_string();
+                // ISS-052: removed. Manually marking a phase "done" bypasses the
+                // V2Executor state machine — the same anti-pattern this issue targets.
+                // If a phase actually completed, let the executor advance via natural
+                // resumption; if it's stuck, use /ritual skip or /ritual cancel.
                 self.send_message(
                     chat_id,
-                    &format!("🔄 Resuming ritual from {} phase...", phase_display),
+                    "❌ `/ritual done` was removed (ISS-052).\n\n\
+                     Manually marking a phase done bypasses the ritual state machine. \
+                     Use one of:\n\
+                     • `/ritual skip` — skip the current phase if it's truly stuck\n\
+                     • `/ritual retry` — retry from an escalated state\n\
+                     • `/ritual cancel` — abort the ritual entirely",
                     None,
                 ).await?;
-
-                let bot = self.clone();
-                let notify_fn = self.make_notify_fn(chat_id);
-                let cancel_registry = self.ritual_cancel_registry.clone();
-                let event_registry = self.ritual_event_registry.clone();
-                tokio::spawn(async move {
-                    let ritual_llm = match crate::llm::create_client(&bot.runner.config().llm) {
-                        Ok(c) => Arc::new(tokio::sync::RwLock::new(c)),
-                        Err(e) => {
-                            let _ = bot.send_message(chat_id, &format!("❌ Failed to create LLM client: {}", e), None).await;
-                            return;
-                        }
-                    };
-                    let runner = crate::ritual_runner::RitualRunner::with_registries(
-                        bot.runner.workspace_root().to_path_buf(),
-                        ritual_llm,
-                        notify_fn,
-                        cancel_registry,
-                        event_registry,
-                    ).with_agent_runner(bot.runner.clone());
-
-                    match runner.resume_from_phase(task, phase, None).await {
-                        Ok(state) => {
-                            if let Err(e) = runner.save_state(&state) {
-                                tracing::error!("Failed to save ritual state: {}", e);
-                            }
-                            tracing::info!("Resume-from completed in {} phase", state.phase.display_name());
-                        }
-                        Err(e) => {
-                            let _ = bot.send_message(chat_id, &format!("❌ Resume failed: {}", e), None).await;
-                        }
-                    }
-                });
+            }
+            arg if arg.starts_with("resume-from ") || arg.starts_with("resume ") || arg == "resume-from" || arg == "resume" => {
+                // ISS-052: removed. Jumping into an arbitrary phase bypasses the
+                // V2Executor's prerequisite checks (e.g., entering "implement" without
+                // a finalized design or graph). The state machine is the source of
+                // truth; users cannot teleport over it.
+                self.send_message(
+                    chat_id,
+                    "❌ `/ritual resume-from <phase>` was removed (ISS-052).\n\n\
+                     Jumping into an arbitrary phase skips prerequisite gates \
+                     (design → review → plan → graph → implement → verify) and corrupts \
+                     ritual state. To recover a stuck or failed ritual, use:\n\
+                     • `/ritual retry` — retry from the escalated state\n\
+                     • `/ritual skip` — skip the current phase\n\
+                     • `/ritual cancel` then `/ritual <task>` — start fresh",
+                    None,
+                ).await?;
             }
             "" => {
                 self.send_message(
@@ -1158,8 +1070,6 @@ Choose a model:", current),
                      `/ritual cancel [id]` — Cancel a ritual (latest or by ID)\n\
                      `/ritual retry` — Retry from escalated state\n\
                      `/ritual skip` — Skip current phase\n\
-                     `/ritual done` — Mark current phase as manually completed\n\
-                     `/ritual resume-from <phase>` — Resume from a specific phase (design, review, plan, graph, implement, verify)\n\
                      `/ritual approve [findings]` — Approve review findings (e.g., `approve FINDING-1,3` or `approve all`)\n\
                      `/ritual clarify <response>` — Answer clarification question",
                     None,
