@@ -5902,13 +5902,40 @@ impl Tool for StartRitualTool {
                 Box::pin(async {})
             }));
 
-        // Runner's own workspace_root is only a fallback for other code paths;
-        // `start_with_work_unit` derives the real target from the registry.
-        let runner = crate::ritual_runner::RitualRunner::new(
-            self.workspace_root.clone(),
-            llm_client,
-            notify,
-        );
+        // ── ISS-052 T12: migrate to gid_core::ritual::run_ritual ──
+        //
+        // Build the initial RitualState carrying just the WorkUnit (no
+        // resolved path). `run_ritual` calls `hooks.resolve_workspace`
+        // before any phase action runs (§5.6.2 lifecycle step 1) and
+        // populates `state.target_root` from the result. This keeps
+        // resolution side-effects under hook control.
+        let mut initial = gid_core::ritual::state_machine::RitualState::new();
+        initial.task = task.clone();
+        initial.work_unit = Some(work_unit);
+
+        // Cancel token for this ritual. The `start_ritual` tool isn't wired
+        // into the Telegram cancel registry today — `/ritual cancel` from
+        // chat won't reach a tool-spawned ritual. We construct a fresh
+        // token so `RustclawHooks::should_cancel` has something to poll;
+        // future work can plumb this through `ToolRegistry` if needed.
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+
+        let rituals_dir = self.workspace_root.join(".gid/rituals");
+        let hooks: Arc<dyn gid_core::ritual::RitualHooks> =
+            Arc::new(crate::ritual_hooks::RustclawHooks::new(
+                notify,
+                rituals_dir,
+                cancel_token,
+            ));
+
+        let config = gid_core::ritual::V2ExecutorConfig {
+            project_root: self.workspace_root.clone(),
+            llm_client: Some(crate::ritual_adapter::RitualLlmAdapter::new(llm_client).into_arc()),
+            notify: None, // legacy field — superseded by hooks
+            hooks: None,  // run_ritual receives `hooks` directly; this field is for V2Executor
+            skill_model: "opus".to_string(),
+            planning_model: "sonnet".to_string(),
+        };
 
         // Invalidate the registry cache before starting — so the new ritual
         // state file is picked up immediately on the next prompt build.
@@ -5917,7 +5944,7 @@ impl Tool for StartRitualTool {
             reg.invalidate();
         }
 
-        let result = runner.start_with_work_unit(work_unit, task).await;
+        let outcome = gid_core::ritual::run_ritual(initial, config, hooks).await;
 
         // Invalidate again after the ritual has transitioned — captures the
         // terminal phase (Done/Escalated/Cancelled/WaitingApproval/…) so the
@@ -5926,85 +5953,86 @@ impl Tool for StartRitualTool {
             reg.invalidate();
         }
 
-        match result {
-            Ok(state) => {
-                if let Err(e) = runner.save_state(&state) {
-                    tracing::error!("Failed to save ritual state: {}", e);
-                }
-
-                let phase_name = state.phase.display_name();
-                let ritual_id = &state.id;
-                let target_root = state.target_root.as_deref().unwrap_or("(unknown)");
-                let output = match state.phase {
-                    gid_core::ritual::state_machine::RitualPhase::Done => {
-                        format!("✅ Ritual completed successfully! Final phase: {}", phase_name)
-                    }
-                    gid_core::ritual::state_machine::RitualPhase::Escalated => {
-                        format!(
-                            "⚠️ Ritual escalated at {} phase.\nError: {}\nUse /ritual retry to retry.",
-                            phase_name,
-                            state.error_context.as_deref().unwrap_or("unknown")
-                        )
-                    }
-                    gid_core::ritual::state_machine::RitualPhase::Cancelled => {
-                        "🛑 Ritual was cancelled.".to_string()
-                    }
-                    gid_core::ritual::state_machine::RitualPhase::WaitingApproval => {
-                        let review_target = state.review_target.as_deref().unwrap_or("unknown");
-                        format!(
-                            "⏸️ Ritual paused — waiting for approval of {} review.\n\
-                             Review findings are in `.gid/reviews/`.\n\
-                             The user can approve via `/ritual approve all` or `/ritual skip`.\n\
-                             You may continue implementing independently if the design is already clear.",
-                            review_target
-                        )
-                    }
-                    gid_core::ritual::state_machine::RitualPhase::WaitingClarification => {
-                        let questions = state.error_context.as_deref().unwrap_or("Task needs clarification");
-                        format!(
-                            "⏸️ Ritual paused — task is ambiguous and needs clarification.\n\
-                             Questions: {}\n\
-                             Ask the user for details, then use `/ritual retry` to resume.",
-                            questions
-                        )
-                    }
-                    // Healthy mid-ritual states: ritual was kicked off, EP actions
-                    // are running in background tasks (tokio::spawn), and the call
-                    // returned the intermediate state immediately. NOT a failure.
-                    // ISS-026 + ISS-048 — previous catch-all `_` arm conflated this
-                    // with terminal failure and set is_error=true.
-                    _ => {
-                        format!(
-                            "🔧 Ritual started (id={}); running in background.\n\
-                             Current phase: {}\n\
-                             Target root: {}\n\
-                             Use /ritual status to check progress, or read \
-                             `.gid/rituals/{}.json` directly. The ritual will continue \
-                             advancing through phases on its own.",
-                            ritual_id, phase_name, target_root, ritual_id
-                        )
-                    }
-                };
-
-                // Only true terminal failures are errors. Done = success;
-                // pause states (WaitingApproval/WaitingClarification) and healthy
-                // mid-ritual states are NOT errors — the ritual is working as designed.
-                let is_error = matches!(
-                    state.phase,
-                    gid_core::ritual::state_machine::RitualPhase::Escalated
-                        | gid_core::ritual::state_machine::RitualPhase::Cancelled
-                );
-
-                Ok(ToolResult {
-                    output,
-                    is_error,
-                })
+        // `run_ritual` always returns a `RitualOutcome` (no `Result`):
+        // workspace-resolution failures route through the state machine
+        // and surface as `RitualOutcomeStatus::WorkspaceFailed` with the
+        // error in `state.error_context`. Persistence is handled by
+        // `hooks.persist_state` during execution, so no manual save here.
+        let state = &outcome.state;
+        let phase_name = state.phase.display_name();
+        let ritual_id = &state.id;
+        let target_root = state.target_root.as_deref().unwrap_or("(unknown)");
+        let output = match state.phase {
+            gid_core::ritual::state_machine::RitualPhase::Done => {
+                format!("✅ Ritual completed successfully! Final phase: {}", phase_name)
             }
-            Err(e) => Ok(ToolResult {
-                output: format!("❌ Ritual failed: {}", e),
-                is_error: true,
-            }),
-        }
+            gid_core::ritual::state_machine::RitualPhase::Escalated => {
+                format!(
+                    "⚠️ Ritual escalated at {} phase.\nError: {}\nUse /ritual retry to retry.",
+                    phase_name,
+                    state.error_context.as_deref().unwrap_or("unknown")
+                )
+            }
+            gid_core::ritual::state_machine::RitualPhase::Cancelled => {
+                "🛑 Ritual was cancelled.".to_string()
+            }
+            gid_core::ritual::state_machine::RitualPhase::WaitingApproval => {
+                let review_target = state.review_target.as_deref().unwrap_or("unknown");
+                format!(
+                    "⏸️ Ritual paused — waiting for approval of {} review.\n\
+                     Review findings are in `.gid/reviews/`.\n\
+                     The user can approve via `/ritual approve all` or `/ritual skip`.\n\
+                     You may continue implementing independently if the design is already clear.",
+                    review_target
+                )
+            }
+            gid_core::ritual::state_machine::RitualPhase::WaitingClarification => {
+                let questions = state.error_context.as_deref().unwrap_or("Task needs clarification");
+                format!(
+                    "⏸️ Ritual paused — task is ambiguous and needs clarification.\n\
+                     Questions: {}\n\
+                     Ask the user for details, then use `/ritual retry` to resume.",
+                    questions
+                )
+            }
+            // Defensive: `run_ritual` is supposed to drive to a terminal
+            // or paused phase, so this branch should be unreachable in
+            // practice. If we somehow exit on a non-terminal phase
+            // (state-machine bug, iteration limit), surface it as a
+            // background-running message rather than an error — matches
+            // the previous semantics for ISS-026 + ISS-048.
+            _ => {
+                format!(
+                    "🔧 Ritual started (id={}); running in background.\n\
+                     Current phase: {}\n\
+                     Target root: {}\n\
+                     Use /ritual status to check progress, or read \
+                     `.gid/rituals/{}.json` directly. The ritual will continue \
+                     advancing through phases on its own.",
+                    ritual_id, phase_name, target_root, ritual_id
+                )
+            }
+        };
+
+        // Only true terminal failures are errors. Done = success;
+        // pause states (WaitingApproval/WaitingClarification) and healthy
+        // mid-ritual states are NOT errors — the ritual is working as designed.
+        // `RitualOutcomeStatus::WorkspaceFailed` doesn't have a matching
+        // phase (state never advanced past Idle), so we check status too.
+        let is_error = matches!(
+            state.phase,
+            gid_core::ritual::state_machine::RitualPhase::Escalated
+                | gid_core::ritual::state_machine::RitualPhase::Cancelled
+        ) || matches!(
+            outcome.status,
+            gid_core::ritual::RitualOutcomeStatus::WorkspaceFailed
+                | gid_core::ritual::RitualOutcomeStatus::IterationLimitExceeded
+        );
+
+        Ok(ToolResult {
+            output,
+            is_error,
+        })
     }
 }
 

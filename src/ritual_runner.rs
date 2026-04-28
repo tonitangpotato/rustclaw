@@ -222,15 +222,20 @@ impl RitualRunner {
     /// Save state to disk (uses ritual ID for path).
     /// Also stamps `adapter_pid` to the current process so the main agent's
     /// `RitualRegistry` can detect whether it is the executor of a SingleLlm ritual.
-    pub fn save_state(&self, state: &RitualState) -> Result<()> {
-        std::fs::create_dir_all(&self.rituals_dir)?;
-        let path = self.state_path_for(&state.id);
-        // Stamp the current process PID without mutating the caller's state.
-        let mut stamped = state.clone();
-        stamped.adapter_pid = Some(std::process::id());
-        let data = serde_json::to_string_pretty(&stamped)?;
-        std::fs::write(&path, data)?;
-        Ok(())
+    pub fn save_state(&self, _state: &RitualState) -> Result<()> {
+        // ISS-052 T13a: dispatcher migrated to gid_core::ritual::run_ritual via T12.
+        // Body stubbed to a graceful Err to catch any legacy call site that escaped
+        // T13b's migration sweep. Production must not reach this branch — if it does,
+        // it means a /ritual subcommand handler in telegram.rs still calls the old
+        // path. Fix the caller, do not remove this guard.
+        tracing::error!(
+            target: "ritual_runner",
+            fn_name = "save_state",
+            "ISS-052: legacy RitualRunner::save_state reached after T12/T13a migration —              this should be unreachable. The caller must be migrated to run_ritual              (T13b) or to a thin event-recording shim. Returning Err."
+        );
+        Err(anyhow::anyhow!(
+            "ISS-052: RitualRunner::save_state is a stub after T13a — caller must migrate              to gid_core::ritual::run_ritual (see T13b)"
+        ))
     }
 
     /// Start a new ritual with a task description.
@@ -939,80 +944,20 @@ impl RitualRunner {
     }
 
     /// Run triage — lightweight haiku LLM call to assess task clarity/size.
-    async fn run_triage(&self, task: &str, ritual_state: &RitualState) -> Result<(RitualEvent, u64)> {
-        use gid_core::ritual::TriageResult;
-
-        // Build project context for triage prompt (single source of truth in gid-core)
-        let project_ctx = if let Some(ps) = ritual_state.project.as_ref() {
-            format!(
-                "Project: lang={}, has_req={}, has_design={}, has_graph={}, source_files={}, has_tests={}",
-                ps.language.as_deref().unwrap_or("unknown"),
-                ps.has_requirements, ps.has_design, ps.has_graph,
-                ps.source_file_count, ps.has_tests
-            )
-        } else {
-            "Project: unknown state".into()
-        };
-
-        let prompt = gid_core::ritual::build_triage_prompt(task, &project_ctx);
-
-        // Use haiku for triage (cheap, fast)
-        let model = "claude-haiku-4-5-20251001";
-        tracing::info!(task = task, model = model, "Running triage");
-
-        let llm = self.llm_client.read().await;
-        let messages = vec![crate::llm::Message::text("user", &prompt)];
-        match llm.chat_with_model("You are a triage agent.", &messages, &[], model).await {
-            Ok(response) => {
-                let response_text = response.text.clone().unwrap_or_default();
-                let tokens_used = (response.usage.input_tokens + response.usage.output_tokens) as u64;
-                
-                // Try to parse JSON from response
-                let json_str = Self::extract_json_str(&response_text);
-                match serde_json::from_str::<TriageResult>(json_str) {
-                    Ok(mut result) => {
-                        // Deterministic override: if design already exists, skip design phase
-                        // regardless of what Haiku says. LLM triage is advisory, not authoritative
-                        // for facts we can verify deterministically.
-                        if let Some(ps) = &ritual_state.project {
-                            if ps.has_design && !result.skip_design {
-                                tracing::info!("Override: skip_design=true (design already exists)");
-                                result.skip_design = true;
-                            }
-                        }
-
-                        tracing::info!(
-                            clarity = %result.clarity,
-                            size = %result.size,
-                            skip_design = result.skip_design,
-                            skip_graph = result.skip_graph,
-                            "Triage complete"
-                        );
-                        Ok((RitualEvent::TriageCompleted(result), tokens_used))
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to parse triage JSON: {}. Response: {}. Defaulting to full flow.", e, &response_text[..response_text.floor_char_boundary(200)]);
-                        Ok((RitualEvent::TriageCompleted(TriageResult {
-                            clarity: "clear".into(),
-                            clarify_questions: vec![],
-                            size: "large".into(),
-                            skip_design: false,
-                            skip_graph: false,
-                        }), tokens_used))
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Triage LLM call failed: {}. Defaulting to full flow.", e);
-                Ok((RitualEvent::TriageCompleted(TriageResult {
-                    clarity: "clear".into(),
-                    clarify_questions: vec![],
-                    size: "large".into(),
-                    skip_design: false,
-                    skip_graph: false,
-                }), 0))
-            }
-        }
+    async fn run_triage(&self, _task: &str, _ritual_state: &RitualState) -> Result<(RitualEvent, u64)> {
+        // ISS-052 T13a: dispatcher migrated to gid_core::ritual::run_ritual via T12.
+        // Body stubbed to a graceful Err to catch any legacy call site that escaped
+        // T13b's migration sweep. Production must not reach this branch — if it does,
+        // it means a /ritual subcommand handler in telegram.rs still calls the old
+        // path. Fix the caller, do not remove this guard.
+        tracing::error!(
+            target: "ritual_runner",
+            fn_name = "run_triage",
+            "ISS-052: legacy RitualRunner::run_triage reached after T12/T13a migration —              this should be unreachable. The caller must be migrated to run_ritual              (T13b) or to a thin event-recording shim. Returning Err."
+        );
+        Err(anyhow::anyhow!(
+            "ISS-052: RitualRunner::run_triage is a stub after T13a — caller must migrate              to gid_core::ritual::run_ritual (see T13b)"
+        ))
     }
 
     /// Extract JSON from LLM output (handles markdown code fences).
@@ -1041,331 +986,23 @@ impl RitualRunner {
     /// Falls back to direct RitualLlmAdapter when AgentRunner is None (testing, standalone).
     async fn run_skill(
         &self,
-        name: &str,
-        context: &str,
-        cancel_token: &tokio_util::sync::CancellationToken,
+        _name: &str,
+        _context: &str,
+        _cancel_token: &tokio_util::sync::CancellationToken,
     ) -> Result<(RitualEvent, u64)> {
-        // V2: all phases use typed sub-agents when AgentRunner is available
-        if let Some(ref runner) = self.agent_runner {
-            let agent_type = match name {
-                "implement" | "execute-tasks" => &crate::agent::AgentType::CODER,
-                "review-design" | "review-requirements" | "review-tasks" => &crate::agent::AgentType::REVIEWER,
-                "draft-design" | "update-design" => &crate::agent::AgentType::PLANNER,
-                _ => &crate::agent::AgentType::CODER,
-            };
-
-            let phase_context = match name {
-                "implement" | "execute-tasks" => build_implement_context(&self.project_root),
-                n if n.starts_with("review-") => build_review_context(name, &self.project_root),
-                _ => vec![],
-            };
-
-            // Map phase name → skill name for SkillRegistry injection
-            let skill_name = match name {
-                "implement" | "execute-tasks" => Some("implement"),
-                n if n.starts_with("review-") => Some(n),
-                "draft-design" | "update-design" => Some(name),
-                _ => None,
-            };
-
-            // implement/execute-tasks use the agent's current model; others use sonnet
-            let model = match name {
-                "implement" | "execute-tasks" => {
-                    let client = self.llm_client.read().await;
-                    Some(client.model_name().to_string())
-                }
-                _ => Some("claude-sonnet-4-5-20250929".to_string()),
-            };
-
-            let options = crate::agent::SubAgentOptions {
-                workspace: Some(self.project_root.clone()),
-                context: phase_context,
-                skill: skill_name.map(String::from),
-                model,
-                ..Default::default()
-            };
-
-            const MAX_RATE_LIMIT_RETRIES: u32 = 3;
-            let mut rate_limit_attempts = 0u32;
-
-            let _sub_result = loop {
-                let attempt_result = tokio::select! {
-                    _ = cancel_token.cancelled() => {
-                        return Ok((RitualEvent::SkillFailed {
-                            phase: name.to_string(),
-                            error: "Cancelled".to_string(),
-                            reason: None,
-                        }, 0));
-                    }
-                    r = runner.run_subagent(agent_type, context, options.clone()) => r,
-                };
-
-                use crate::agent::SubAgentOutcome;
-                match &attempt_result.outcome {
-                    // Success → return immediately
-                    SubAgentOutcome::Completed => {
-                        tracing::info!(
-                            "Ritual phase '{}' completed via sub-agent ({} tokens, {} files)",
-                            name, attempt_result.tokens, attempt_result.files_modified.len()
-                        );
-                        return Ok((RitualEvent::SkillCompleted {
-                            phase: name.to_string(),
-                            artifacts: attempt_result.files_modified,
-                        }, attempt_result.tokens));
-                    }
-
-                    // Cancelled → propagate, don't fallback
-                    SubAgentOutcome::Cancelled => {
-                        return Ok((RitualEvent::SkillFailed {
-                            phase: name.to_string(),
-                            error: "Cancelled by user".to_string(),
-                            reason: None,
-                        }, attempt_result.tokens));
-                    }
-
-                    // Auth failed → bail out, fallback would hit the same auth wall
-                    SubAgentOutcome::AuthFailed(msg) => {
-                        tracing::error!("Ritual phase '{}' auth failed: {}", name, msg);
-                        return Ok((RitualEvent::SkillFailed {
-                            phase: name.to_string(),
-                            error: format!("Authentication failed: {}", msg),
-                        reason: None,
-                        }, attempt_result.tokens));
-                    }
-
-                    // Rate limited → retry with exponential backoff (max 3 attempts)
-                    SubAgentOutcome::RateLimited(msg) => {
-                        rate_limit_attempts += 1;
-                        if rate_limit_attempts > MAX_RATE_LIMIT_RETRIES {
-                            tracing::warn!(
-                                "Ritual phase '{}' rate limited {} times, falling back to direct execution",
-                                name, rate_limit_attempts
-                            );
-                            (self.notify)(format!(
-                                "⚠️ Rate limited {}x for '{}', falling back to direct execution...",
-                                rate_limit_attempts, name
-                            )).await;
-                            break attempt_result;
-                        }
-                        let backoff_secs = 2u64.pow(rate_limit_attempts); // 2s, 4s, 8s
-                        tracing::warn!(
-                            "Ritual phase '{}' rate limited ({}), retry {}/{} in {}s",
-                            name, msg, rate_limit_attempts, MAX_RATE_LIMIT_RETRIES, backoff_secs
-                        );
-                        (self.notify)(format!(
-                            "⏳ Rate limited for '{}', retrying in {}s ({}/{})...",
-                            name, backoff_secs, rate_limit_attempts, MAX_RATE_LIMIT_RETRIES
-                        )).await;
-                        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
-                        continue;
-                    }
-
-                    // MaxIterations, ContextTooLarge, Timeout, Error → fall through to direct LLM
-                    outcome => {
-                        tracing::warn!(
-                            "Ritual phase '{}' sub-agent failed ({}), falling back to direct LLM execution",
-                            name, outcome.display()
-                        );
-                        (self.notify)(format!(
-                            "⚠️ Sub-agent failed for '{}' ({}), falling back to direct execution...",
-                            name, outcome.display()
-                        )).await;
-                        break attempt_result;
-                    }
-                }
-            };
-        }
-
-        // Fallback: direct execution via RitualLlmAdapter (no session management)
-        use crate::ritual_adapter::RitualLlmAdapter;
-        use gid_core::ritual::llm::{LlmClient as GidLlmClient, ToolDefinition};
-        use gid_core::ritual::scope::default_scope_for_phase;
-
-        let adapter = RitualLlmAdapter::new(self.llm_client.clone());
-        let gid_client: Arc<dyn GidLlmClient> = adapter.into_arc();
-
-        // Load skill-specific prompt (file-based, with built-in fallback)
-        let base_prompt = self.load_skill_prompt(name);
-        let skill_prompt = if context.is_empty() {
-            base_prompt
-        } else {
-            format!("## USER TASK\n{}\n\n## INSTRUCTIONS\n{}", context, base_prompt)
-        };
-
-        // All available tool definitions
-        let all_tools = vec![
-            ("Read", ToolDefinition {
-                name: "Read".into(),
-                description: "Read a file from disk".into(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "File path relative to project root" }
-                    },
-                    "required": ["path"]
-                }),
-            }),
-            ("Write", ToolDefinition {
-                name: "Write".into(),
-                description: "Write entire content to a file (creates or overwrites)".into(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "File path relative to project root" },
-                        "content": { "type": "string", "description": "Full file content to write" }
-                    },
-                    "required": ["path", "content"]
-                }),
-            }),
-            ("Edit", ToolDefinition {
-                name: "Edit".into(),
-                description: "Replace exact text in a file. oldText must match exactly (including whitespace). Use for precise, surgical edits instead of rewriting entire files.".into(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "File path relative to project root" },
-                        "oldText": { "type": "string", "description": "Exact text to find and replace" },
-                        "newText": { "type": "string", "description": "New text to replace with" }
-                    },
-                    "required": ["path", "oldText", "newText"]
-                }),
-            }),
-            ("Bash", ToolDefinition {
-                name: "Bash".into(),
-                description: "Run a bash command".into(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "command": { "type": "string", "description": "Bash command to execute" }
-                    },
-                    "required": ["command"]
-                }),
-            }),
-        ];
-
-        // Filter tools by ToolScope for this phase (§5 of DESIGN-ritual-v2)
-        let scope = default_scope_for_phase(name);
-        let tools: Vec<ToolDefinition> = all_tools.into_iter()
-            .filter(|(tool_name, _)| scope.allowed_tools.contains(&tool_name.to_string()))
-            .map(|(_, def)| def)
-            .collect();
-
-        tracing::debug!(
-            skill = name,
-            tools = ?tools.iter().map(|t| &t.name).collect::<Vec<_>>(),
-            "ToolScope filtered tools for phase"
+        // ISS-052 T13a: dispatcher migrated to gid_core::ritual::run_ritual via T12.
+        // Body stubbed to a graceful Err to catch any legacy call site that escaped
+        // T13b's migration sweep. Production must not reach this branch — if it does,
+        // it means a /ritual subcommand handler in telegram.rs still calls the old
+        // path. Fix the caller, do not remove this guard.
+        tracing::error!(
+            target: "ritual_runner",
+            fn_name = "run_skill",
+            "ISS-052: legacy RitualRunner::run_skill reached after T12/T13a migration —              this should be unreachable. The caller must be migrated to run_ritual              (T13b) or to a thin event-recording shim. Returning Err."
         );
-
-        // implement phase benefits from stronger model; others use sonnet
-        let model = match name {
-            "implement" => "opus",
-            _ => "sonnet",
-        };
-
-        let result = gid_client.run_skill(
-            &skill_prompt,
-            tools.clone(),
-            model,
-            &self.project_root,
-            25,
-        ).await;
-
-        match result {
-            Ok(skill_result) => {
-                let mut total_tokens = skill_result.tokens_used;
-                tracing::info!(
-                    "Skill '{}' completed: {} tool calls, {} tokens",
-                    name, skill_result.tool_calls_made, total_tokens
-                );
-
-                // Self-review loop: up to N rounds of auto-review after key phases.
-                // Each round reads back output and checks for issues.
-                // Stops when LLM responds with REVIEW_PASS or max rounds reached.
-                let review_phases = ["implement", "execute-tasks", "draft-design", "update-design", "draft-requirements"];
-                if review_phases.contains(&name) {
-                    let max_reviews = 4;
-                    for round in 1..=max_reviews {
-                        if cancel_token.is_cancelled() {
-                            tracing::info!(skill = name, "Self-review cancelled at round {}", round);
-                            break;
-                        }
-                        let checklist = match name {
-                            "draft-design" | "update-design" => "\
-                             - Does the design actually solve the stated problem?\n\
-                             - Are there missing components or interactions?\n\
-                             - Are edge cases and error scenarios addressed?\n\
-                             - Is the architecture over-engineered or under-engineered?\n\
-                             - Are interfaces clear and well-defined?\n\
-                             - Does it conflict with existing architecture?",
-                            "draft-requirements" => "\
-                             - Are requirements specific and testable (not vague)?\n\
-                             - Are there missing requirements or unstated assumptions?\n\
-                             - Are acceptance criteria measurable?\n\
-                             - Do requirements conflict with each other?\n\
-                             - Are non-functional requirements covered (perf, security)?",
-                            _ => "\
-                             - Logic errors and incorrect assumptions\n\
-                             - Missing edge cases and error handling\n\
-                             - Type mismatches and off-by-one errors\n\
-                             - Unused imports or variables\n\
-                             - Inconsistencies with the rest of the codebase",
-                        };
-                        let review_prompt = format!(
-                            "## SELF-REVIEW ROUND {}/{}\n\n\
-                             Read back ALL files you created or modified in the previous step. \
-                             Carefully check for:\n{}\n\n\
-                             If you find issues, fix them using the available tools.\n\
-                             If everything looks correct after thorough review, respond with exactly: REVIEW_PASS",
-                            round, max_reviews, checklist
-                        );
-
-                        tracing::info!("Implement self-review round {}/{}", round, max_reviews);
-                        let review_result = gid_client.run_skill(
-                            &review_prompt,
-                            tools.clone(),
-                            model,
-                            &self.project_root,
-                            25,
-                        ).await;
-
-                        match review_result {
-                            Ok(review) => {
-                                total_tokens += review.tokens_used;
-                                let output = review.output.to_lowercase();
-                                if output.contains("review_pass") {
-                                    tracing::info!(
-                                        "Self-review passed at round {}/{} ({} tokens used)",
-                                        round, max_reviews, review.tokens_used
-                                    );
-                                    break;
-                                }
-                                tracing::info!(
-                                    "Self-review round {} found issues — {} tool calls, {} tokens",
-                                    round, review.tool_calls_made, review.tokens_used
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!("Self-review round {} failed: {} — continuing", round, e);
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                Ok((RitualEvent::SkillCompleted {
-                    phase: name.to_string(),
-                    artifacts: skill_result.artifacts_created.iter().map(|p| p.display().to_string()).collect(),
-                }, total_tokens))
-            }
-            Err(e) => {
-                tracing::error!("Skill '{}' failed: {}", name, e);
-                Ok((RitualEvent::SkillFailed {
-                    phase: name.to_string(),
-                    error: format!("{}", e),
-                reason: None,
-                }, 0))
-            }
-        }
+        Err(anyhow::anyhow!(
+            "ISS-052: RitualRunner::run_skill is a stub after T13a — caller must migrate              to gid_core::ritual::run_ritual (see T13b)"
+        ))
     }
 
     /// Resume a ritual from a specific phase, creating a new ritual with prerequisites check.
@@ -1676,209 +1313,55 @@ impl RitualRunner {
     /// Results are collected: all succeed → SkillCompleted, any fail → SkillFailed.
     async fn run_harness(
         &self,
-        tasks: &[String],
-        cancel_token: &tokio_util::sync::CancellationToken,
+        _tasks: &[String],
+        _cancel_token: &tokio_util::sync::CancellationToken,
     ) -> Result<(RitualEvent, u64)> {
-        tracing::info!(task_count = tasks.len(), "Running harness ({} sequential tasks)", tasks.len());
-
-        if tasks.is_empty() {
-            return Ok((RitualEvent::SkillCompleted {
-                phase: "implement".into(),
-                artifacts: vec![],
-            }, 0));
-        }
-
-        // For single task, just run directly
-        if tasks.len() == 1 {
-            return self.run_skill("implement", &tasks[0], cancel_token).await;
-        }
-
-        // Run tasks sequentially — avoids rate limit contention, file conflicts,
-        // and duplicate system prompt overhead from parallel sessions.
-        let mut total_tokens = 0u64;
-        let mut all_artifacts = Vec::new();
-        let mut failures = Vec::new();
-
-        for (i, task) in tasks.iter().enumerate() {
-            if cancel_token.is_cancelled() {
-                tracing::info!("Harness cancelled before task {}/{}", i + 1, tasks.len());
-                return Ok((RitualEvent::UserCancel, total_tokens));
-            }
-
-            let task_ctx = format!(
-                "Task {}/{}: {}\n\nIMPORTANT: Only implement THIS specific task. \
-                 Other tasks will be handled after this one completes.",
-                i + 1, tasks.len(), task
-            );
-            tracing::info!(task_idx = i, "Starting harness task {}/{}", i + 1, tasks.len());
-
-            match self.run_skill("implement", &task_ctx, cancel_token).await {
-                Ok((event, tokens)) => {
-                    tracing::info!(task_idx = i, tokens = tokens, "Harness task {}/{} completed", i + 1, tasks.len());
-                    total_tokens += tokens;
-                    if let RitualEvent::SkillCompleted { artifacts, .. } = event {
-                        all_artifacts.extend(artifacts);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(task_idx = i, error = %e, "Harness task {}/{} failed", i + 1, tasks.len());
-                    failures.push(format!("Task {}: {}", i + 1, e));
-                }
-            }
-        }
-
-        if failures.is_empty() {
-            tracing::info!(
-                total_tokens = total_tokens,
-                artifacts = all_artifacts.len(),
-                "All {} harness tasks completed successfully", tasks.len()
-            );
-            Ok((RitualEvent::SkillCompleted {
-                phase: "implement".into(),
-                artifacts: all_artifacts,
-            }, total_tokens))
-        } else {
-            let error_msg = format!(
-                "{}/{} tasks failed:\n{}",
-                failures.len(), tasks.len(),
-                failures.join("\n")
-            );
-            tracing::warn!("{}", error_msg);
-            Ok((RitualEvent::SkillFailed {
-                phase: "implement".into(),
-                error: error_msg,
-                reason: None,
-            }, total_tokens))
-        }
+        // ISS-052 T13a: dispatcher migrated to gid_core::ritual::run_ritual via T12.
+        // Body stubbed to a graceful Err to catch any legacy call site that escaped
+        // T13b's migration sweep. Production must not reach this branch — if it does,
+        // it means a /ritual subcommand handler in telegram.rs still calls the old
+        // path. Fix the caller, do not remove this guard.
+        tracing::error!(
+            target: "ritual_runner",
+            fn_name = "run_harness",
+            "ISS-052: legacy RitualRunner::run_harness reached after T12/T13a migration —              this should be unreachable. The caller must be migrated to run_ritual              (T13b) or to a thin event-recording shim. Returning Err."
+        );
+        Err(anyhow::anyhow!(
+            "ISS-052: RitualRunner::run_harness is a stub after T13a — caller must migrate              to gid_core::ritual::run_ritual (see T13b)"
+        ))
     }
 
-    async fn run_shell(&self, command: &str) -> Result<RitualEvent> {
-        // Re-read verify_command from .gid/config.yml at execution time,
-        // so users can update the config without restarting the ritual.
-        let command = {
-            let config = gid_core::ritual::load_gating_config(&self.project_root);
-            if let Some(ref fresh_cmd) = config.verify_command {
-                tracing::info!("Using verify_command from .gid/config.yml: {}", fresh_cmd);
-                fresh_cmd.clone()
-            } else {
-                command.to_string()
-            }
-        };
-        let work_dir = &self.project_root;
-        tracing::info!("Running shell command in {}: {}", work_dir.display(), command);
-
-        // Run verification steps sequentially with labeled output.
-        // Each step is separated so the LLM knows exactly which stage failed.
-        let steps = parse_verify_steps(&command);
-        let mut all_stdout = String::new();
-        let mut all_stderr = String::new();
-        let mut final_exit_code = 0i32;
-
-        for (i, step) in steps.iter().enumerate() {
-            let label = &step.label;
-            tracing::info!("Verify step {}/{}: [{}] {}", i + 1, steps.len(), label, step.command);
-
-            let output = tokio::time::timeout(
-                std::time::Duration::from_secs(300),
-                tokio::process::Command::new("bash")
-                    .arg("-lc")
-                    .arg(&step.command)
-                    .current_dir(&work_dir)
-                    .output()
-            ).await
-                .map_err(|_| anyhow::anyhow!("Verify step '{}' timed out after 5 minutes", label))?
-                ?;
-
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let exit_code = output.status.code().unwrap_or(-1);
-
-            all_stdout.push_str(&format!("=== {} (exit {}) ===\n{}\n", label, exit_code, stdout));
-            if !stderr.is_empty() {
-                all_stderr.push_str(&format!("=== {} STDERR ===\n{}\n", label, stderr));
-            }
-
-            if !output.status.success() {
-                // Stop at first failure — report which step failed
-                final_exit_code = exit_code;
-                all_stderr.insert_str(0, &format!("FAILED at step: {}\n\n", label));
-                tracing::warn!("Verify failed at step '{}' (exit {})", label, exit_code);
-                break;
-            }
-            tracing::info!("Verify step '{}' passed", label);
-        }
-
-        if final_exit_code == 0 {
-            Ok(RitualEvent::ShellCompleted {
-                stdout: truncate(&all_stdout, 2000),
-                exit_code: 0,
-            })
-        } else {
-            Ok(RitualEvent::ShellFailed {
-                stderr: truncate(&format!("{}\n{}", all_stderr, all_stdout), 2000),
-                exit_code: final_exit_code,
-            })
-        }
+    async fn run_shell(&self, _command: &str) -> Result<RitualEvent> {
+        // ISS-052 T13a: dispatcher migrated to gid_core::ritual::run_ritual via T12.
+        // Body stubbed to a graceful Err to catch any legacy call site that escaped
+        // T13b's migration sweep. Production must not reach this branch — if it does,
+        // it means a /ritual subcommand handler in telegram.rs still calls the old
+        // path. Fix the caller, do not remove this guard.
+        tracing::error!(
+            target: "ritual_runner",
+            fn_name = "run_shell",
+            "ISS-052: legacy RitualRunner::run_shell reached after T12/T13a migration —              this should be unreachable. The caller must be migrated to run_ritual              (T13b) or to a thin event-recording shim. Returning Err."
+        );
+        Err(anyhow::anyhow!(
+            "ISS-052: RitualRunner::run_shell is a stub after T13a — caller must migrate              to gid_core::ritual::run_ritual (see T13b)"
+        ))
     }
 
     /// Run planning phase — LLM decides SingleLlm vs MultiAgent strategy.
     async fn run_planning(&self) -> Result<(RitualEvent, u64)> {
-        use crate::ritual_adapter::RitualLlmAdapter;
-        use gid_core::ritual::llm::LlmClient as GidLlmClient;
-
-        let adapter = RitualLlmAdapter::new(self.llm_client.clone());
-        let gid_client: Arc<dyn GidLlmClient> = adapter.into_arc();
-
-        // Read DESIGN.md if available for planning context
-        let design_content = match tokio::fs::read_to_string(
-            self.project_root.join("DESIGN.md")
-        ).await {
-            Ok(content) => content,
-            Err(_) => {
-                tokio::fs::read_to_string(self.project_root.join(".gid/DESIGN.md"))
-                    .await
-                    .unwrap_or_default()
-            }
-        };
-
-        let planning_prompt = format!(
-            "# Implementation Planning\n\n\
-             Analyze the following design and decide on an implementation strategy.\n\n\
-             ## Design\n{}\n\n\
-             ## Instructions\n\
-             Based on the design, decide:\n\
-             1. **SingleLlm**: One agent implements everything sequentially (for small/medium tasks)\n\
-             2. **MultiAgent**: Split into parallel tasks (for large tasks with independent components)\n\n\
-             Respond with ONLY a JSON object:\n\
-             - For single: `{{\"strategy\": \"single\"}}`\n\
-             - For multi: `{{\"strategy\": \"multi\", \"tasks\": [\"task1\", \"task2\", ...]}}`",
-            truncate(&design_content, 15000)
+        // ISS-052 T13a: dispatcher migrated to gid_core::ritual::run_ritual via T12.
+        // Body stubbed to a graceful Err to catch any legacy call site that escaped
+        // T13b's migration sweep. Production must not reach this branch — if it does,
+        // it means a /ritual subcommand handler in telegram.rs still calls the old
+        // path. Fix the caller, do not remove this guard.
+        tracing::error!(
+            target: "ritual_runner",
+            fn_name = "run_planning",
+            "ISS-052: legacy RitualRunner::run_planning reached after T12/T13a migration —              this should be unreachable. The caller must be migrated to run_ritual              (T13b) or to a thin event-recording shim. Returning Err."
         );
-
-        // No tools needed for planning — DESIGN.md content is already in the prompt
-        let tools = vec![];
-
-        let result = gid_client.run_skill(
-            &planning_prompt,
-            tools,
-            "sonnet",
-            &self.project_root,
-            25,
-        ).await;
-
-        match result {
-            Ok(skill_result) => {
-                let tokens = skill_result.tokens_used;
-                // Try to parse the LLM output as a strategy decision
-                let strategy = parse_strategy(&skill_result.output);
-                tracing::info!("Planning decided strategy: {:?}", strategy);
-                Ok((RitualEvent::PlanDecided(strategy), tokens))
-            }
-            Err(e) => {
-                tracing::warn!("Planning failed, defaulting to SingleLlm: {}", e);
-                Ok((RitualEvent::PlanDecided(ImplementStrategy::SingleLlm), 0))
-            }
-        }
+        Err(anyhow::anyhow!(
+            "ISS-052: RitualRunner::run_planning is a stub after T13a — caller must migrate              to gid_core::ritual::run_ritual (see T13b)"
+        ))
     }
 
     /// Update graph node matching the task description — mark as done.

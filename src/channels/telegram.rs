@@ -1490,7 +1490,6 @@ Choose a model:", current),
         let bot = self.clone();
         let notify_fn = self.make_notify_fn(chat_id);
         let cancel_registry = self.ritual_cancel_registry.clone();
-        let event_registry = self.ritual_event_registry.clone();
         tokio::spawn(async move {
             let ritual_llm = match crate::llm::create_client(&bot.runner.config().llm) {
                 Ok(c) => Arc::new(tokio::sync::RwLock::new(c)),
@@ -1499,27 +1498,73 @@ Choose a model:", current),
                     return;
                 }
             };
-            let runner = crate::ritual_runner::RitualRunner::with_registries(
+
+            // ── ISS-052 T12: migrate to gid_core::ritual::run_ritual ──
+            //
+            // Legacy `/ritual <task>` path — no `WorkUnit`, just a task string
+            // and a pre-resolved `project_root` (from the project selector or
+            // text-grep). Build initial state with `target_root` populated so
+            // `run_ritual`'s `hooks.resolve_workspace` short-circuits (the
+            // hook only resolves when `work_unit` is `Some`).
+            let mut initial = gid_core::ritual::state_machine::RitualState::new();
+            initial.task = task.clone();
+            initial.target_root = Some(project_root.to_string_lossy().into_owned());
+
+            // Cancel token: register it under the new ritual ID so
+            // `/ritual cancel` (which looks up tokens by ID) can flip it.
+            let cancel_token = tokio_util::sync::CancellationToken::new();
+            {
+                let mut reg = cancel_registry.lock().unwrap();
+                reg.insert(initial.id.clone(), cancel_token.clone());
+            }
+            let ritual_id_for_cleanup = initial.id.clone();
+
+            let rituals_dir = bot.runner.workspace_root().join(".gid/rituals");
+            let hooks: Arc<dyn gid_core::ritual::RitualHooks> =
+                Arc::new(crate::ritual_hooks::RustclawHooks::new(
+                    notify_fn,
+                    rituals_dir,
+                    cancel_token,
+                ));
+
+            let config = gid_core::ritual::V2ExecutorConfig {
                 project_root,
-                ritual_llm,
-                notify_fn,
-                cancel_registry,
-                event_registry,
-            ).with_agent_runner(bot.runner.clone());
-            match runner.start(task).await {
-                Ok(state) => {
-                    if let Err(e) = runner.save_state(&state) {
-                        tracing::error!("Failed to save final ritual state: {}", e);
-                    }
-                    tracing::info!("Ritual finished in {} phase", state.phase.display_name());
-                }
-                Err(e) => {
-                    let _ = bot.send_message(
-                        chat_id,
-                        &format!("❌ Ritual failed: {}", e),
-                        None,
-                    ).await;
-                }
+                llm_client: Some(crate::ritual_adapter::RitualLlmAdapter::new(ritual_llm).into_arc()),
+                notify: None,
+                hooks: None,
+                skill_model: "opus".to_string(),
+                planning_model: "sonnet".to_string(),
+            };
+
+            let outcome = gid_core::ritual::run_ritual(initial, config, hooks).await;
+
+            // Drop the cancel token from the registry now that the ritual
+            // is finished — prevents a stale entry from lingering forever.
+            {
+                let mut reg = cancel_registry.lock().unwrap();
+                reg.remove(&ritual_id_for_cleanup);
+            }
+
+            tracing::info!(
+                ritual_id = %outcome.state.id,
+                phase = %outcome.state.phase.display_name(),
+                status = ?outcome.status,
+                "Ritual finished"
+            );
+
+            // Surface workspace-resolution failures to the user; everything
+            // else is already reported via notify hooks during the run.
+            if matches!(
+                outcome.status,
+                gid_core::ritual::RitualOutcomeStatus::WorkspaceFailed
+                    | gid_core::ritual::RitualOutcomeStatus::IterationLimitExceeded
+            ) {
+                let err = outcome.state.error_context.as_deref().unwrap_or("unknown");
+                let _ = bot.send_message(
+                    chat_id,
+                    &format!("❌ Ritual failed: {}", err),
+                    None,
+                ).await;
             }
         });
     }
